@@ -1,0 +1,191 @@
+enum DetectionMechanism {
+  """
+  Ignition-based detection: Segments are identified by isIgnitionOn state transitions.
+  Most reliable for vehicles with proper ignition signal support.
+  """
+  ignitionDetection
+  
+  """
+  Frequency analysis: Segments are detected by analyzing signal update patterns.
+  Uses pre-computed materialized view for optimal performance.
+  Ideal for real-time APIs and bulk queries.
+  """
+  frequencyAnalysis
+  
+  """
+  Change point detection: Uses CUSUM algorithm to detect statistical regime changes.
+  Monitors cumulative deviation in signal frequency via materialized view.
+  Excellent noise resistance with 100% accuracy match to ignition baseline.
+  Best alternative when ignition signal is unavailable - same accuracy, same speed as frequency analysis.
+  """
+  changePointDetection
+
+  """
+  Idling: Segments are contiguous periods where engine RPM remains in idle range.
+  """
+  idling
+
+  """
+  Refuel: Detects where fuel level rises significantly. 
+  """
+  refuel
+
+  """
+  Recharge: Hybrid detection. Uses charging signals and state of charge for detection.
+  """
+  recharge
+}
+
+extend type Query {
+  """
+  Returns vehicle usage segments detected using the specified mechanism.
+  Maximum date range: 31 days.
+  
+  Detection mechanisms:
+  - ignitionDetection: Uses 'isIgnitionOn' signal with configurable debouncing
+  - frequencyAnalysis: Analyzes signal update frequency to detect activity periods
+  - changePointDetection: CUSUM-based regime change detection
+  - idling: Idling segments (engine rpm idle)
+  - refuel: Refueling segments (fuel level increased)
+  - recharge: Charging segments (battery SoC increased)
+  
+  Segment IDs are stable and consistent across queries as long as the segment start
+  is captured in the underlying data source.
+  
+  Each segment includes summary: signals, start/end location, and (when requested) eventCounts.
+  A default set of signal requests is always applied (e.g. speed, odometer; for refuel/recharge also the level signal at start and end).
+  When signalRequests is provided, those requests are added on top of the default set; duplicates (same name and agg) are omitted.
+  """
+  segments(
+    did: String!
+    from: Time!
+    to: Time!
+    mechanism: DetectionMechanism!
+    config: SegmentConfig
+    signalRequests: [SegmentSignalRequest!]
+    eventRequests: [SegmentEventRequest!]
+    """
+    Maximum number of segments to return. Default 100, max 200.
+    """
+    limit: Int = 100
+    """
+    Cursor for pagination: return only segments with startTime > after (exclusive).
+    Pass the startTime of the last segment from the previous page for the next page.
+    """
+    after: Time
+  ): [Segment!]! @requiresVehicleToken @requiresAllOfPrivileges(privileges: [VEHICLE_ALL_TIME_LOCATION, VEHICLE_NON_LOCATION_DATA])
+
+  """
+  Returns one record per calendar day in the date range.
+  Mechanism must be ignitionDetection, frequencyAnalysis, or changePointDetection (idling, refuel, and recharge not allowed).
+  Maximum date range: 31 days.
+  """
+  dailyActivity(
+    did: String!
+    from: Time!
+    to: Time!
+    mechanism: DetectionMechanism!
+    config: SegmentConfig
+    signalRequests: [SegmentSignalRequest!]
+    eventRequests: [SegmentEventRequest!]
+    timezone: String
+  ): [DailyActivity!]! @requiresVehicleToken @requiresAllOfPrivileges(privileges: [VEHICLE_ALL_TIME_LOCATION, VEHICLE_NON_LOCATION_DATA])
+}
+
+input SegmentSignalRequest {
+  name: String!
+  agg: FloatAggregation!
+}
+
+input SegmentEventRequest {
+  name: String!
+}
+
+type DailyActivity {
+  """Start of day (timestamp = day start, value = location). Same shape as Segment.start. Null if not available."""
+  start: SignalLocation
+  """End of day (timestamp = day end, location). Same shape as Segment.end. Null if not available."""
+  end: SignalLocation
+  """Number of activity segments that started or fell within that day."""
+  segmentCount: Int!
+  """Sum of segment durations (total active time that day) in seconds."""
+  duration: Int!
+  """Per-day signal aggregates (same shape as segment signals)."""
+  signals: [SignalAggregationValue!]!
+  """Per-day event counts."""
+  eventCounts: [EventCount!]!
+}
+
+input SegmentConfig {
+  """
+  Maximum gap (seconds) between data points before a segment is split.
+  For ignitionDetection: filters noise from brief ignition OFF events.
+  For frequencyAnalysis: maximum gap between active windows to merge.
+  Default: 300 (5 minutes), Min: 60, Max: 3600
+  """
+  maxGapSeconds: Int = 300
+  
+  """
+  Minimum segment duration (seconds) to include in results.
+  Filters very short segments (testing, engine cycling).
+  Default: 240 (4 minutes), Min: 60, Max: 3600
+  """
+  minSegmentDurationSeconds: Int = 240
+  
+  """
+  [frequencyAnalysis] Minimum signal count per window for activity detection.
+  [idling] Minimum samples per window to consider it idle (same semantics).
+  Higher values = more conservative. Lower values = more sensitive.
+  Default: 10, Min: 1, Max: 3600
+  """
+  signalCountThreshold: Int = 10
+
+  """
+  [idling only] Upper bound for idle RPM. Windows with max(RPM) <= this are considered idle.
+  Default: 1000, Min: 300, Max: 3000
+  """
+  maxIdleRpm: Int = 1000
+
+  """
+  [refuel and recharge only] Minimum percent increase within a window to consider it a level-increase window.
+  """
+  minIncreasePercent: Int = 15
+}
+
+type Segment {
+  """
+  Segment start (timestamp and location). Uses SignalLocation; always present.
+  """
+  start: SignalLocation!
+  
+  """
+  Segment end (timestamp and location). Uses SignalLocation; omitted when isOngoing is true.
+  """
+  end: SignalLocation
+  
+  """
+  Duration in seconds. If ongoing: from start to query 'to'. If complete: from start to end.
+  """
+  duration: Int!
+  
+  """
+  True if segment extends beyond query time range (last activity is ongoing).
+  When true, end is not included in the response.
+  """
+  isOngoing: Boolean!
+  
+  """
+  True if segment started before query time range.
+  """
+  startedBeforeRange: Boolean!
+  
+  """
+  Per-segment signal aggregates. Same shape as signals elsewhere (name, agg, value).
+  """
+  signals: [SignalAggregationValue!]
+  """
+  Per-segment event counts.
+  """
+  eventCounts: [EventCount!]
+}
+

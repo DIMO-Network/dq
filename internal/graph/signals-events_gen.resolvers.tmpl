@@ -1,0 +1,41 @@
+// Code generated  with `make gql-model` DO NOT EDIT.
+package graph
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/DIMO-Network/dq/internal/graph/model"
+)
+
+{{ range .Signals }}
+// {{ GQLGenResolverName .JSONName }} is the resolver for the {{ .JSONName }}
+{{- if eq .GQLType "Float" }}
+func (r *signalAggregationsResolver) {{ GQLGenResolverName .JSONName }}(ctx context.Context, obj *model.SignalAggregations, agg model.FloatAggregation) (*float64, error) {
+	fieldCtx := graphql.GetFieldContext(ctx)
+	vn, ok := obj.ValueNumbers[fieldCtx.Field.Alias]
+	if !ok {
+		return nil, nil
+	}
+	return &vn, nil
+}
+{{ else if eq .GQLType "Location" }}
+func (r *signalAggregationsResolver) {{ GQLGenResolverName .JSONName }}(ctx context.Context, obj *model.SignalAggregations, agg model.LocationAggregation) (*model.Location, error) {
+	fieldCtx := graphql.GetFieldContext(ctx)
+	vl, ok := obj.ValueLocations[fieldCtx.Field.Alias]
+	if !ok {
+		return nil, nil
+	}
+	return &model.Location{Latitude: vl.Latitude, Longitude: vl.Longitude, Hdop: vl.HDOP}, nil
+}
+{{ else }}
+func (r *signalAggregationsResolver) {{ GQLGenResolverName .JSONName }}(ctx context.Context, obj *model.SignalAggregations, agg model.StringAggregation) (*string, error) {
+	fieldCtx := graphql.GetFieldContext(ctx)
+	vs, ok := obj.ValueStrings[fieldCtx.Field.Alias]
+	if !ok {
+		return nil, nil
+	}
+	return &vs, nil
+}
+{{ end }}
+{{ end }}

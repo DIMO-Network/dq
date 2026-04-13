@@ -1,0 +1,62 @@
+# Where are all the schema files located? globs are supported eg  src/**/*.graphqls
+schema:
+  - schema/*.graphqls
+
+# Where should the generated server code go?
+exec:
+  filename: internal/graph/generated.go
+  package: graph
+
+# Where should any generated models go?
+model:
+  filename: internal/graph/model/models_gen.go
+  package: model
+
+# Where should the resolver implementations go?
+resolver:
+  layout: follow-schema
+  dir: internal/graph
+  package: graph
+  filename_template: "{name}.resolvers.go"
+
+omit_resolver_fields: true
+
+models:
+  SignalAggregations:
+    model:
+      - github.com/DIMO-Network/dq/internal/graph/model.SignalAggregations
+  Address:
+    model:
+      - github.com/DIMO-Network/dq/internal/graph/model.Address
+  Uint64:
+    model:
+      - github.com/99designs/gqlgen/graphql.Uint64
+  Privilege:
+    model: github.com/99designs/gqlgen/graphql.String
+    enum_values:
+      VEHICLE_NON_LOCATION_DATA:
+        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetNonLocationHistory
+      VEHICLE_COMMANDS:
+        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionExecuteCommands
+      VEHICLE_CURRENT_LOCATION:
+        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetCurrentLocation
+      VEHICLE_ALL_TIME_LOCATION:
+        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetLocationHistory
+      VEHICLE_VIN_CREDENTIAL:
+        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetVINCredential
+      VEHICLE_APPROXIMATE_LOCATION:
+        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetApproximateLocation
+      VEHICLE_RAW_DATA:
+        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetRawData
+  Time:
+    model:
+      - github.com/99designs/gqlgen/graphql.Time
+  JSON:
+    model:
+      - github.com/DIMO-Network/dq/internal/graph.RawJSON
+  CloudEvent:
+    model:
+      - github.com/DIMO-Network/dq/internal/graph.CloudEventWrapper
+  CloudEventHeader:
+    model:
+      - github.com/DIMO-Network/cloudevent.CloudEventHeader

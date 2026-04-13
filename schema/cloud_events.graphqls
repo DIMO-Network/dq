@@ -1,0 +1,83 @@
+"""
+Arbitrary JSON value; serialized as raw JSON (object/array), not an escaped string.
+"""
+scalar JSON
+
+"""
+Full CloudEvent: selectable header, data (JSON), and optional data_base64.
+"""
+type CloudEvent {
+  """CloudEvents header fields. Request only the fields you need."""
+  header: CloudEventHeader!
+  """JSON payload. Omitted if not requested."""
+  data: JSON
+  """Base64-encoded payload when present. Omitted if not requested."""
+  dataBase64: String
+  """Presigned S3 URL for large binary payloads. Populated instead of data/dataBase64 for large files."""
+  dataUrl: String
+}
+
+"""
+Summary of a single cloud event type for a subject.
+"""
+type CloudEventTypeSummary {
+  """Cloud event type string (e.g. "dimo.status")."""
+  type: String!
+  """Number of cloud events of this type."""
+  count: Int!
+  """Earliest event timestamp."""
+  firstSeen: Time!
+  """Latest event timestamp."""
+  lastSeen: Time!
+}
+
+"""
+CloudEvents header fields per the CloudEvents v1.0 spec.
+"""
+type CloudEventHeader {
+  specversion: String!
+  type: String!
+  source: String!
+  subject: String!
+  id: String!
+  time: Time!
+  datacontenttype: String
+  dataschema: String
+  dataversion: String
+  producer: String!
+  signature: String
+  raweventid: String
+  tags: [String!]!
+}
+
+"""
+Filter for cloud event queries.
+"""
+input CloudEventFilter {
+  id: String
+  type: String
+  """List of event types to match (OR semantics). Combined with `type` if both are set."""
+  types: [String!]
+  dataversion: String
+  source: String
+  producer: String
+  before: Time
+  after: Time
+}
+
+extend type Query {
+  """
+  Latest full cloud event matching the given DID and optional filter.
+  """
+  latestCloudEvent(did: String!, filter: CloudEventFilter): CloudEvent!
+
+  """
+  List full cloud events matching the given DID and optional filter.
+  """
+  cloudEvents(did: String!, limit: Int = 10, filter: CloudEventFilter): [CloudEvent!]!
+
+  """
+  List cloud event types available for a subject, with counts and time ranges.
+  """
+  availableCloudEventTypes(did: String!, filter: CloudEventFilter): [CloudEventTypeSummary!]!
+}

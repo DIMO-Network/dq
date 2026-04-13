@@ -1,0 +1,53 @@
+# Code generated  with `make gql-model` DO NOT EDIT.
+extend type SignalAggregations {
+  {{- range .Signals }}
+  """
+  {{ .Desc }}
+  {{- if or .Unit .Min .Max }}
+  {{ if .Unit }}Unit: '{{ .Unit }}'{{ end }}{{ if .Min }} Min: '{{ .Min }}'{{ end }}{{ if .Max }} Max: '{{ .Max }}'{{ end }}
+  {{- end }}
+  Required Privileges: {{ .Privileges }}
+  """
+  {{ .JSONName }}(
+  {{- if eq .GQLType "Float" }}
+    agg: FloatAggregation!,
+    filter: SignalFloatFilter
+  ):  Float
+  {{- else if eq .GQLType "Location" }}
+    agg: LocationAggregation!,
+    filter: SignalLocationFilter
+  ):  Location
+  {{- else }}
+    agg: StringAggregation!
+  ):  String
+  {{- end }} @requiresAllOfPrivileges(privileges: {{ .Privileges }}) @goField(name: "{{ .GOName }}", forceResolver: true) @isSignal @hasAggregation
+  {{ end }}
+}
+
+extend type SignalCollection {
+  {{- range .Signals }}
+  """
+  {{ .Desc }}
+  {{- if or .Unit .Min .Max }}
+  {{ if .Unit }}Unit: '{{ .Unit }}'{{ end }}{{ if .Min }} Min: '{{ .Min }}'{{ end }}{{ if .Max }} Max: '{{ .Max }}'{{ end }}
+  {{- end }}
+  Required Privileges: {{ .Privileges }}
+  """
+  
+  {{- if eq .GQLType "Float" }}
+  {{ .JSONName }}: SignalFloat
+  {{- else if eq .GQLType "Location" }}
+  {{ .JSONName }}: SignalLocation
+  {{- else }}
+  {{ .JSONName }}: SignalString
+  {{- end }} @requiresAllOfPrivileges(privileges: {{ .Privileges }}) @goField(name: "{{ .GOName }}") @isSignal
+  {{ end }}
+}
+
+extend input EventFilter {
+  """
+  tags is the tags of the event.
+  """
+  tags: StringArrayFilter
+}
+

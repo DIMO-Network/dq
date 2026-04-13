@@ -1,0 +1,404 @@
+// Package ch is used to interact with ClickHouse servers.
+package ch
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"time"
+
+	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/DIMO-Network/model-garage/pkg/vss"
+	"github.com/DIMO-Network/dq/internal/config"
+	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/aarondl/sqlboiler/v4/queries/qm"
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+const (
+	defaultMaxExecutionTime                    = 5
+	defaultTimeoutBeforeCheckingExecutionSpeed = 2
+	// TimeoutErrCode is the error code returned by ClickHouse when a query is interrupted due to exceeding the max_execution_time.
+	TimeoutErrCode = int32(159)
+)
+
+// Service is a ClickHouse service that interacts with the ClickHouse database.
+type Service struct {
+	conn              clickhouse.Conn
+	lastSeenBucketHrs int64
+}
+
+// NewService creates a new ClickHouse service.
+func NewService(settings config.Settings) (*Service, error) {
+	maxExecutionTime, err := getMaxExecutionTime(settings.MaxRequestDuration)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get max execution time: %w", err)
+	}
+	addr := fmt.Sprintf("%s:%d", settings.Clickhouse.Host, settings.Clickhouse.Port)
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{addr},
+		Auth: clickhouse.Auth{
+			Username: settings.Clickhouse.User,
+			Password: settings.Clickhouse.Password,
+			Database: settings.Clickhouse.Database,
+		},
+		TLS: &tls.Config{
+			RootCAs: settings.Clickhouse.RootCAs,
+		},
+		Settings: map[string]any{
+			// ClickHouse will interrupt a query if the projected execution time exceeds the specified max_execution_time.
+			// The estimated execution time is calculated after `timeout_before_checking_execution_speed`
+			// More info: https://clickhouse.com/docs/en/operations/settings/query-complexity#max-execution-time
+			"max_execution_time":                      maxExecutionTime,
+			"timeout_before_checking_execution_speed": defaultTimeoutBeforeCheckingExecutionSpeed,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open clickhouse connection: %w", err)
+	}
+	err = conn.Ping(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to ping clickhouse: %w", err)
+	}
+	return &Service{conn: conn, lastSeenBucketHrs: settings.DeviceLastSeenBinHrs}, nil
+}
+
+func getMaxExecutionTime(maxRequestDuration string) (int, error) {
+	if maxRequestDuration == "" {
+		return defaultMaxExecutionTime, nil
+	}
+	maxExecutionTime, err := time.ParseDuration(maxRequestDuration)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse max request duration: %w", err)
+	}
+	return int(maxExecutionTime.Seconds()), nil
+}
+
+// GetLatestSignals returns the latest signals based on the provided arguments from the ClickHouse database.
+func (s *Service) GetLatestSignals(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error) {
+	stmt, args := getLatestQuery(subject, latestArgs)
+	if latestArgs.IncludeLastSeen {
+		lastSeenStmt, lastSeenArgs := getLastSeenQuery(subject, &latestArgs.SignalArgs)
+		stmt, args = unionAll([]string{stmt, lastSeenStmt}, [][]any{args, lastSeenArgs})
+	}
+
+	signals, err := s.getSignals(ctx, stmt, args)
+	if err != nil {
+		return nil, err
+	}
+	return signals, nil
+}
+
+// GetAggregatedSignals returns a slice of aggregated signals based on the provided arguments from the ClickHouse database.
+// The signals are sorted by timestamp in ascending order.
+// The timestamp on each signal is for the start of the interval.
+func (s *Service) GetAggregatedSignals(ctx context.Context, subject string, aggArgs *model.AggregatedSignalArgs) ([]*AggSignal, error) {
+	if len(aggArgs.FloatArgs) == 0 && len(aggArgs.StringArgs) == 0 && len(aggArgs.LocationArgs) == 0 {
+		return []*AggSignal{}, nil
+	}
+
+	stmt, args, err := getAggQuery(subject, aggArgs)
+	if err != nil {
+		return nil, err
+	}
+
+	signals, err := s.getAggSignals(ctx, stmt, args)
+	if err != nil {
+		return nil, err
+	}
+
+	return signals, nil
+}
+
+// GetAggregatedSignalsForRanges returns aggregated signals for multiple time ranges (one per segment) in one query.
+// Only FloatArgs and LocationArgs are used; StringArgs and ApproxLocArgs are ignored.
+func (s *Service) GetAggregatedSignalsForRanges(ctx context.Context, subject string, ranges []TimeRange, globalFrom, globalTo time.Time, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs) ([]*AggSignalForRange, error) {
+	if len(ranges) == 0 {
+		return nil, nil
+	}
+	if len(floatArgs) == 0 && len(locationArgs) == 0 {
+		return []*AggSignalForRange{}, nil
+	}
+	stmt, args, err := getBatchAggQuery(subject, ranges, globalFrom, globalTo, floatArgs, locationArgs)
+	if err != nil {
+		return nil, err
+	}
+	timer := prometheus.NewTimer(GetAggregatedSignalsForRangesLatency)
+	rows, err := s.conn.Query(ctx, stmt, args...)
+	timer.ObserveDuration()
+	if err != nil {
+		return nil, fmt.Errorf("failed querying clickhouse for batch agg: %w", err)
+	}
+	var result []*AggSignalForRange
+	for rows.Next() {
+		var segIdx int16 // ClickHouse multiIf returns Int16 for segment indices
+		var row AggSignalForRange
+		if err := rows.Scan(&segIdx, &row.SignalType, &row.SignalIndex, &row.ValueNumber, &row.ValueString, &row.ValueLocation); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed scanning batch agg row: %w", err)
+		}
+		row.SegIndex = int(segIdx)
+		rowCopy := row
+		result = append(result, &rowCopy)
+	}
+	_ = rows.Close()
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("clickhouse batch agg row error: %w", rows.Err())
+	}
+	return result, nil
+}
+
+func (s *Service) getSignals(ctx context.Context, stmt string, args []any) ([]*vss.Signal, error) {
+	rows, err := s.conn.Query(ctx, stmt, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying clickhouse: %w", err)
+	}
+	signals := []*vss.Signal{}
+	for rows.Next() {
+		var signal vss.Signal
+		err := rows.Scan(&signal.Data.Name, &signal.Data.Timestamp, &signal.Data.ValueNumber, &signal.Data.ValueString, &signal.Data.ValueLocation)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed scanning clickhouse row: %w", err)
+		}
+		signals = append(signals, &signal)
+	}
+	_ = rows.Close()
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("clickhouse row error: %w", rows.Err())
+	}
+	return signals, nil
+}
+
+// AggSignalForRange is AggSignal with segment index (from GetAggregatedSignalsForRanges).
+type AggSignalForRange struct {
+	SegIndex      int
+	SignalType    FieldType
+	SignalIndex   uint16
+	ValueNumber   float64
+	ValueString   string
+	ValueLocation vss.Location
+}
+
+type AggSignal struct {
+	// SignalType describes the type of values in the aggregation:
+	// float, string, or location.
+	SignalType FieldType
+	// SignalIndex is an identifier for the aggregation within its
+	// SignalType. For all types this is simply an index into the
+	// corresponding argument array.
+	//
+	// We could get away with a single number, since we know how many
+	// arguments of each type there are, but it appears to us that this
+	// would make adding new types riskier.
+	SignalIndex uint16
+	// Timestamp is the timestamp for the bucket, the leftmost point.
+	Timestamp time.Time
+	// ValueNumber is the value for this row if it is of float or
+	// approximate location type.
+	ValueNumber float64
+	// ValueNumber is the value for this row if it is of float or
+	// approximate location type.
+	ValueString   string
+	ValueLocation vss.Location
+}
+
+func (s *Service) getAggSignals(ctx context.Context, stmt string, args []any) ([]*AggSignal, error) {
+	rows, err := s.conn.Query(ctx, stmt, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying clickhouse: %w", err)
+	}
+	signals := []*AggSignal{}
+	for rows.Next() {
+		var signal AggSignal
+		err := rows.Scan(&signal.SignalType, &signal.SignalIndex, &signal.Timestamp, &signal.ValueNumber, &signal.ValueString, &signal.ValueLocation)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed scanning clickhouse row: %w", err)
+		}
+		signals = append(signals, &signal)
+	}
+	_ = rows.Close()
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("clickhouse row error: %w", rows.Err())
+	}
+	return signals, nil
+}
+
+// GetAvailableSignals returns a slice of available signals from the ClickHouse database.
+// if no signals are available, a nil slice is returned.
+func (s *Service) GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
+	stmt, args := getDistinctQuery(subject, filter)
+	rows, err := s.conn.Query(ctx, stmt, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying clickhouse: %w", err)
+	}
+	var signals []string
+	for rows.Next() {
+		var signal string
+		err := rows.Scan(&signal)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed scanning clickhouse row: %w", err)
+		}
+		signals = append(signals, signal)
+	}
+
+	_ = rows.Close()
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("clickhouse row error: %w", rows.Err())
+	}
+	return signals, nil
+}
+
+func (s *Service) GetSignalSummaries(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
+	stmt, args := getSignalSummariesQuery(subject, filter)
+	rows, err := s.conn.Query(ctx, stmt, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying clickhouse: %w", err)
+	}
+	signalSummaries := []*model.SignalDataSummary{}
+	for rows.Next() {
+		var signalSummary model.SignalDataSummary
+		err := rows.Scan(&signalSummary.Name, &signalSummary.NumberOfSignals, &signalSummary.FirstSeen, &signalSummary.LastSeen)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed scanning clickhouse row: %w", err)
+		}
+		signalSummaries = append(signalSummaries, &signalSummary)
+	}
+	return signalSummaries, nil
+}
+
+// EventCount is the count of events by name in a time range.
+type EventCount struct {
+	Name  string
+	Count int
+}
+
+// EventCountForRange is event count by name for one segment index (from GetEventCountsForRanges).
+type EventCountForRange struct {
+	SegIndex int
+	Name     string
+	Count    int
+}
+
+// EventSummary is the per-event summary for a vehicle (all time): name, count, first/last seen.
+type EventSummary struct {
+	Name      string
+	Count     uint64
+	FirstSeen time.Time
+	LastSeen  time.Time
+}
+
+// GetEventSummaries returns per-event summaries (name, count, first/last seen) for a subject (vehicle), all time.
+func (s *Service) GetEventSummaries(ctx context.Context, subject string) ([]*EventSummary, error) {
+	stmt, args := getEventSummariesQuery(subject)
+	rows, err := s.conn.Query(ctx, stmt, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying clickhouse for event summaries: %w", err)
+	}
+	var result []*EventSummary
+	for rows.Next() {
+		var es EventSummary
+		if err := rows.Scan(&es.Name, &es.Count, &es.FirstSeen, &es.LastSeen); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed scanning event summary row: %w", err)
+		}
+		result = append(result, &es)
+	}
+	_ = rows.Close()
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("clickhouse event summary row error: %w", rows.Err())
+	}
+	return result, nil
+}
+
+func (s *Service) GetEvents(ctx context.Context, subject string, from, to time.Time, filter *model.EventFilter) ([]*vss.Event, error) {
+	mods := []qm.QueryMod{
+		qm.Select(vss.EventNameCol, vss.EventSourceCol, vss.EventTimestampCol, vss.EventDurationNsCol, vss.EventMetadataCol, vss.EventTagsCol),
+		qm.From(vss.EventTableName),
+		qm.Where(eventSubjectWhere, subject),
+		qm.Where(vss.EventTimestampCol + " >= " + dateTime64Micro(from)),
+		qm.Where(vss.EventTimestampCol + " < " + dateTime64Micro(to)),
+		qm.OrderBy(vss.EventTimestampCol + " DESC"),
+	}
+	mods = appendEventFilterMods(mods, filter)
+	stmt, args := newQuery(mods...)
+
+	rows, err := s.conn.Query(ctx, stmt, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying clickhouse for events: %w", err)
+	}
+	events := []*vss.Event{}
+	for rows.Next() {
+		var event vss.Event
+		err := rows.Scan(&event.Data.Name, &event.Source, &event.Data.Timestamp, &event.Data.DurationNs, &event.Data.Metadata, &event.Tags)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed scanning clickhouse event row: %w", err)
+		}
+		events = append(events, &event)
+	}
+	_ = rows.Close()
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("clickhouse event row error: %w", rows.Err())
+	}
+	return events, nil
+}
+
+// GetEventCounts returns event counts by name in the given time range.
+// If eventNames is nil or empty, all event names in the range are returned; otherwise only requested names (missing names get count 0 in the caller).
+func (s *Service) GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*EventCount, error) {
+	stmt, args := getEventCountsQuery(subject, from, to, eventNames)
+	rows, err := s.conn.Query(ctx, stmt, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying clickhouse for event counts: %w", err)
+	}
+	var result []*EventCount
+	for rows.Next() {
+		var name string
+		var count uint64 // ClickHouse count(*) is UInt64
+		if err := rows.Scan(&name, &count); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed scanning event count row: %w", err)
+		}
+		result = append(result, &EventCount{Name: name, Count: int(count)})
+	}
+	_ = rows.Close()
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("clickhouse event count row error: %w", rows.Err())
+	}
+	return result, nil
+}
+
+// GetEventCountsForRanges returns event counts by name per segment index for multiple time ranges in one query.
+// If eventNames is nil or empty, all event names are returned; otherwise only requested names (missing get count 0 at call site).
+func (s *Service) GetEventCountsForRanges(ctx context.Context, subject string, ranges []TimeRange, eventNames []string) ([]*EventCountForRange, error) {
+	if len(ranges) == 0 {
+		return nil, nil
+	}
+	stmt, args := getEventCountsForRangesQuery(subject, ranges, eventNames)
+	timer := prometheus.NewTimer(GetEventCountsForRangesLatency)
+	rows, err := s.conn.Query(ctx, stmt, args...)
+	timer.ObserveDuration()
+	if err != nil {
+		return nil, fmt.Errorf("failed querying clickhouse for event counts by range: %w", err)
+	}
+	var result []*EventCountForRange
+	for rows.Next() {
+		var segIdx int16 // ClickHouse multiIf returns Int16 for small segment indices
+		var name string
+		var count uint64
+		if err := rows.Scan(&segIdx, &name, &count); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("failed scanning event count by range row: %w", err)
+		}
+		result = append(result, &EventCountForRange{SegIndex: int(segIdx), Name: name, Count: int(count)})
+	}
+	_ = rows.Close()
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("clickhouse event count by range row error: %w", rows.Err())
+	}
+	return result, nil
+}

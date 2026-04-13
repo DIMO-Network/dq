@@ -1,0 +1,26 @@
+# Copy to settings.yaml and fill in values. settings.yaml is the primary config
+# (environment variables can override individual fields).
+PORT: 3000
+MON_PORT: 8888
+ENABLE_PPROF: false
+MAX_REQUEST_DURATION: 30s
+
+CLICKHOUSE_HOST: localhost
+CLICKHOUSE_TCP_PORT: 9000
+CLICKHOUSE_USER: admin
+CLICKHOUSE_PASSWORD: password
+CLICKHOUSE_DATABASE: dimo
+
+TOKEN_EXCHANGE_JWK_KEY_SET_URL: http://127.0.0.1:5556/dex/keys
+TOKEN_EXCHANGE_ISSUER_URL: http://127.0.0.1:5556/dex
+
+CLOUDEVENT_BUCKET: ""
+EPHEMERAL_BUCKET: ""
+PARQUET_BUCKET: ""
+S3_AWS_REGION: ""
+S3_AWS_ACCESS_KEY_ID: ""
+S3_AWS_SECRET_ACCESS_KEY: ""
+
+IDENTITY_API_URL: ""
+
+DEVICE_LAST_SEEN_BIN_HOURS: 3

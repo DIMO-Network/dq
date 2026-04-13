@@ -1,0 +1,1481 @@
+package ch
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/DIMO-Network/cloudevent"
+	chconfig "github.com/DIMO-Network/clickhouse-infra/pkg/connect/config"
+	"github.com/DIMO-Network/clickhouse-infra/pkg/container"
+	"github.com/DIMO-Network/model-garage/pkg/migrations"
+	"github.com/DIMO-Network/model-garage/pkg/vss"
+	"github.com/DIMO-Network/dq/internal/config"
+	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/stretchr/testify/suite"
+)
+
+const (
+	day        = time.Hour * 24
+	dataPoints = 10
+
+	testSubject1   = "did:erc721:137:0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF:1"
+	testSubject2   = "did:erc721:137:0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF:2"
+	testSubject100 = "did:erc721:137:0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF:100"
+)
+
+type CHServiceTestSuite struct {
+	suite.Suite
+	dataStartTime time.Time
+	chService     *Service
+	container     *container.Container
+}
+
+func TestCHService(t *testing.T) {
+	suite.Run(t, new(CHServiceTestSuite))
+}
+
+func (c *CHServiceTestSuite) SetupSuite() {
+	ctx := context.Background()
+	var err error
+	c.container, err = container.CreateClickHouseContainer(ctx, chconfig.Settings{})
+	c.Require().NoError(err, "Failed to create clickhouse container")
+
+	db, err := c.container.GetClickhouseAsDB()
+	c.Require().NoError(err, "Failed to get clickhouse connection")
+
+	cfg := c.container.Config()
+
+	err = migrations.RunGoose(ctx, []string{"up", "-v"}, db)
+	c.Require().NoError(err, "Failed to run migrations")
+
+	settings := config.Settings{
+		Clickhouse:           cfg,
+		MaxRequestDuration:   "1s",
+		DeviceLastSeenBinHrs: 3,
+	}
+	c.chService, err = NewService(settings)
+	c.Require().NoError(err, "Failed to create repository")
+	c.dataStartTime = time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
+	c.insertTestData()
+}
+
+func (c *CHServiceTestSuite) TearDownSuite() {
+	c.container.Terminate(context.Background())
+}
+
+func (c *CHServiceTestSuite) TestGetAggSignal() {
+	endTs := c.dataStartTime.Add(time.Second * time.Duration(30*dataPoints))
+	ctx := context.Background()
+	testCases := []struct {
+		name     string
+		aggArgs  model.AggregatedSignalArgs
+		expected []AggSignal
+	}{
+		{
+			name: "no aggs",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+			},
+			expected: []AggSignal{},
+		},
+		{
+			name: "average",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 4.5,
+				},
+			},
+		},
+		{
+			name: "max and min",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationMax,
+						Alias: vss.FieldSpeed,
+					},
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationMin,
+						Alias: vss.FieldSpeed,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 9,
+				},
+				{
+					SignalType:  FloatType,
+					SignalIndex: 1,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 0,
+				},
+			},
+		},
+		{
+			name: "max smartcar",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+					Filter: &model.SignalFilter{
+						Source: ref("did:ethr:137:0xcd445F4c6bDAD32b68a2939b912150Fe3C88803E"),
+					},
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationMax,
+						Alias: vss.FieldSpeed,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 8.0,
+				},
+			},
+		},
+		{
+			name: "unique",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				StringArgs: []model.StringSignalArgs{
+					{
+						Name:  vss.FieldPowertrainType,
+						Agg:   model.StringAggregationUnique,
+						Alias: vss.FieldPowertrainType,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  StringType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueString: "value10,value3,value2,value9,value7,value5,value4,value8,value1,value6",
+				},
+			},
+		},
+		{
+			name: "Top autopi",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+					Filter: &model.SignalFilter{
+						Source: ref("did:ethr:137:0x5e31bBc786D7bEd95216383787deA1ab0f1c1897"),
+					},
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     c.dataStartTime.Add(time.Hour),
+				Interval: day.Microseconds(),
+				StringArgs: []model.StringSignalArgs{
+					{
+						Name:  vss.FieldPowertrainType,
+						Agg:   model.StringAggregationTop,
+						Alias: vss.FieldPowertrainType,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  StringType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueString: "value2",
+				},
+			},
+		},
+		{
+			name: "first float",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationFirst,
+						Alias: vss.FieldSpeed,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 0,
+				},
+			},
+		},
+		{
+			name: "last float",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationLast,
+						Alias: vss.FieldSpeed,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: dataPoints - 1,
+				},
+			},
+		},
+		{
+			name: "lt filter",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							Lt: ref(float64(5)),
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 2,
+				},
+			},
+		},
+		{
+			name: "gt filter",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							Gt: ref(float64(5)),
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 7.5,
+				},
+			},
+		},
+		{
+			name: "gte filter",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							Gte: ref(float64(5)),
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 7,
+				},
+			},
+		},
+		{
+			name: "lte filter",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							Lte: ref(float64(7)),
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 3.5,
+				},
+			},
+		},
+		{
+			name: "filter for numeric values in set",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							In: []float64{3, 9},
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 6,
+				},
+			},
+		},
+		{
+			name: "float neq filter",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							Neq: ref(0.0),
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 5,
+				},
+			},
+		},
+		{
+			name: "float neq filter",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							Eq: ref(3.0),
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 3,
+				},
+			},
+		},
+		{
+			name: "float not in filter",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							NotIn: []float64{3, 5},
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 4.625,
+				},
+			},
+		},
+		{
+			name: "float filters and-ed",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							Gte: ref(3.0),
+							Neq: ref(6.0),
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 6.0,
+				},
+			},
+		},
+		{
+			name: "float filters or-ed",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationAvg,
+						Alias: vss.FieldSpeed,
+						Filter: &model.SignalFloatFilter{
+							Or: []*model.SignalFloatFilter{
+								{Lt: ref(2.0)},
+								{Gte: ref(8.0)},
+							},
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 4.5,
+				},
+			},
+		},
+		{
+			name: "first string",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				StringArgs: []model.StringSignalArgs{
+					{
+						Name:  vss.FieldPowertrainType,
+						Agg:   model.StringAggregationFirst,
+						Alias: vss.FieldPowertrainType,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  StringType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueString: "value1",
+				},
+			},
+		},
+		{
+			name: "last string",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				StringArgs: []model.StringSignalArgs{
+					{
+						Name:  vss.FieldPowertrainType,
+						Agg:   model.StringAggregationLast,
+						Alias: vss.FieldPowertrainType,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  StringType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueString: fmt.Sprintf("value%d", dataPoints),
+				},
+			},
+		},
+		{
+			name: "multiple",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				FloatArgs: []model.FloatSignalArgs{
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationMed,
+						Alias: "speed1",
+						Filter: &model.SignalFloatFilter{
+							Or: []*model.SignalFloatFilter{
+								{Lte: ref(1.0)},
+								{Gte: ref(9.0)},
+							},
+						},
+					},
+					{
+						Name:  vss.FieldSpeed,
+						Agg:   model.FloatAggregationLast,
+						Alias: "speed2",
+						Filter: &model.SignalFloatFilter{
+							Gt:  ref(1.0),
+							Lte: ref(6.0),
+						},
+					},
+				},
+				StringArgs: []model.StringSignalArgs{
+					{
+						Name:  vss.FieldPowertrainType,
+						Agg:   model.StringAggregationLast,
+						Alias: vss.FieldPowertrainType,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:  FloatType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 1,
+				},
+				{
+					SignalType:  FloatType,
+					SignalIndex: 1,
+					Timestamp:   c.dataStartTime,
+					ValueNumber: 6,
+				},
+				{
+					SignalType:  StringType,
+					SignalIndex: 0,
+					Timestamp:   c.dataStartTime,
+					ValueString: "value10",
+				},
+			},
+		},
+		{
+			name: "first location",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				LocationArgs: []model.LocationSignalArgs{
+					{
+						Name:  vss.FieldCurrentLocationCoordinates,
+						Agg:   model.LocationAggregationFirst,
+						Alias: vss.FieldCurrentLocationCoordinates,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:    LocType,
+					SignalIndex:   0,
+					Timestamp:     c.dataStartTime,
+					ValueLocation: vss.Location{Latitude: 3, Longitude: 5, HDOP: 7},
+				},
+			},
+		},
+		{
+			name: "last location",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				LocationArgs: []model.LocationSignalArgs{
+					{
+						Name:  vss.FieldCurrentLocationCoordinates,
+						Agg:   model.LocationAggregationLast,
+						Alias: vss.FieldCurrentLocationCoordinates,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:    LocType,
+					SignalIndex:   0,
+					Timestamp:     c.dataStartTime,
+					ValueLocation: vss.Location{Latitude: 30, Longitude: 50, HDOP: 70},
+				},
+			},
+		},
+		{
+			name: "average location",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				LocationArgs: []model.LocationSignalArgs{
+					{
+						Name:  vss.FieldCurrentLocationCoordinates,
+						Agg:   model.LocationAggregationAvg,
+						Alias: vss.FieldCurrentLocationCoordinates,
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:    LocType,
+					SignalIndex:   0,
+					Timestamp:     c.dataStartTime,
+					ValueLocation: vss.Location{Latitude: 16.5, Longitude: 27.5, HDOP: 38.5},
+				},
+			},
+		},
+		{
+			name: "first location in fence",
+			aggArgs: model.AggregatedSignalArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				FromTS:   c.dataStartTime,
+				ToTS:     endTs,
+				Interval: day.Microseconds(),
+				LocationArgs: []model.LocationSignalArgs{
+					{
+						Name:  vss.FieldCurrentLocationCoordinates,
+						Agg:   model.LocationAggregationFirst,
+						Alias: vss.FieldCurrentLocationCoordinates,
+						Filter: &model.SignalLocationFilter{
+							InPolygon: []*model.FilterLocation{
+								{Latitude: 5, Longitude: 15},
+								{Latitude: 10, Longitude: 10},
+								{Latitude: 15, Longitude: 20},
+								{Latitude: 5, Longitude: 25},
+							},
+						},
+					},
+				},
+			},
+			expected: []AggSignal{
+				{
+					SignalType:    LocType,
+					SignalIndex:   0,
+					Timestamp:     c.dataStartTime,
+					ValueLocation: vss.Location{Latitude: 9, Longitude: 15, HDOP: 21},
+				},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		c.Run(tc.name, func() {
+			result, err := c.chService.GetAggregatedSignals(ctx, testSubject1, &tc.aggArgs)
+			c.Require().NoError(err)
+
+			c.Require().Len(result, len(tc.expected))
+
+			slices.SortFunc(result, func(a, b *AggSignal) int {
+				return cmp.Or(cmp.Compare(a.SignalType, b.SignalType), cmp.Compare(a.SignalIndex, b.SignalIndex))
+			})
+
+			for i, sig := range result {
+				c.Require().Equal(tc.expected[i], *sig)
+			}
+		})
+	}
+}
+
+func (c *CHServiceTestSuite) TestGetLatestSignal() {
+	ctx := context.Background()
+	testCases := []struct {
+		name       string
+		latestArgs model.LatestSignalsArgs
+		expected   []vss.Signal
+	}{
+		{
+			name: "latest",
+			latestArgs: model.LatestSignalsArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				SignalNames: map[string]struct{}{
+					vss.FieldSpeed: {},
+				},
+			},
+			expected: []vss.Signal{
+				{
+					Data: vss.SignalData{
+						Name:        vss.FieldSpeed,
+						Timestamp:   c.dataStartTime.Add(time.Second * time.Duration(30*(dataPoints-1))),
+						ValueNumber: 9.0,
+					},
+				},
+			},
+		},
+		{
+			name: "latest smartcar",
+			latestArgs: model.LatestSignalsArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+					Filter: &model.SignalFilter{
+						Source: ref("did:ethr:137:0xcd445F4c6bDAD32b68a2939b912150Fe3C88803E"),
+					},
+				},
+				SignalNames: map[string]struct{}{
+					vss.FieldSpeed: {},
+				},
+			},
+			expected: []vss.Signal{
+				{
+					Data: vss.SignalData{
+						Name:        vss.FieldSpeed,
+						Timestamp:   c.dataStartTime.Add(time.Second * time.Duration(30*(dataPoints-2))),
+						ValueNumber: 8.0,
+					},
+				},
+			},
+		},
+		{
+			name: "lastSeen",
+			latestArgs: model.LatestSignalsArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				IncludeLastSeen: true,
+				SignalNames:     map[string]struct{}{},
+			},
+			expected: []vss.Signal{
+				{
+					Data: vss.SignalData{
+						Name:      model.LastSeenField,
+						Timestamp: c.dataStartTime.Add(time.Second * time.Duration(299)), // This is picking up the (0, 0, hdop) point.
+					},
+				},
+			},
+		},
+		{
+			name: "latest location",
+			latestArgs: model.LatestSignalsArgs{
+				SignalArgs: model.SignalArgs{
+					Subject: testSubject1,
+				},
+				SignalNames: map[string]struct{}{},
+				LocationSignalNames: map[string]struct{}{
+					vss.FieldCurrentLocationCoordinates: struct{}{},
+				},
+			},
+			expected: []vss.Signal{
+				{
+					Data: vss.SignalData{
+						Name:          vss.FieldCurrentLocationCoordinates,
+						Timestamp:     c.dataStartTime.Add(time.Second * time.Duration(30*(dataPoints-1))),
+						ValueLocation: vss.Location{Latitude: 30, Longitude: 50, HDOP: 70},
+					},
+				},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		c.Run(tc.name, func() {
+			result, err := c.chService.GetLatestSignals(ctx, testSubject1, &tc.latestArgs)
+			c.Require().NoError(err)
+			for i, sig := range result {
+				c.Require().Equal(tc.expected[i], *sig)
+			}
+		})
+	}
+}
+
+func (c *CHServiceTestSuite) TestGetAvailableSignals() {
+	ctx := context.Background()
+	c.Run("has signals", func() {
+		result, err := c.chService.GetAvailableSignals(ctx, testSubject1, nil)
+		c.Require().NoError(err)
+		c.Require().Len(result, 3)
+		c.Require().Equal([]string{vss.FieldCurrentLocationCoordinates, vss.FieldPowertrainType, vss.FieldSpeed}, result)
+	})
+
+	c.Run("no signals", func() {
+		result, err := c.chService.GetAvailableSignals(ctx, testSubject2, nil)
+		c.Require().NoError(err)
+		c.Require().Nil(result)
+	})
+
+	c.Run("filter signals", func() {
+		result, err := c.chService.GetAvailableSignals(ctx, testSubject1, &model.SignalFilter{Source: ref("did:ethr:137:0x0000000000000000000000000000000000000000")})
+		c.Require().NoError(err)
+		c.Require().Nil(result)
+	})
+}
+
+func (c *CHServiceTestSuite) TestOriginGrouping() {
+	ctx := context.Background()
+	conn, err := c.container.GetClickHouseAsConn()
+	c.Require().NoError(err, "Failed to get clickhouse connection")
+
+	// Set up test data for February 2024
+	startTime := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	endTime := time.Date(2024, 2, 28, 23, 59, 59, 0, time.UTC)
+
+	// Create test signals - one per day in February
+	var signals []vss.Signal
+	currentTime := startTime
+	for currentTime.Before(endTime) {
+		signal := vss.Signal{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				Source:  "test/origin",
+				Subject: testSubject100,
+			},
+			Data: vss.SignalData{
+				Name:        vss.FieldSpeed,
+				Timestamp:   currentTime,
+				ValueNumber: 100.0,
+			},
+		}
+		signals = append(signals, signal)
+		currentTime = currentTime.Add(24 * time.Hour)
+	}
+
+	// Insert signals
+	sigCols := strings.Join(vss.SignalColNames(), ", ")
+	batch, err := conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s (%s)", vss.TableName, sigCols))
+	c.Require().NoError(err, "Failed to prepare batch")
+
+	for _, sig := range signals {
+		err := batch.Append(vss.SignalToSlice(sig)...)
+		c.Require().NoError(err, "Failed to append struct")
+	}
+	err = batch.Send()
+	c.Require().NoError(err, "Failed to send batch")
+
+	// Create aggregation query args
+	aggArgs := &model.AggregatedSignalArgs{
+		SignalArgs: model.SignalArgs{
+			Subject: testSubject100,
+		},
+		FromTS:   startTime,
+		ToTS:     endTime,
+		Interval: 28 * day.Microseconds(),
+		FloatArgs: []model.FloatSignalArgs{
+			{
+				Name:  vss.FieldSpeed,
+				Agg:   model.FloatAggregationAvg,
+				Alias: vss.FieldSpeed,
+			},
+		},
+	}
+
+	// Query signals
+	result, err := c.chService.GetAggregatedSignals(ctx, testSubject100, aggArgs)
+	c.Require().NoError(err, "Failed to get aggregated signals")
+
+	// We expect exactly one group since we're using a 30-day interval
+	c.Require().Len(result, 1, "Expected exactly one group")
+
+	// Verify the group's timestamp matches the start time
+	c.Require().Equal(startTime, result[0].Timestamp, "Group timestamp should match start time")
+
+	// Verify the average value (should be 100.0 since all values are 100.0)
+	c.Require().Equal(100.0, result[0].ValueNumber, "Unexpected average value")
+}
+
+func (c *CHServiceTestSuite) TestGetEvents() {
+	ctx := context.Background()
+	conn, err := c.container.GetClickHouseAsConn()
+	c.Require().NoError(err, "Failed to get clickhouse connection")
+
+	subject := "did:erc721:1:0x0000000000000000000000000000000000000001:42"
+	baseTime := time.Date(2024, 6, 12, 12, 0, 0, 0, time.UTC)
+	events := []vss.Event{
+		{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				Source:  "source1",
+				Subject: subject,
+			},
+			Data: vss.EventData{
+				Name:       "event.a",
+				Timestamp:  baseTime,
+				DurationNs: 1000,
+				Metadata:   `{"foo":"bar"}`,
+				Tags:       []string{"behavior.harshAcceleration", "behavior.harshBraking"},
+			},
+		},
+		{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				Source:  "source2",
+				Subject: subject,
+			},
+			Data: vss.EventData{
+				Name:       "event.b",
+				Timestamp:  baseTime.Add(5 * time.Minute),
+				DurationNs: 2000,
+				Metadata:   "",
+				Tags:       []string{"behavior.harshBraking", "behavior.harshCornering"},
+			},
+		},
+		{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				Source:  "source2",
+				Subject: subject,
+			},
+			Data: vss.EventData{
+				Name:       "event.a",
+				Timestamp:  baseTime.Add(10 * time.Minute),
+				DurationNs: 3000,
+				Metadata:   `{"baz":123}`,
+				Tags:       []string{"behavior.harshAcceleration", "behavior.harshCornering", "safety.collision"},
+			},
+		},
+		// Event for a different subject (should not be returned)
+		{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				Source:  "source1",
+				Subject: "did:erc721:1:0x0000000000000000000000000000000000000001:99",
+			},
+			Data: vss.EventData{
+				Name:       "event.a",
+				Timestamp:  baseTime.Add(5 * time.Minute),
+				DurationNs: 999,
+				Metadata:   `{"should":"not_appear"}`,
+				Tags:       []string{"behavior.harshAcceleration", "behavior.harshBraking"},
+			},
+		},
+	}
+
+	cols := strings.Join(vss.EventColNames(), ", ")
+	batch, err := conn.PrepareBatch(ctx, "INSERT INTO "+vss.EventTableName+" ("+cols+")")
+	c.Require().NoError(err, "Failed to prepare batch")
+	for _, event := range events {
+		err := batch.Append(vss.EventToSlice(event)...)
+		c.Require().NoError(err, "Failed to append event struct")
+	}
+	err = batch.Send()
+	c.Require().NoError(err, "Failed to send batch")
+
+	from := baseTime.Add(-time.Minute)
+	to := baseTime.Add(15 * time.Minute)
+
+	c.Run("all events for subject and time range", func() {
+		result, err := c.chService.GetEvents(ctx, subject, from, to, nil)
+		c.Require().NoError(err)
+		c.Require().Len(result, 3)
+		// Should be ordered by timestamp DESC
+		c.Require().Equal("event.a", result[0].Data.Name)
+		c.Require().Equal(baseTime.Add(10*time.Minute), result[0].Data.Timestamp)
+		c.Require().Equal("source2", result[0].Source)
+		c.Require().Equal(uint64(3000), result[0].Data.DurationNs)
+		c.Require().Equal(`{"baz":123}`, result[0].Data.Metadata)
+
+		c.Require().Equal("event.b", result[1].Data.Name)
+		c.Require().Equal(baseTime.Add(5*time.Minute), result[1].Data.Timestamp)
+		c.Require().Equal("source2", result[1].Source)
+		c.Require().Equal(uint64(2000), result[1].Data.DurationNs)
+		c.Require().Equal("", result[1].Data.Metadata)
+
+		c.Require().Equal("event.a", result[2].Data.Name)
+		c.Require().Equal(baseTime, result[2].Data.Timestamp)
+		c.Require().Equal("source1", result[2].Source)
+		c.Require().Equal(uint64(1000), result[2].Data.DurationNs)
+		c.Require().Equal(`{"foo":"bar"}`, result[2].Data.Metadata)
+	})
+
+	c.Run("filter by name", func() {
+		filter := &model.EventFilter{Name: &model.StringValueFilter{Eq: ref("event.a")}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 2)
+		for _, ev := range result {
+			c.Require().Equal("event.a", ev.Data.Name)
+		}
+	})
+
+	c.Run("filter by source", func() {
+		filter := &model.EventFilter{Source: &model.StringValueFilter{Eq: ref("source2")}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 2)
+		for _, ev := range result {
+			c.Require().Equal("source2", ev.Source)
+		}
+	})
+
+	c.Run("no events in range", func() {
+		result, err := c.chService.GetEvents(ctx, subject, baseTime.Add(-2*time.Hour), baseTime.Add(-time.Hour), nil)
+		c.Require().NoError(err)
+		c.Require().Len(result, 0)
+	})
+
+	c.Run("filter by name neq", func() {
+		filter := &model.EventFilter{Name: &model.StringValueFilter{Neq: ref("event.a")}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 1)
+		c.Require().Equal("event.b", result[0].Data.Name)
+	})
+
+	c.Run("filter by name in", func() {
+		filter := &model.EventFilter{Name: &model.StringValueFilter{In: []string{"event.a", "event.b"}}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 3)
+	})
+
+	c.Run("filter by name notin", func() {
+		filter := &model.EventFilter{Name: &model.StringValueFilter{NotIn: []string{"event.a"}}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 1)
+		c.Require().Equal("event.b", result[0].Data.Name)
+	})
+
+	c.Run("filter by source neq", func() {
+		filter := &model.EventFilter{Source: &model.StringValueFilter{Neq: ref("source2")}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 1)
+		c.Require().Equal("source1", result[0].Source)
+	})
+
+	c.Run("filter by source in", func() {
+		filter := &model.EventFilter{Source: &model.StringValueFilter{In: []string{"source1", "source2"}}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 3)
+	})
+
+	c.Run("filter by source notin", func() {
+		filter := &model.EventFilter{Source: &model.StringValueFilter{NotIn: []string{"source2"}}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 1)
+		c.Require().Equal("source1", result[0].Source)
+	})
+
+	c.Run("filter by tags hasAny", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{ContainsAny: []string{"behavior.harshAcceleration"}}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 2)
+		c.Require().Equal("event.a", result[0].Data.Name)
+		c.Require().Equal("source2", result[0].Source)
+		c.Require().Equal(baseTime.Add(10*time.Minute), result[0].Data.Timestamp)
+		c.Require().Equal("event.a", result[1].Data.Name)
+		c.Require().Equal(baseTime, result[1].Data.Timestamp)
+		c.Require().Equal("source1", result[1].Source)
+	})
+
+	c.Run("filter by tags hasAll", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{ContainsAll: []string{"behavior.harshAcceleration", "behavior.harshCornering"}}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 1)
+		c.Require().Equal("event.a", result[0].Data.Name)
+		c.Require().Equal(baseTime.Add(10*time.Minute), result[0].Data.Timestamp)
+		c.Require().Equal("source2", result[0].Source)
+	})
+
+	c.Run("filter by tags hasAny multiple", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{
+			ContainsAny: []string{"behavior.harshBraking", "safety.collision"},
+			Or: []*model.StringArrayFilter{{
+				ContainsAny: []string{"behavior.harshAcceleration", "safety.collision"},
+			}},
+		}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 3)
+	})
+
+	c.Run("filter by tags hasAll no matching events", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{ContainsAll: []string{"behavior.harshBraking", "safety.collision"}}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 0)
+	})
+
+	c.Run("filter by tags not hasAny multiple", func() {
+		filter := &model.EventFilter{
+			Tags: &model.StringArrayFilter{
+				NotContainsAny: []string{"behavior.harshAcceleration", "safety.collision"},
+			},
+		}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 1)
+		c.Require().Equal("event.b", result[0].Data.Name)
+		c.Require().Equal(baseTime.Add(5*time.Minute), result[0].Data.Timestamp)
+	})
+
+	c.Run("filter by tags not hasAll", func() {
+		filter := &model.EventFilter{
+			Tags: &model.StringArrayFilter{
+				NotContainsAll: []string{"behavior.harshAcceleration", "safety.collision"},
+			},
+		}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 2)
+		c.Require().Equal("event.b", result[0].Data.Name)
+		c.Require().Equal("source2", result[0].Source)
+		c.Require().Equal("event.a", result[1].Data.Name)
+		c.Require().Equal("source1", result[1].Source)
+	})
+
+	c.Run("filter by tags hasAll or hasAny", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{
+			ContainsAll: []string{"behavior.harshBraking", "behavior.harshCornering"},
+			Or: []*model.StringArrayFilter{{
+				ContainsAny: []string{"safety.collision"},
+			}},
+		}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 2)
+		c.Require().Equal("event.a", result[0].Data.Name)
+		c.Require().Equal("source2", result[0].Source)
+		c.Require().Equal(baseTime.Add(10*time.Minute), result[0].Data.Timestamp)
+		c.Require().Equal("event.b", result[1].Data.Name)
+		c.Require().Equal("source2", result[1].Source)
+		c.Require().Equal(baseTime.Add(5*time.Minute), result[1].Data.Timestamp)
+	})
+
+	c.Run("filter by tags not hasAny", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{
+			NotContainsAny: []string{"safety.collision"},
+		}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 2)
+		c.Require().Equal("event.b", result[0].Data.Name)
+		c.Require().Equal(baseTime.Add(5*time.Minute), result[0].Data.Timestamp)
+		c.Require().Equal("event.a", result[1].Data.Name)
+		c.Require().Equal(baseTime, result[1].Data.Timestamp)
+	})
+
+	c.Run("filter by tags complex or with not", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{
+			ContainsAll:    []string{"safety.collision"},
+			NotContainsAny: []string{"behavior.harshAcceleration", "behavior.harshBraking", "behavior.harshCornering"},
+			Or: []*model.StringArrayFilter{{
+				ContainsAny: []string{"behavior.harshBraking"},
+			}},
+		}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 2)
+		c.Require().Equal("event.b", result[0].Data.Name)
+		c.Require().Equal(baseTime.Add(5*time.Minute), result[0].Data.Timestamp)
+		c.Require().Equal("event.a", result[1].Data.Name)
+		c.Require().Equal(baseTime, result[1].Data.Timestamp)
+	})
+
+	c.Run("filter by tags hasAll and not hasAny", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{
+			ContainsAll:    []string{"behavior.harshBraking"},
+			NotContainsAny: []string{"safety.collision"},
+		}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 2)
+		c.Require().Equal("event.b", result[0].Data.Name)
+		c.Require().Equal(baseTime.Add(5*time.Minute), result[0].Data.Timestamp)
+		c.Require().Equal("source2", result[0].Source)
+		c.Require().Equal("event.a", result[1].Data.Name)
+		c.Require().Equal(baseTime, result[1].Data.Timestamp)
+		c.Require().Equal("source1", result[1].Source)
+	})
+
+	c.Run("filter by tags hasAny and hasAll", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{
+			ContainsAny: []string{"behavior.harshBraking", "safety.collision"},
+			ContainsAll: []string{"behavior.harshAcceleration", "behavior.harshCornering"},
+		}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 1)
+		c.Require().Equal("event.a", result[0].Data.Name)
+		c.Require().Equal("source2", result[0].Source)
+	})
+
+	c.Run("filter by tags no matches", func() {
+		filter := &model.EventFilter{Tags: &model.StringArrayFilter{ContainsAny: []string{"nonexistent"}}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 0)
+	})
+
+	c.Run("filter by name startsWith", func() {
+		filter := &model.EventFilter{Name: &model.StringValueFilter{StartsWith: ref("event.a")}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 2)
+		for _, ev := range result {
+			c.Require().Equal("event.a", ev.Data.Name)
+		}
+	})
+
+	c.Run("filter by name startsWith prefix only", func() {
+		filter := &model.EventFilter{Name: &model.StringValueFilter{StartsWith: ref("event.")}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 3) // event.a (x2) + event.b (x1)
+	})
+
+	c.Run("filter by name startsWith with or", func() {
+		filter := &model.EventFilter{Name: &model.StringValueFilter{
+			Or: []*model.StringValueFilter{
+				{StartsWith: ref("event.a")},
+				{Eq: ref("event.b")},
+			},
+		}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 3)
+	})
+
+	c.Run("filter by name startsWith no match", func() {
+		filter := &model.EventFilter{Name: &model.StringValueFilter{StartsWith: ref("nonexistent.")}}
+		result, err := c.chService.GetEvents(ctx, subject, from, to, filter)
+		c.Require().NoError(err)
+		c.Require().Len(result, 0)
+	})
+}
+
+// insertTestData inserts test data into the clickhouse database.
+// it loops for 10 iterations and inserts a 2 signals  with each iteration that have a value of i and a powertrain type of "value"+ n%3+1
+// The source is selected from a list of sources in a round robin fashion of sources[i%3].
+// The timestamp is incremented by 30 seconds for each iteration.
+func (c *CHServiceTestSuite) insertTestData() {
+	ctx := context.Background()
+	conn, err := c.container.GetClickHouseAsConn()
+	c.Require().NoError(err, "Failed to get clickhouse connection")
+	testSignal := []vss.Signal{}
+	var sources = []string{"0x4c674ddE8189aEF6e3b58F5a36d7438b2b1f6Bc2", "0x5e31bBc786D7bEd95216383787deA1ab0f1c1897", "0xcd445F4c6bDAD32b68a2939b912150Fe3C88803E"}
+	for i := range dataPoints {
+		numSig := vss.Signal{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				Source:  sources[i%3],
+				Subject: testSubject1,
+			},
+			Data: vss.SignalData{
+				Name:        vss.FieldSpeed,
+				Timestamp:   c.dataStartTime.Add(time.Second * time.Duration(30*i)),
+				ValueNumber: float64(i),
+			},
+		}
+
+		strSig := vss.Signal{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				Source:  sources[i%3],
+				Subject: testSubject1,
+			},
+			Data: vss.SignalData{
+				Name:        vss.FieldPowertrainType,
+				Timestamp:   c.dataStartTime.Add(time.Second * time.Duration(30*i)),
+				ValueString: fmt.Sprintf("value%d", i+1),
+			},
+		}
+
+		locSig := vss.Signal{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				Source:  sources[i%3],
+				Subject: testSubject1,
+			},
+			Data: vss.SignalData{
+				Name:          vss.FieldCurrentLocationCoordinates,
+				Timestamp:     c.dataStartTime.Add(time.Second * time.Duration(30*i)),
+				ValueLocation: vss.Location{Latitude: 3 * float64(i+1), Longitude: 5 * float64(i+1), HDOP: 7 * float64(i+1)},
+			},
+		}
+		testSignal = append(testSignal, numSig, strSig, locSig)
+	}
+
+	testSignal = append(testSignal, vss.Signal{
+		CloudEventHeader: cloudevent.CloudEventHeader{
+			Source:  sources[0],
+			Subject: testSubject1,
+		},
+		Data: vss.SignalData{
+			Name:          vss.FieldCurrentLocationCoordinates,
+			Timestamp:     c.dataStartTime.Add(time.Second * time.Duration(299)),
+			ValueLocation: vss.Location{Latitude: 0, Longitude: 0, HDOP: 111},
+		},
+	})
+
+	// insert the test data into the clickhouse database
+	cols := strings.Join(vss.SignalColNames(), ", ")
+	batch, err := conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s (%s)", vss.TableName, cols))
+	c.Require().NoError(err, "Failed to prepare batch")
+
+	for _, sig := range testSignal {
+		err := batch.Append(vss.SignalToSlice(sig)...)
+		c.Require().NoError(err, "Failed to append struct")
+	}
+	err = batch.Send()
+	c.Require().NoError(err, "Failed to send batch")
+}
+
+func ref[T any](t T) *T {
+	return &t
+}
+
+func TestEscapeLikePrefix(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"behavior.", "behavior.%"},
+		{"behavior.harsh", "behavior.harsh%"},
+		{`with\back`, `with\\back%`},
+		{"100%", `100\%%`},
+		{"under_score", `under\_score%`},
+		{`all\%_special`, `all\\\%\_special%`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := escapeLikePrefix(tt.input)
+			if got != tt.want {
+				t.Errorf("escapeLikePrefix(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
