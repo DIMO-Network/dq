@@ -28337,6 +28337,10 @@ func (ec *executionContext) fieldContext_signalDataSummary_lastSeen(_ context.Co
 
 func (ec *executionContext) unmarshalInputCloudEventFilter(ctx context.Context, obj any) (model.CloudEventFilter, error) {
 	var it model.CloudEventFilter
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28412,6 +28416,10 @@ func (ec *executionContext) unmarshalInputCloudEventFilter(ctx context.Context, 
 
 func (ec *executionContext) unmarshalInputEventFilter(ctx context.Context, obj any) (model.EventFilter, error) {
 	var it model.EventFilter
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28452,6 +28460,10 @@ func (ec *executionContext) unmarshalInputEventFilter(ctx context.Context, obj a
 
 func (ec *executionContext) unmarshalInputFilterLocation(ctx context.Context, obj any) (model.FilterLocation, error) {
 	var it model.FilterLocation
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28485,6 +28497,10 @@ func (ec *executionContext) unmarshalInputFilterLocation(ctx context.Context, ob
 
 func (ec *executionContext) unmarshalInputInCircleFilter(ctx context.Context, obj any) (model.InCircleFilter, error) {
 	var it model.InCircleFilter
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28518,6 +28534,10 @@ func (ec *executionContext) unmarshalInputInCircleFilter(ctx context.Context, ob
 
 func (ec *executionContext) unmarshalInputSegmentConfig(ctx context.Context, obj any) (model.SegmentConfig, error) {
 	var it model.SegmentConfig
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28588,6 +28608,10 @@ func (ec *executionContext) unmarshalInputSegmentConfig(ctx context.Context, obj
 
 func (ec *executionContext) unmarshalInputSegmentEventRequest(ctx context.Context, obj any) (model.SegmentEventRequest, error) {
 	var it model.SegmentEventRequest
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28614,6 +28638,10 @@ func (ec *executionContext) unmarshalInputSegmentEventRequest(ctx context.Contex
 
 func (ec *executionContext) unmarshalInputSegmentSignalRequest(ctx context.Context, obj any) (model.SegmentSignalRequest, error) {
 	var it model.SegmentSignalRequest
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28647,6 +28675,10 @@ func (ec *executionContext) unmarshalInputSegmentSignalRequest(ctx context.Conte
 
 func (ec *executionContext) unmarshalInputSignalFilter(ctx context.Context, obj any) (model.SignalFilter, error) {
 	var it model.SignalFilter
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28673,6 +28705,10 @@ func (ec *executionContext) unmarshalInputSignalFilter(ctx context.Context, obj 
 
 func (ec *executionContext) unmarshalInputSignalFloatFilter(ctx context.Context, obj any) (model.SignalFloatFilter, error) {
 	var it model.SignalFloatFilter
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28755,6 +28791,10 @@ func (ec *executionContext) unmarshalInputSignalFloatFilter(ctx context.Context,
 
 func (ec *executionContext) unmarshalInputSignalLocationFilter(ctx context.Context, obj any) (model.SignalLocationFilter, error) {
 	var it model.SignalLocationFilter
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28788,6 +28828,10 @@ func (ec *executionContext) unmarshalInputSignalLocationFilter(ctx context.Conte
 
 func (ec *executionContext) unmarshalInputStringArrayFilter(ctx context.Context, obj any) (model.StringArrayFilter, error) {
 	var it model.StringArrayFilter
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
@@ -28842,6 +28886,10 @@ func (ec *executionContext) unmarshalInputStringArrayFilter(ctx context.Context,
 
 func (ec *executionContext) unmarshalInputStringValueFilter(ctx context.Context, obj any) (model.StringValueFilter, error) {
 	var it model.StringValueFilter
+	if obj == nil {
+		return it, nil
+	}
+
 	asMap := map[string]any{}
 	for k, v := range obj.(map[string]any) {
 		asMap[k] = v
