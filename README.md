@@ -2,11 +2,11 @@
 
 This is the result of a merger of two services: [Telemetry](https://github.com/DIMO-Network/telemetry-api) and [Fetch](https://github.com/DIMO-Network/fetch-api).
 
-## Differences
+## Migrating
 
 ### From Telemetry
 
-The "primary key" for all queries is now the `did` string. All `tokenId` parameters should be transformed into DIDs, and `subject` parameters merely need to be relabeled.
+The primary identifier for all queries is now the `did` string. All `tokenId` parameters should be transformed into DIDs, and `subject` parameters merely need to be relabeled.
 
 The queries `attestations` and `vinVCLatest` queries have been removed. These can be replicated using queries imported from Fetch with appropriate filter settings. More specifically:
 
