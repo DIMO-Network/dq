@@ -4,7 +4,9 @@ This is the result of a merger of two services: [Telemetry](https://github.com/D
 
 ## Differences
 
-### From telemetry-api
+### From Telemetry
+
+The "primary key" for all queries is now the `did` string. All `tokenId` parameters should be transformed into DIDs, and `subject` parameters merely need to be relabeled.
 
 The queries `attestations` and `vinVCLatest` queries have been removed. These can be replicated using queries imported from Fetch with appropriate filter settings. More specifically:
 
@@ -29,3 +31,7 @@ latestCloudEvent(
   filter: {type: "dimo.attestation", dataversion: "vin/v1.0"}
 )
 ```
+
+### From Fetch
+
+The queries `indexes` and `latestIndex` have been removed. If a client does not want to incur the cost of loading the referenced documents, then it should not request the fields `data` or `dataBase64`.
