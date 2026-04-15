@@ -1,8 +1,10 @@
 package graph
 
 import (
+	"context"
 	"io"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/DIMO-Network/cloudevent"
 )
 
@@ -32,4 +34,16 @@ func (r RawJSON) MarshalGQL(w io.Writer) {
 func (r *RawJSON) UnmarshalGQL(v interface{}) error {
 	*r = nil
 	return nil
+}
+
+// dataFieldsRequested returns true if the current GraphQL selection set includes
+// data or dataBase64. When neither is selected there is no need to fetch the
+// event payload from S3.
+func dataFieldsRequested(ctx context.Context) bool {
+	for _, f := range graphql.CollectFieldsCtx(ctx, nil) {
+		if f.Name == "data" || f.Name == "dataBase64" {
+			return true
+		}
+	}
+	return false
 }

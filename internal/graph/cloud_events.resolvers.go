@@ -51,13 +51,16 @@ func (r *queryResolver) LatestCloudEvent(ctx context.Context, did string, filter
 	if err != nil {
 		return nil, err
 	}
+	hdr := idx.CloudEventHeader
 	if strings.HasPrefix(idx.Data.Key, eventrepo.BlobKeyPrefix) {
 		url, err := r.EventService.PresignBlobURL(ctx, idx.Data.Key)
 		if err != nil {
 			return nil, err
 		}
-		hdr := idx.CloudEventHeader
 		return &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}, DataURL: url}, nil
+	}
+	if !dataFieldsRequested(ctx) {
+		return &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}}, nil
 	}
 	ce, err := fetch.GetCloudEventFromIndex(ctx, r.EventService, &idx, r.Buckets)
 	if err != nil {
@@ -83,18 +86,21 @@ func (r *queryResolver) CloudEvents(ctx context.Context, did string, limit *int,
 	out := make([]*CloudEventWrapper, len(list))
 	var nonBlobIdxs []cloudevent.CloudEvent[eventrepo.ObjectInfo]
 	var nonBlobPos []int
+	fetchData := dataFieldsRequested(ctx)
 
 	for i, idx := range list {
+		hdr := idx.CloudEventHeader
 		if strings.HasPrefix(idx.Data.Key, eventrepo.BlobKeyPrefix) {
 			url, err := r.EventService.PresignBlobURL(ctx, idx.Data.Key)
 			if err != nil {
 				return nil, err
 			}
-			hdr := idx.CloudEventHeader
 			out[i] = &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}, DataURL: url}
-		} else {
+		} else if fetchData {
 			nonBlobIdxs = append(nonBlobIdxs, idx)
 			nonBlobPos = append(nonBlobPos, i)
+		} else {
+			out[i] = &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}}
 		}
 	}
 
