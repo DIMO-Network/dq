@@ -3,37 +3,37 @@ enum DetectionMechanism {
   Ignition-based detection: Segments are identified by isIgnitionOn state transitions.
   Most reliable for vehicles with proper ignition signal support.
   """
-  ignitionDetection
-  
+  IGNITION_DETECTION
+
   """
   Frequency analysis: Segments are detected by analyzing signal update patterns.
   Uses pre-computed materialized view for optimal performance.
   Ideal for real-time APIs and bulk queries.
   """
-  frequencyAnalysis
-  
+  FREQUENCY_ANALYSIS
+
   """
   Change point detection: Uses CUSUM algorithm to detect statistical regime changes.
   Monitors cumulative deviation in signal frequency via materialized view.
   Excellent noise resistance with 100% accuracy match to ignition baseline.
   Best alternative when ignition signal is unavailable - same accuracy, same speed as frequency analysis.
   """
-  changePointDetection
+  CHANGE_POINT_DETECTION
 
   """
   Idling: Segments are contiguous periods where engine RPM remains in idle range.
   """
-  idling
+  IDLING
 
   """
-  Refuel: Detects where fuel level rises significantly. 
+  Refuel: Detects where fuel level rises significantly.
   """
-  refuel
+  REFUEL
 
   """
   Recharge: Hybrid detection. Uses charging signals and state of charge for detection.
   """
-  recharge
+  RECHARGE
 }
 
 extend type Query {
@@ -42,12 +42,12 @@ extend type Query {
   Maximum date range: 31 days.
   
   Detection mechanisms:
-  - ignitionDetection: Uses 'isIgnitionOn' signal with configurable debouncing
-  - frequencyAnalysis: Analyzes signal update frequency to detect activity periods
-  - changePointDetection: CUSUM-based regime change detection
-  - idling: Idling segments (engine rpm idle)
-  - refuel: Refueling segments (fuel level increased)
-  - recharge: Charging segments (battery SoC increased)
+  - IGNITION_DETECTION: Uses 'isIgnitionOn' signal with configurable debouncing
+  - FREQUENCY_ANALYSIS: Analyzes signal update frequency to detect activity periods
+  - CHANGE_POINT_DETECTION: CUSUM-based regime change detection
+  - IDLING: Idling segments (engine rpm idle)
+  - REFUEL: Refueling segments (fuel level increased)
+  - RECHARGE: Charging segments (battery SoC increased)
   
   Segment IDs are stable and consistent across queries as long as the segment start
   is captured in the underlying data source.
@@ -77,7 +77,7 @@ extend type Query {
 
   """
   Returns one record per calendar day in the date range.
-  Mechanism must be ignitionDetection, frequencyAnalysis, or changePointDetection (idling, refuel, and recharge not allowed).
+  Mechanism must be IGNITION_DETECTION, FREQUENCY_ANALYSIS, or CHANGE_POINT_DETECTION (IDLING, REFUEL, and RECHARGE not allowed).
   Maximum date range: 31 days.
   """
   dailyActivity(
@@ -119,8 +119,8 @@ type DailyActivity {
 input SegmentConfig {
   """
   Maximum gap (seconds) between data points before a segment is split.
-  For ignitionDetection: filters noise from brief ignition OFF events.
-  For frequencyAnalysis: maximum gap between active windows to merge.
+  For IGNITION_DETECTION: filters noise from brief ignition OFF events.
+  For FREQUENCY_ANALYSIS: maximum gap between active windows to merge.
   Default: 300 (5 minutes), Min: 60, Max: 3600
   """
   maxGapSeconds: Int = 300
@@ -133,21 +133,21 @@ input SegmentConfig {
   minSegmentDurationSeconds: Int = 240
   
   """
-  [frequencyAnalysis] Minimum signal count per window for activity detection.
-  [idling] Minimum samples per window to consider it idle (same semantics).
+  [FREQUENCY_ANALYSIS] Minimum signal count per window for activity detection.
+  [IDLING] Minimum samples per window to consider it idle (same semantics).
   Higher values = more conservative. Lower values = more sensitive.
   Default: 10, Min: 1, Max: 3600
   """
   signalCountThreshold: Int = 10
 
   """
-  [idling only] Upper bound for idle RPM. Windows with max(RPM) <= this are considered idle.
+  [IDLING only] Upper bound for idle RPM. Windows with max(RPM) <= this are considered idle.
   Default: 1000, Min: 300, Max: 3000
   """
   maxIdleRpm: Int = 1000
 
   """
-  [refuel and recharge only] Minimum percent increase within a window to consider it a level-increase window.
+  [REFUEL and RECHARGE only] Minimum percent increase within a window to consider it a level-increase window.
   """
   minIncreasePercent: Int = 15
 }

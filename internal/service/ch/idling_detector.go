@@ -58,7 +58,7 @@ func (d *IdlingDetector) DetectSegments(
 
 // GetMechanismName returns the name of this detection mechanism.
 func (d *IdlingDetector) GetMechanismName() string {
-	return "idling"
+	return "IDLING"
 }
 
 // findIdleRpmRanges walks sorted RPM samples and finds contiguous runs where 0 < RPM <= maxIdleRpm.

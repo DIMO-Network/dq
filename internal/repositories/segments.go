@@ -450,7 +450,7 @@ func (r *Repository) segmentSummary(ctx context.Context, did string, seg *model.
 // GetDailyActivity returns one record per calendar day in the requested date range.
 func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) ([]*model.DailyActivity, error) {
 	if mechanism == model.DetectionMechanismIdling || mechanism == model.DetectionMechanismRefuel || mechanism == model.DetectionMechanismRecharge {
-		return nil, errorhandler.NewBadRequestError(ctx, fmt.Errorf("dailyActivity does not accept mechanism %s; use ignitionDetection, frequencyAnalysis, or changePointDetection", mechanism))
+		return nil, errorhandler.NewBadRequestError(ctx, fmt.Errorf("dailyActivity does not accept mechanism %s; use IGNITION_DETECTION, FREQUENCY_ANALYSIS, or CHANGE_POINT_DETECTION", mechanism))
 	}
 	loc := time.UTC
 	if timezone != nil && *timezone != "" {

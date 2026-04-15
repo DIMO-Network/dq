@@ -49,7 +49,7 @@ func (d *RechargeDetector) DetectSegments(
 
 // GetMechanismName returns the name of this detection mechanism.
 func (d *RechargeDetector) GetMechanismName() string {
-	return "recharge"
+	return "RECHARGE"
 }
 
 // detectRechargeSegments: 2 CH queries (SoC + odometer), then all processing in-memory.

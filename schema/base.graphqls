@@ -116,15 +116,15 @@ type DataSummary {
   """
   data summary of an individual signal
   """
-  signalDataSummary: [signalDataSummary!]!
+  signalDataSummary: [SignalDataSummary!]!
 
   """
   Events known to the vehicle: per-event name, count, and first/last seen.
   """
-  eventDataSummary: [eventDataSummary!]!
+  eventDataSummary: [EventDataSummary!]!
 }
 
-type eventDataSummary {
+type EventDataSummary {
   """
   Event name
   """
@@ -143,7 +143,7 @@ type eventDataSummary {
   lastSeen: Time!
 }
 
-type signalDataSummary {
+type SignalDataSummary {
   """
   signal name
   """

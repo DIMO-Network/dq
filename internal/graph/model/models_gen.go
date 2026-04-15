@@ -84,6 +84,17 @@ type EventCount struct {
 	Count int    `json:"count"`
 }
 
+type EventDataSummary struct {
+	// Event name
+	Name string `json:"name"`
+	// Number of times this event occurred for the vehicle
+	NumberOfEvents uint64 `json:"numberOfEvents"`
+	// First seen timestamp
+	FirstSeen time.Time `json:"firstSeen"`
+	// Last seen timestamp
+	LastSeen time.Time `json:"lastSeen"`
+}
+
 type EventFilter struct {
 	// name is the name of the event.
 	Name *StringValueFilter `json:"name,omitempty"`
@@ -137,23 +148,23 @@ type Segment struct {
 
 type SegmentConfig struct {
 	// Maximum gap (seconds) between data points before a segment is split.
-	// For ignitionDetection: filters noise from brief ignition OFF events.
-	// For frequencyAnalysis: maximum gap between active windows to merge.
+	// For IGNITION_DETECTION: filters noise from brief ignition OFF events.
+	// For FREQUENCY_ANALYSIS: maximum gap between active windows to merge.
 	// Default: 300 (5 minutes), Min: 60, Max: 3600
 	MaxGapSeconds *int `json:"maxGapSeconds,omitempty"`
 	// Minimum segment duration (seconds) to include in results.
 	// Filters very short segments (testing, engine cycling).
 	// Default: 240 (4 minutes), Min: 60, Max: 3600
 	MinSegmentDurationSeconds *int `json:"minSegmentDurationSeconds,omitempty"`
-	// [frequencyAnalysis] Minimum signal count per window for activity detection.
-	// [idling] Minimum samples per window to consider it idle (same semantics).
+	// [FREQUENCY_ANALYSIS] Minimum signal count per window for activity detection.
+	// [IDLING] Minimum samples per window to consider it idle (same semantics).
 	// Higher values = more conservative. Lower values = more sensitive.
 	// Default: 10, Min: 1, Max: 3600
 	SignalCountThreshold *int `json:"signalCountThreshold,omitempty"`
-	// [idling only] Upper bound for idle RPM. Windows with max(RPM) <= this are considered idle.
+	// [IDLING only] Upper bound for idle RPM. Windows with max(RPM) <= this are considered idle.
 	// Default: 1000, Min: 300, Max: 3000
 	MaxIdleRpm *int `json:"maxIdleRpm,omitempty"`
-	// [refuel and recharge only] Minimum percent increase within a window to consider it a level-increase window.
+	// [REFUEL and RECHARGE only] Minimum percent increase within a window to consider it a level-increase window.
 	MinIncreasePercent *int `json:"minIncreasePercent,omitempty"`
 }
 
@@ -603,6 +614,17 @@ type SignalCollection struct {
 	Speed *SignalFloat `json:"speed,omitempty"`
 }
 
+type SignalDataSummary struct {
+	// signal name
+	Name string `json:"name"`
+	// number of this specific signal
+	NumberOfSignals uint64 `json:"numberOfSignals"`
+	// first seen timestamp
+	FirstSeen time.Time `json:"firstSeen"`
+	// last seen timestamp
+	LastSeen time.Time `json:"lastSeen"`
+}
+
 // SignalFilter holds the filter parameters for the signal querys.
 type SignalFilter struct {
 	// Filter signals by source using an ethr DID.
@@ -686,49 +708,27 @@ type StringValueFilter struct {
 	Or []*StringValueFilter `json:"or,omitempty"`
 }
 
-type EventDataSummary struct {
-	// Event name
-	Name string `json:"name"`
-	// Number of times this event occurred for the vehicle
-	NumberOfEvents uint64 `json:"numberOfEvents"`
-	// First seen timestamp
-	FirstSeen time.Time `json:"firstSeen"`
-	// Last seen timestamp
-	LastSeen time.Time `json:"lastSeen"`
-}
-
-type SignalDataSummary struct {
-	// signal name
-	Name string `json:"name"`
-	// number of this specific signal
-	NumberOfSignals uint64 `json:"numberOfSignals"`
-	// first seen timestamp
-	FirstSeen time.Time `json:"firstSeen"`
-	// last seen timestamp
-	LastSeen time.Time `json:"lastSeen"`
-}
-
 type DetectionMechanism string
 
 const (
 	// Ignition-based detection: Segments are identified by isIgnitionOn state transitions.
 	// Most reliable for vehicles with proper ignition signal support.
-	DetectionMechanismIgnitionDetection DetectionMechanism = "ignitionDetection"
+	DetectionMechanismIgnitionDetection DetectionMechanism = "IGNITION_DETECTION"
 	// Frequency analysis: Segments are detected by analyzing signal update patterns.
 	// Uses pre-computed materialized view for optimal performance.
 	// Ideal for real-time APIs and bulk queries.
-	DetectionMechanismFrequencyAnalysis DetectionMechanism = "frequencyAnalysis"
+	DetectionMechanismFrequencyAnalysis DetectionMechanism = "FREQUENCY_ANALYSIS"
 	// Change point detection: Uses CUSUM algorithm to detect statistical regime changes.
 	// Monitors cumulative deviation in signal frequency via materialized view.
 	// Excellent noise resistance with 100% accuracy match to ignition baseline.
 	// Best alternative when ignition signal is unavailable - same accuracy, same speed as frequency analysis.
-	DetectionMechanismChangePointDetection DetectionMechanism = "changePointDetection"
+	DetectionMechanismChangePointDetection DetectionMechanism = "CHANGE_POINT_DETECTION"
 	// Idling: Segments are contiguous periods where engine RPM remains in idle range.
-	DetectionMechanismIdling DetectionMechanism = "idling"
+	DetectionMechanismIdling DetectionMechanism = "IDLING"
 	// Refuel: Detects where fuel level rises significantly.
-	DetectionMechanismRefuel DetectionMechanism = "refuel"
+	DetectionMechanismRefuel DetectionMechanism = "REFUEL"
 	// Recharge: Hybrid detection. Uses charging signals and state of charge for detection.
-	DetectionMechanismRecharge DetectionMechanism = "recharge"
+	DetectionMechanismRecharge DetectionMechanism = "RECHARGE"
 )
 
 var AllDetectionMechanism = []DetectionMechanism{

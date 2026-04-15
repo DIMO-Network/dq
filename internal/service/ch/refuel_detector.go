@@ -95,7 +95,7 @@ func (d *RefuelDetector) DetectSegments(
 
 // GetMechanismName returns the name of this detection mechanism.
 func (d *RefuelDetector) GetMechanismName() string {
-	return "refuel"
+	return "REFUEL"
 }
 
 // findRefuelTroughAndPeak finds the trough (last low sample at or before riseStart) and

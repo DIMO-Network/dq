@@ -215,5 +215,5 @@ func (d *IgnitionDetector) filterNoise(stateChanges []StateChange, minIdle int) 
 
 // GetMechanismName returns the name of this detection mechanism
 func (d *IgnitionDetector) GetMechanismName() string {
-	return "ignitionDetection"
+	return "IGNITION_DETECTION"
 }
