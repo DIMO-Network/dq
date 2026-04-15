@@ -2,7 +2,7 @@ package graph
 
 import (
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/fetch-api/pkg/grpc"
+	"github.com/DIMO-Network/dq/pkg/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

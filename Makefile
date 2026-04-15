@@ -1,4 +1,4 @@
-.PHONY: clean run build test lint gqlgen gql-model gql generate
+.PHONY: clean run build test lint gqlgen gql-model gql generate generate-grpc tools-protoc tools-protoc-plugins
 
 SHELL := /bin/sh
 PATHINSTBIN = $(abspath ./bin)
@@ -13,6 +13,9 @@ GOOS              ?= $(DEFAULT_GOOS)
 
 VERSION   := $(shell git describe --tags 2>/dev/null || echo "v0.0.0")
 VER_CUT   := $(shell echo $(VERSION) | cut -c2-)
+
+PROTOC_VERSION             = 33.4
+PROTOC_GEN_GO_GRPC_VERSION = v1.5.1
 
 help: ## Show available targets
 	@echo "\nSpecify a subcommand:\n"
@@ -60,5 +63,30 @@ gql-model: ## Run model-garage codegen (signals schema + model + resolver stubs)
 
 gql: gql-model gqlgen ## Run full code generation (model-garage → gqlgen)
 
-generate: gql ## Run all code generators
+generate-grpc: ## Generate gRPC Go files from proto definitions
+	@PATH=$$PATH protoc --go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		pkg/grpc/*.proto
+
+generate: gql generate-grpc ## Run all code generators
 	@go generate ./...
+
+tools-protoc: ## Install protoc
+	@mkdir -p $(PATHINSTBIN)
+	rm -rf $(PATHINSTBIN)/protoc
+ifeq ($(shell uname | tr A-Z a-z), darwin)
+	curl -L https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-osx-x86_64.zip > bin/protoc.zip
+endif
+ifeq ($(shell uname | tr A-Z a-z), linux)
+	curl -L https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip > bin/protoc.zip
+endif
+	unzip -o $(PATHINSTBIN)/protoc.zip -d $(PATHINSTBIN)/protoclib
+	mv -f $(PATHINSTBIN)/protoclib/bin/protoc $(PATHINSTBIN)/protoc
+	rm -rf $(PATHINSTBIN)/include
+	mv $(PATHINSTBIN)/protoclib/include $(PATHINSTBIN)/
+	rm $(PATHINSTBIN)/protoc.zip
+
+tools-protoc-plugins: ## Install protoc-gen-go and protoc-gen-go-grpc
+	@mkdir -p $(PATHINSTBIN)
+	GOBIN=$(PATHINSTBIN) go install google.golang.org/protobuf/cmd/protoc-gen-go
+	GOBIN=$(PATHINSTBIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${PROTOC_GEN_GO_GRPC_VERSION}

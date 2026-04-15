@@ -14,7 +14,7 @@ import (
 	"github.com/DIMO-Network/cloudevent"
 	chindexer "github.com/DIMO-Network/cloudevent/clickhouse"
 	"github.com/DIMO-Network/cloudevent/parquet"
-	"github.com/DIMO-Network/fetch-api/pkg/grpc"
+	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/aarondl/sqlboiler/v4/drivers"
 	"github.com/aarondl/sqlboiler/v4/queries"
 	"github.com/aarondl/sqlboiler/v4/queries/qm"

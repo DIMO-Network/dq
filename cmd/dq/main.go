@@ -66,6 +66,11 @@ func main() {
 	}
 	defer application.Cleanup()
 
+	rpcServer, err := app.CreateGRPCServer(&logger, &cfg)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to create gRPC server.")
+	}
+
 	monSrv := monserver.NewMonitoringServer(&logger, cfg.EnablePprof)
 	runner.RunHandler(runnerCtx, runnerGroup, monSrv, ":"+strconv.Itoa(cfg.MonPort))
 
@@ -75,6 +80,9 @@ func main() {
 
 	logger.Info().Msgf("Server started on port: %d", cfg.Port)
 	runner.RunHandler(runnerCtx, runnerGroup, mux, ":"+strconv.Itoa(cfg.Port))
+
+	logger.Info().Msgf("gRPC server started on port: %d", cfg.GRPCPort)
+	runner.RunGRPC(runnerCtx, runnerGroup, rpcServer, ":"+strconv.Itoa(cfg.GRPCPort))
 
 	err = runnerGroup.Wait()
 	if err != nil && !errors.Is(err, context.Canceled) {

@@ -15,7 +15,7 @@ import (
 	chindexer "github.com/DIMO-Network/cloudevent/clickhouse"
 	"github.com/DIMO-Network/cloudevent/parquet"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
-	"github.com/DIMO-Network/fetch-api/pkg/grpc"
+	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"

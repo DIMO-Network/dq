@@ -12,14 +12,20 @@ import (
 	"github.com/99designs/gqlgen/graphql/handler/transport"
 	"github.com/DIMO-Network/dq/internal/auth"
 	"github.com/DIMO-Network/dq/internal/config"
+	"github.com/DIMO-Network/dq/internal/fetch/rpc"
 	"github.com/DIMO-Network/dq/internal/graph"
 	"github.com/DIMO-Network/dq/internal/identity"
 	"github.com/DIMO-Network/dq/internal/limits"
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/dq/internal/service/ch"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
+	fetchgrpc "github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
 	gqlmetrics "github.com/DIMO-Network/server-garage/pkg/gql/metrics"
+	"github.com/DIMO-Network/shared/pkg/middleware/metrics"
+	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
+	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -110,6 +116,31 @@ func (a *App) Cleanup() {
 
 func noOp(ctx context.Context, obj interface{}, next graphql.Resolver) (res interface{}, err error) {
 	return next(ctx)
+}
+
+// CreateGRPCServer creates a new gRPC server wired to the event service.
+func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.Server, error) {
+	chConn, err := chClientFromSettings(settings)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ClickHouse connection: %w", err)
+	}
+
+	s3Client := s3ClientFromSettings(settings)
+	eventService := eventrepo.New(chConn, s3Client, s3.NewPresignClient(s3Client), settings.ParquetBucket)
+
+	buckets := []string{settings.CloudEventBucket, settings.EphemeralBucket, settings.ParquetBucket}
+	rpcServer := rpc.NewServer(buckets, eventService)
+
+	grpcPanic := metrics.GRPCPanicker{Logger: logger}
+	server := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(
+			metrics.GRPCMetricsAndLogMiddleware(logger),
+			recovery.UnaryServerInterceptor(recovery.WithRecoveryHandler(grpcPanic.GRPCPanicRecoveryHandler)),
+		),
+	)
+	fetchgrpc.RegisterFetchServiceServer(server, rpcServer)
+
+	return server, nil
 }
 
 func newServer(es graphql.ExecutableSchema) *handler.Server {
