@@ -8,6 +8,8 @@ This is the result of a merger of two services: [Telemetry](https://github.com/D
 
 The primary identifier for all queries is now the `did` string. All `tokenId` parameters should be transformed into DIDs, and `subject` parameters merely need to be relabeled.
 
+Enum values are now all consistently upper snake case, so `ignitionDetection` is now `IGNITION_DETECTION`.
+
 The queries `attestations` and `vinVCLatest` queries have been removed. These can be replicated using queries imported from Fetch with appropriate filter settings. More specifically:
 
 ```graphql
