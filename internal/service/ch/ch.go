@@ -24,8 +24,8 @@ const (
 
 // Service is a ClickHouse service that interacts with the ClickHouse database.
 type Service struct {
-	conn              clickhouse.Conn
-	lastSeenBucketHrs int64
+	conn                      clickhouse.Conn
+	latestSignalsLookbackDays int
 }
 
 // NewService creates a new ClickHouse service.
@@ -60,7 +60,7 @@ func NewService(settings config.Settings) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to ping clickhouse: %w", err)
 	}
-	return &Service{conn: conn, lastSeenBucketHrs: settings.DeviceLastSeenBinHrs}, nil
+	return &Service{conn: conn, latestSignalsLookbackDays: settings.LatestSignalsLookbackDays}, nil
 }
 
 func getMaxExecutionTime(maxRequestDuration string) (int, error) {
@@ -76,9 +76,14 @@ func getMaxExecutionTime(maxRequestDuration string) (int, error) {
 
 // GetLatestSignals returns the latest signals based on the provided arguments from the ClickHouse database.
 func (s *Service) GetLatestSignals(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error) {
-	stmt, args := getLatestQuery(subject, latestArgs)
+	var fromTS *time.Time
+	if s.latestSignalsLookbackDays > 0 {
+		t := time.Now().UTC().AddDate(0, 0, -s.latestSignalsLookbackDays)
+		fromTS = &t
+	}
+	stmt, args := getLatestQuery(subject, latestArgs, fromTS)
 	if latestArgs.IncludeLastSeen {
-		lastSeenStmt, lastSeenArgs := getLastSeenQuery(subject, &latestArgs.SignalArgs)
+		lastSeenStmt, lastSeenArgs := getLastSeenQuery(subject, &latestArgs.SignalArgs, fromTS)
 		stmt, args = unionAll([]string{stmt, lastSeenStmt}, [][]any{args, lastSeenArgs})
 	}
 

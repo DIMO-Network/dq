@@ -318,7 +318,7 @@ WHERE
 GROUP BY
   name
 */
-func getLatestQuery(subject string, latestArgs *model.LatestSignalsArgs) (string, []any) {
+func getLatestQuery(subject string, latestArgs *model.LatestSignalsArgs, fromTS *time.Time) (string, []any) {
 	signalNames := make([]string, 0, len(latestArgs.SignalNames))
 	for name := range latestArgs.SignalNames {
 		signalNames = append(signalNames, name)
@@ -352,6 +352,9 @@ func getLatestQuery(subject string, latestArgs *model.LatestSignalsArgs) (string
 		qm.GroupBy(vss.NameCol),
 	}
 	mods = append(mods, getFilterMods(latestArgs.Filter)...)
+	if fromTS != nil {
+		mods = append(mods, qm.Where(vss.TimestampCol+" >= ?", *fromTS))
+	}
 	return newQuery(mods...)
 }
 
@@ -369,7 +372,7 @@ FROM
 WHERE
 	subject = '...'
 */
-func getLastSeenQuery(subject string, sigArgs *model.SignalArgs) (string, []any) {
+func getLastSeenQuery(subject string, sigArgs *model.SignalArgs, fromTS *time.Time) (string, []any) {
 	if sigArgs == nil {
 		return "", nil
 	}
@@ -383,6 +386,9 @@ func getLastSeenQuery(subject string, sigArgs *model.SignalArgs) (string, []any)
 		qm.Where(subjectWhere, subject),
 	}
 	mods = append(mods, getFilterMods(sigArgs.Filter)...)
+	if fromTS != nil {
+		mods = append(mods, qm.Where(vss.TimestampCol+" >= ?", *fromTS))
+	}
 	return newQuery(mods...)
 }
 

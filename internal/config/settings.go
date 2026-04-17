@@ -26,5 +26,5 @@ type Settings struct {
 	// Identity API for device→vehicle DID resolution
 	IdentityAPIURL       string          `yaml:"IDENTITY_API_URL"`
 	// Signals
-	DeviceLastSeenBinHrs int64           `yaml:"DEVICE_LAST_SEEN_BIN_HOURS"`
+	LatestSignalsLookbackDays int `yaml:"LATEST_SIGNALS_LOOKBACK_DAYS"`
 }
