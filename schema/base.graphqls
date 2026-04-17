@@ -29,7 +29,7 @@ type Query {
   signals returns a collection of signals for a given vehicle DID in a given time range.
   """
   signals(
-    did: String!
+    subject: String!
     """
     interval is a time span that used for aggregatting the data with.
     A duration string is a sequence of decimal numbers, each with optional fraction and a unit suffix,
@@ -43,18 +43,18 @@ type Query {
   """
   SignalsLatest returns the latest signals for a given vehicle DID.
   """
-  signalsLatest(did: String!, filter: SignalFilter): SignalCollection
+  signalsLatest(subject: String!, filter: SignalFilter): SignalCollection
     @requiresVehicleToken
   """
   availableSignals returns a list of queryable signal names that have stored data for a given vehicle DID.
   """
-  availableSignals(did: String!, filter: SignalFilter): [String!]
+  availableSignals(subject: String!, filter: SignalFilter): [String!]
     @requiresVehicleToken
 
   """
   data summary of all signals for a given vehicle DID
   """
-  dataSummary(did: String!, filter: SignalFilter): DataSummary
+  dataSummary(subject: String!, filter: SignalFilter): DataSummary
     @requiresVehicleToken
 }
 type SignalAggregations {

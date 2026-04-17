@@ -28,7 +28,7 @@ func validateSegmentDateRange(from, to time.Time) error {
 
 func validateSegmentArgs(did string, from, to time.Time) error {
 	if did == "" {
-		return fmt.Errorf("did is required")
+		return fmt.Errorf("subject is required")
 	}
 	if from.After(to) {
 		return fmt.Errorf("from time must be before to time")

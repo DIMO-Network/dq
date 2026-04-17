@@ -84,7 +84,7 @@ func validateSignalArgs(args *model.SignalArgs) error {
 	}
 
 	if args.Subject == "" {
-		return ValidationError("did is required")
+		return ValidationError("subject is required")
 	}
 
 	return validateFilter(args.Filter)
@@ -104,7 +104,7 @@ func validateFilter(filter *model.SignalFilter) error {
 
 func validateEventArgs(did string, from, to time.Time, filter *model.EventFilter) error {
 	if did == "" {
-		return ValidationError("did is required")
+		return ValidationError("subject is required")
 	}
 	if from.IsZero() {
 		return ValidationError("from timestamp is zero")

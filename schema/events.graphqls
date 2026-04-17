@@ -4,9 +4,9 @@ extend type Query {
   """
   events(
     """
-    did is the vehicle DID to get events for.
+    subject is the vehicle DID to get events for.
     """
-    did: String!
+    subject: String!
     """
     from is the start time of the event.
     """

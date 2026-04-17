@@ -69,15 +69,15 @@ extend type Query {
   """
   Latest full cloud event matching the given DID and optional filter.
   """
-  latestCloudEvent(did: String!, filter: CloudEventFilter): CloudEvent!
+  latestCloudEvent(subject: String!, filter: CloudEventFilter): CloudEvent!
 
   """
   List full cloud events matching the given DID and optional filter.
   """
-  cloudEvents(did: String!, limit: Int = 10, filter: CloudEventFilter): [CloudEvent!]!
+  cloudEvents(subject: String!, limit: Int = 10, filter: CloudEventFilter): [CloudEvent!]!
 
   """
   List cloud event types available for a subject, with counts and time ranges.
   """
-  availableCloudEventTypes(did: String!, filter: CloudEventFilter): [CloudEventTypeSummary!]!
+  availableCloudEventTypes(subject: String!, filter: CloudEventFilter): [CloudEventTypeSummary!]!
 }

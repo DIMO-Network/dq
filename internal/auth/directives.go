@@ -9,7 +9,7 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 )
 
-const didArg = "did"
+const didArg = "subject"
 
 // UnauthorizedError is returned by directive handlers when a request is not authorized.
 type UnauthorizedError struct {
