@@ -6,7 +6,7 @@ This is the result of a merger of two services: [Telemetry](https://github.com/D
 
 ### From Telemetry
 
-The primary identifier for all queries is now the `did` string. All `tokenId` parameters should be transformed into DIDs, and `subject` parameters merely need to be relabeled.
+The primary identifier for all queries is now the `subject` string. All `tokenId` parameters should be transformed into subject DIDs. The `did` parameters merely need to be renamed.
 
 Enum values are now all consistently upper snake case, so `ignitionDetection` is now `IGNITION_DETECTION`.
 
