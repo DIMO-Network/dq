@@ -49,7 +49,7 @@ func New(settings config.Settings) (*App, error) {
 		return nil, fmt.Errorf("couldn't create signal repository: %w", err)
 	}
 
-	chConn, err := chClientFromSettings(&settings)
+	chConn, err := chClientFromSettings(&settings.ClickhouseFileCatalogue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ClickHouse connection for event repo: %w", err)
 	}
@@ -120,7 +120,7 @@ func noOp(ctx context.Context, obj interface{}, next graphql.Resolver) (res inte
 
 // CreateGRPCServer creates a new gRPC server wired to the event service.
 func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.Server, error) {
-	chConn, err := chClientFromSettings(settings)
+	chConn, err := chClientFromSettings(&settings.ClickhouseFileCatalogue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ClickHouse connection: %w", err)
 	}

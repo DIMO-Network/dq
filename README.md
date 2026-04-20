@@ -2,6 +2,17 @@
 
 This is the result of a merger of two services: [Telemetry](https://github.com/DIMO-Network/telemetry-api) and [Fetch](https://github.com/DIMO-Network/fetch-api).
 
+## Authentication
+
+This service accepts subject and permission-scoped tokens. These are generally short-lived and must be signed by a trusted issuer. The important claims beyond the standard ones are
+
+```json
+{
+  "asset": "did:erc721:137:0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF:42",
+  "permissions": ["privilege:GetNonLocationHistory", "privilege:GetRawData"]
+}
+```
+
 ## Migrating
 
 ### From Telemetry
