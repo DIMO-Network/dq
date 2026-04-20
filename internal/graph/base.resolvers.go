@@ -15,8 +15,8 @@ import (
 )
 
 // Signals is the resolver for the signals field.
-func (r *queryResolver) Signals(ctx context.Context, did string, interval string, from time.Time, to time.Time, filter *model.SignalFilter) ([]*model.SignalAggregations, error) {
-	aggArgs, err := aggregationArgsFromContext(ctx, did, interval, from, to, filter)
+func (r *queryResolver) Signals(ctx context.Context, subject string, interval string, from time.Time, to time.Time, filter *model.SignalFilter) ([]*model.SignalAggregations, error) {
+	aggArgs, err := aggregationArgsFromContext(ctx, subject, interval, from, to, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -24,8 +24,8 @@ func (r *queryResolver) Signals(ctx context.Context, did string, interval string
 }
 
 // SignalsLatest is the resolver for the signalsLatest field.
-func (r *queryResolver) SignalsLatest(ctx context.Context, did string, filter *model.SignalFilter) (*model.SignalCollection, error) {
-	latestArgs, err := latestArgsFromContext(ctx, did, filter)
+func (r *queryResolver) SignalsLatest(ctx context.Context, subject string, filter *model.SignalFilter) (*model.SignalCollection, error) {
+	latestArgs, err := latestArgsFromContext(ctx, subject, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -33,13 +33,13 @@ func (r *queryResolver) SignalsLatest(ctx context.Context, did string, filter *m
 }
 
 // AvailableSignals is the resolver for the availableSignals field.
-func (r *queryResolver) AvailableSignals(ctx context.Context, did string, filter *model.SignalFilter) ([]string, error) {
-	return r.SignalRepo.GetAvailableSignals(ctx, did, filter)
+func (r *queryResolver) AvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
+	return r.SignalRepo.GetAvailableSignals(ctx, subject, filter)
 }
 
 // DataSummary is the resolver for the dataSummary field.
-func (r *queryResolver) DataSummary(ctx context.Context, did string, filter *model.SignalFilter) (*model.DataSummary, error) {
-	return r.SignalRepo.GetDataSummary(ctx, did, filter)
+func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter *model.SignalFilter) (*model.DataSummary, error) {
+	return r.SignalRepo.GetDataSummary(ctx, subject, filter)
 }
 
 // CurrentLocationApproximateCoordinates is the resolver for the currentLocationApproximateCoordinates field.

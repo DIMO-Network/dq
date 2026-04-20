@@ -13,11 +13,11 @@ import (
 )
 
 // Segments is the resolver for the segments field.
-func (r *queryResolver) Segments(ctx context.Context, did string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, limit *int, after *time.Time) ([]*model.Segment, error) {
-	return r.SignalRepo.GetSegments(ctx, did, from, to, mechanism, config, signalRequests, eventRequests, limit, after)
+func (r *queryResolver) Segments(ctx context.Context, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, limit *int, after *time.Time) ([]*model.Segment, error) {
+	return r.SignalRepo.GetSegments(ctx, subject, from, to, mechanism, config, signalRequests, eventRequests, limit, after)
 }
 
 // DailyActivity is the resolver for the dailyActivity field.
-func (r *queryResolver) DailyActivity(ctx context.Context, did string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) ([]*model.DailyActivity, error) {
-	return r.SignalRepo.GetDailyActivity(ctx, did, from, to, mechanism, config, signalRequests, eventRequests, timezone)
+func (r *queryResolver) DailyActivity(ctx context.Context, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) ([]*model.DailyActivity, error) {
+	return r.SignalRepo.GetDailyActivity(ctx, subject, from, to, mechanism, config, signalRequests, eventRequests, timezone)
 }

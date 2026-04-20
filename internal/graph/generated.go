@@ -119,16 +119,16 @@ type ComplexityRoot struct {
 	}
 
 	Query struct {
-		AvailableCloudEventTypes func(childComplexity int, did string, filter *model.CloudEventFilter) int
-		AvailableSignals         func(childComplexity int, did string, filter *model.SignalFilter) int
-		CloudEvents              func(childComplexity int, did string, limit *int, filter *model.CloudEventFilter) int
-		DailyActivity            func(childComplexity int, did string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) int
-		DataSummary              func(childComplexity int, did string, filter *model.SignalFilter) int
-		Events                   func(childComplexity int, did string, from time.Time, to time.Time, filter *model.EventFilter) int
-		LatestCloudEvent         func(childComplexity int, did string, filter *model.CloudEventFilter) int
-		Segments                 func(childComplexity int, did string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, limit *int, after *time.Time) int
-		Signals                  func(childComplexity int, did string, interval string, from time.Time, to time.Time, filter *model.SignalFilter) int
-		SignalsLatest            func(childComplexity int, did string, filter *model.SignalFilter) int
+		AvailableCloudEventTypes func(childComplexity int, subject string, filter *model.CloudEventFilter) int
+		AvailableSignals         func(childComplexity int, subject string, filter *model.SignalFilter) int
+		CloudEvents              func(childComplexity int, subject string, limit *int, filter *model.CloudEventFilter) int
+		DailyActivity            func(childComplexity int, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) int
+		DataSummary              func(childComplexity int, subject string, filter *model.SignalFilter) int
+		Events                   func(childComplexity int, subject string, from time.Time, to time.Time, filter *model.EventFilter) int
+		LatestCloudEvent         func(childComplexity int, subject string, filter *model.CloudEventFilter) int
+		Segments                 func(childComplexity int, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, limit *int, after *time.Time) int
+		Signals                  func(childComplexity int, subject string, interval string, from time.Time, to time.Time, filter *model.SignalFilter) int
+		SignalsLatest            func(childComplexity int, subject string, filter *model.SignalFilter) int
 	}
 
 	Segment struct {
@@ -418,16 +418,16 @@ type CloudEventResolver interface {
 	DataBase64(ctx context.Context, obj *CloudEventWrapper) (*string, error)
 }
 type QueryResolver interface {
-	Signals(ctx context.Context, did string, interval string, from time.Time, to time.Time, filter *model.SignalFilter) ([]*model.SignalAggregations, error)
-	SignalsLatest(ctx context.Context, did string, filter *model.SignalFilter) (*model.SignalCollection, error)
-	AvailableSignals(ctx context.Context, did string, filter *model.SignalFilter) ([]string, error)
-	DataSummary(ctx context.Context, did string, filter *model.SignalFilter) (*model.DataSummary, error)
-	LatestCloudEvent(ctx context.Context, did string, filter *model.CloudEventFilter) (*CloudEventWrapper, error)
-	CloudEvents(ctx context.Context, did string, limit *int, filter *model.CloudEventFilter) ([]*CloudEventWrapper, error)
-	AvailableCloudEventTypes(ctx context.Context, did string, filter *model.CloudEventFilter) ([]*model.CloudEventTypeSummary, error)
-	Events(ctx context.Context, did string, from time.Time, to time.Time, filter *model.EventFilter) ([]*model.Event, error)
-	Segments(ctx context.Context, did string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, limit *int, after *time.Time) ([]*model.Segment, error)
-	DailyActivity(ctx context.Context, did string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) ([]*model.DailyActivity, error)
+	Signals(ctx context.Context, subject string, interval string, from time.Time, to time.Time, filter *model.SignalFilter) ([]*model.SignalAggregations, error)
+	SignalsLatest(ctx context.Context, subject string, filter *model.SignalFilter) (*model.SignalCollection, error)
+	AvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error)
+	DataSummary(ctx context.Context, subject string, filter *model.SignalFilter) (*model.DataSummary, error)
+	LatestCloudEvent(ctx context.Context, subject string, filter *model.CloudEventFilter) (*CloudEventWrapper, error)
+	CloudEvents(ctx context.Context, subject string, limit *int, filter *model.CloudEventFilter) ([]*CloudEventWrapper, error)
+	AvailableCloudEventTypes(ctx context.Context, subject string, filter *model.CloudEventFilter) ([]*model.CloudEventTypeSummary, error)
+	Events(ctx context.Context, subject string, from time.Time, to time.Time, filter *model.EventFilter) ([]*model.Event, error)
+	Segments(ctx context.Context, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, limit *int, after *time.Time) ([]*model.Segment, error)
+	DailyActivity(ctx context.Context, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) ([]*model.DailyActivity, error)
 }
 type SignalAggregationsResolver interface {
 	CurrentLocationApproximateCoordinates(ctx context.Context, obj *model.SignalAggregations, agg model.LocationAggregation) (*model.Location, error)
@@ -864,7 +864,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.AvailableCloudEventTypes(childComplexity, args["did"].(string), args["filter"].(*model.CloudEventFilter)), true
+		return e.ComplexityRoot.Query.AvailableCloudEventTypes(childComplexity, args["subject"].(string), args["filter"].(*model.CloudEventFilter)), true
 	case "Query.availableSignals":
 		if e.ComplexityRoot.Query.AvailableSignals == nil {
 			break
@@ -875,7 +875,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.AvailableSignals(childComplexity, args["did"].(string), args["filter"].(*model.SignalFilter)), true
+		return e.ComplexityRoot.Query.AvailableSignals(childComplexity, args["subject"].(string), args["filter"].(*model.SignalFilter)), true
 	case "Query.cloudEvents":
 		if e.ComplexityRoot.Query.CloudEvents == nil {
 			break
@@ -886,7 +886,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.CloudEvents(childComplexity, args["did"].(string), args["limit"].(*int), args["filter"].(*model.CloudEventFilter)), true
+		return e.ComplexityRoot.Query.CloudEvents(childComplexity, args["subject"].(string), args["limit"].(*int), args["filter"].(*model.CloudEventFilter)), true
 	case "Query.dailyActivity":
 		if e.ComplexityRoot.Query.DailyActivity == nil {
 			break
@@ -897,7 +897,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.DailyActivity(childComplexity, args["did"].(string), args["from"].(time.Time), args["to"].(time.Time), args["mechanism"].(model.DetectionMechanism), args["config"].(*model.SegmentConfig), args["signalRequests"].([]*model.SegmentSignalRequest), args["eventRequests"].([]*model.SegmentEventRequest), args["timezone"].(*string)), true
+		return e.ComplexityRoot.Query.DailyActivity(childComplexity, args["subject"].(string), args["from"].(time.Time), args["to"].(time.Time), args["mechanism"].(model.DetectionMechanism), args["config"].(*model.SegmentConfig), args["signalRequests"].([]*model.SegmentSignalRequest), args["eventRequests"].([]*model.SegmentEventRequest), args["timezone"].(*string)), true
 	case "Query.dataSummary":
 		if e.ComplexityRoot.Query.DataSummary == nil {
 			break
@@ -908,7 +908,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.DataSummary(childComplexity, args["did"].(string), args["filter"].(*model.SignalFilter)), true
+		return e.ComplexityRoot.Query.DataSummary(childComplexity, args["subject"].(string), args["filter"].(*model.SignalFilter)), true
 	case "Query.events":
 		if e.ComplexityRoot.Query.Events == nil {
 			break
@@ -919,7 +919,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.Events(childComplexity, args["did"].(string), args["from"].(time.Time), args["to"].(time.Time), args["filter"].(*model.EventFilter)), true
+		return e.ComplexityRoot.Query.Events(childComplexity, args["subject"].(string), args["from"].(time.Time), args["to"].(time.Time), args["filter"].(*model.EventFilter)), true
 
 	case "Query.latestCloudEvent":
 		if e.ComplexityRoot.Query.LatestCloudEvent == nil {
@@ -931,7 +931,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.LatestCloudEvent(childComplexity, args["did"].(string), args["filter"].(*model.CloudEventFilter)), true
+		return e.ComplexityRoot.Query.LatestCloudEvent(childComplexity, args["subject"].(string), args["filter"].(*model.CloudEventFilter)), true
 	case "Query.segments":
 		if e.ComplexityRoot.Query.Segments == nil {
 			break
@@ -942,7 +942,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.Segments(childComplexity, args["did"].(string), args["from"].(time.Time), args["to"].(time.Time), args["mechanism"].(model.DetectionMechanism), args["config"].(*model.SegmentConfig), args["signalRequests"].([]*model.SegmentSignalRequest), args["eventRequests"].([]*model.SegmentEventRequest), args["limit"].(*int), args["after"].(*time.Time)), true
+		return e.ComplexityRoot.Query.Segments(childComplexity, args["subject"].(string), args["from"].(time.Time), args["to"].(time.Time), args["mechanism"].(model.DetectionMechanism), args["config"].(*model.SegmentConfig), args["signalRequests"].([]*model.SegmentSignalRequest), args["eventRequests"].([]*model.SegmentEventRequest), args["limit"].(*int), args["after"].(*time.Time)), true
 	case "Query.signals":
 		if e.ComplexityRoot.Query.Signals == nil {
 			break
@@ -953,7 +953,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.Signals(childComplexity, args["did"].(string), args["interval"].(string), args["from"].(time.Time), args["to"].(time.Time), args["filter"].(*model.SignalFilter)), true
+		return e.ComplexityRoot.Query.Signals(childComplexity, args["subject"].(string), args["interval"].(string), args["from"].(time.Time), args["to"].(time.Time), args["filter"].(*model.SignalFilter)), true
 	case "Query.signalsLatest":
 		if e.ComplexityRoot.Query.SignalsLatest == nil {
 			break
@@ -964,7 +964,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.SignalsLatest(childComplexity, args["did"].(string), args["filter"].(*model.SignalFilter)), true
+		return e.ComplexityRoot.Query.SignalsLatest(childComplexity, args["subject"].(string), args["filter"].(*model.SignalFilter)), true
 
 	case "Segment.duration":
 		if e.ComplexityRoot.Segment.Duration == nil {
@@ -3228,7 +3228,7 @@ type Query {
   signals returns a collection of signals for a given vehicle DID in a given time range.
   """
   signals(
-    did: String!
+    subject: String!
     """
     interval is a time span that used for aggregatting the data with.
     A duration string is a sequence of decimal numbers, each with optional fraction and a unit suffix,
@@ -3242,18 +3242,18 @@ type Query {
   """
   SignalsLatest returns the latest signals for a given vehicle DID.
   """
-  signalsLatest(did: String!, filter: SignalFilter): SignalCollection
+  signalsLatest(subject: String!, filter: SignalFilter): SignalCollection
     @requiresVehicleToken
   """
   availableSignals returns a list of queryable signal names that have stored data for a given vehicle DID.
   """
-  availableSignals(did: String!, filter: SignalFilter): [String!]
+  availableSignals(subject: String!, filter: SignalFilter): [String!]
     @requiresVehicleToken
 
   """
   data summary of all signals for a given vehicle DID
   """
-  dataSummary(did: String!, filter: SignalFilter): DataSummary
+  dataSummary(subject: String!, filter: SignalFilter): DataSummary
     @requiresVehicleToken
 }
 type SignalAggregations {
@@ -3652,17 +3652,17 @@ extend type Query {
   """
   Latest full cloud event matching the given DID and optional filter.
   """
-  latestCloudEvent(did: String!, filter: CloudEventFilter): CloudEvent!
+  latestCloudEvent(subject: String!, filter: CloudEventFilter): CloudEvent!
 
   """
   List full cloud events matching the given DID and optional filter.
   """
-  cloudEvents(did: String!, limit: Int = 10, filter: CloudEventFilter): [CloudEvent!]!
+  cloudEvents(subject: String!, limit: Int = 10, filter: CloudEventFilter): [CloudEvent!]!
 
   """
   List cloud event types available for a subject, with counts and time ranges.
   """
-  availableCloudEventTypes(did: String!, filter: CloudEventFilter): [CloudEventTypeSummary!]!
+  availableCloudEventTypes(subject: String!, filter: CloudEventFilter): [CloudEventTypeSummary!]!
 }
 `, BuiltIn: false},
 	{Name: "../../schema/events.graphqls", Input: `extend type Query {
@@ -3671,9 +3671,9 @@ extend type Query {
   """
   events(
     """
-    did is the vehicle DID to get events for.
+    subject is the vehicle DID to get events for.
     """
-    did: String!
+    subject: String!
     """
     from is the start time of the event.
     """
@@ -3786,7 +3786,7 @@ extend type Query {
   When signalRequests is provided, those requests are added on top of the default set; duplicates (same name and agg) are omitted.
   """
   segments(
-    did: String!
+    subject: String!
     from: Time!
     to: Time!
     mechanism: DetectionMechanism!
@@ -3810,7 +3810,7 @@ extend type Query {
   Maximum date range: 31 days.
   """
   dailyActivity(
-    did: String!
+    subject: String!
     from: Time!
     to: Time!
     mechanism: DetectionMechanism!
@@ -5855,11 +5855,11 @@ func (ec *executionContext) field_Query___type_args(ctx context.Context, rawArgs
 func (ec *executionContext) field_Query_availableCloudEventTypes_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "filter", ec.unmarshalOCloudEventFilter2ᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚋmodelᚐCloudEventFilter)
 	if err != nil {
 		return nil, err
@@ -5871,11 +5871,11 @@ func (ec *executionContext) field_Query_availableCloudEventTypes_args(ctx contex
 func (ec *executionContext) field_Query_availableSignals_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "filter", ec.unmarshalOSignalFilter2ᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚋmodelᚐSignalFilter)
 	if err != nil {
 		return nil, err
@@ -5887,11 +5887,11 @@ func (ec *executionContext) field_Query_availableSignals_args(ctx context.Contex
 func (ec *executionContext) field_Query_cloudEvents_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "limit", ec.unmarshalOInt2ᚖint)
 	if err != nil {
 		return nil, err
@@ -5908,11 +5908,11 @@ func (ec *executionContext) field_Query_cloudEvents_args(ctx context.Context, ra
 func (ec *executionContext) field_Query_dailyActivity_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "from", ec.unmarshalNTime2timeᚐTime)
 	if err != nil {
 		return nil, err
@@ -5954,11 +5954,11 @@ func (ec *executionContext) field_Query_dailyActivity_args(ctx context.Context, 
 func (ec *executionContext) field_Query_dataSummary_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "filter", ec.unmarshalOSignalFilter2ᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚋmodelᚐSignalFilter)
 	if err != nil {
 		return nil, err
@@ -5970,11 +5970,11 @@ func (ec *executionContext) field_Query_dataSummary_args(ctx context.Context, ra
 func (ec *executionContext) field_Query_events_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "from", ec.unmarshalNTime2timeᚐTime)
 	if err != nil {
 		return nil, err
@@ -5996,11 +5996,11 @@ func (ec *executionContext) field_Query_events_args(ctx context.Context, rawArgs
 func (ec *executionContext) field_Query_latestCloudEvent_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "filter", ec.unmarshalOCloudEventFilter2ᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚋmodelᚐCloudEventFilter)
 	if err != nil {
 		return nil, err
@@ -6012,11 +6012,11 @@ func (ec *executionContext) field_Query_latestCloudEvent_args(ctx context.Contex
 func (ec *executionContext) field_Query_segments_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "from", ec.unmarshalNTime2timeᚐTime)
 	if err != nil {
 		return nil, err
@@ -6063,11 +6063,11 @@ func (ec *executionContext) field_Query_segments_args(ctx context.Context, rawAr
 func (ec *executionContext) field_Query_signalsLatest_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "filter", ec.unmarshalOSignalFilter2ᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚋmodelᚐSignalFilter)
 	if err != nil {
 		return nil, err
@@ -6079,11 +6079,11 @@ func (ec *executionContext) field_Query_signalsLatest_args(ctx context.Context, 
 func (ec *executionContext) field_Query_signals_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "did", ec.unmarshalNString2string)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "subject", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
 	}
-	args["did"] = arg0
+	args["subject"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "interval", ec.unmarshalNString2string)
 	if err != nil {
 		return nil, err
@@ -9441,7 +9441,7 @@ func (ec *executionContext) _Query_signals(ctx context.Context, field graphql.Co
 		ec.fieldContext_Query_signals,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().Signals(ctx, fc.Args["did"].(string), fc.Args["interval"].(string), fc.Args["from"].(time.Time), fc.Args["to"].(time.Time), fc.Args["filter"].(*model.SignalFilter))
+			return ec.Resolvers.Query().Signals(ctx, fc.Args["subject"].(string), fc.Args["interval"].(string), fc.Args["from"].(time.Time), fc.Args["to"].(time.Time), fc.Args["filter"].(*model.SignalFilter))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -9733,7 +9733,7 @@ func (ec *executionContext) _Query_signalsLatest(ctx context.Context, field grap
 		ec.fieldContext_Query_signalsLatest,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().SignalsLatest(ctx, fc.Args["did"].(string), fc.Args["filter"].(*model.SignalFilter))
+			return ec.Resolvers.Query().SignalsLatest(ctx, fc.Args["subject"].(string), fc.Args["filter"].(*model.SignalFilter))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -10025,7 +10025,7 @@ func (ec *executionContext) _Query_availableSignals(ctx context.Context, field g
 		ec.fieldContext_Query_availableSignals,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().AvailableSignals(ctx, fc.Args["did"].(string), fc.Args["filter"].(*model.SignalFilter))
+			return ec.Resolvers.Query().AvailableSignals(ctx, fc.Args["subject"].(string), fc.Args["filter"].(*model.SignalFilter))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -10079,7 +10079,7 @@ func (ec *executionContext) _Query_dataSummary(ctx context.Context, field graphq
 		ec.fieldContext_Query_dataSummary,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().DataSummary(ctx, fc.Args["did"].(string), fc.Args["filter"].(*model.SignalFilter))
+			return ec.Resolvers.Query().DataSummary(ctx, fc.Args["subject"].(string), fc.Args["filter"].(*model.SignalFilter))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -10147,7 +10147,7 @@ func (ec *executionContext) _Query_latestCloudEvent(ctx context.Context, field g
 		ec.fieldContext_Query_latestCloudEvent,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().LatestCloudEvent(ctx, fc.Args["did"].(string), fc.Args["filter"].(*model.CloudEventFilter))
+			return ec.Resolvers.Query().LatestCloudEvent(ctx, fc.Args["subject"].(string), fc.Args["filter"].(*model.CloudEventFilter))
 		},
 		nil,
 		ec.marshalNCloudEvent2ᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚐCloudEventWrapper,
@@ -10198,7 +10198,7 @@ func (ec *executionContext) _Query_cloudEvents(ctx context.Context, field graphq
 		ec.fieldContext_Query_cloudEvents,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().CloudEvents(ctx, fc.Args["did"].(string), fc.Args["limit"].(*int), fc.Args["filter"].(*model.CloudEventFilter))
+			return ec.Resolvers.Query().CloudEvents(ctx, fc.Args["subject"].(string), fc.Args["limit"].(*int), fc.Args["filter"].(*model.CloudEventFilter))
 		},
 		nil,
 		ec.marshalNCloudEvent2ᚕᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚐCloudEventWrapperᚄ,
@@ -10249,7 +10249,7 @@ func (ec *executionContext) _Query_availableCloudEventTypes(ctx context.Context,
 		ec.fieldContext_Query_availableCloudEventTypes,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().AvailableCloudEventTypes(ctx, fc.Args["did"].(string), fc.Args["filter"].(*model.CloudEventFilter))
+			return ec.Resolvers.Query().AvailableCloudEventTypes(ctx, fc.Args["subject"].(string), fc.Args["filter"].(*model.CloudEventFilter))
 		},
 		nil,
 		ec.marshalNCloudEventTypeSummary2ᚕᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚋmodelᚐCloudEventTypeSummaryᚄ,
@@ -10300,7 +10300,7 @@ func (ec *executionContext) _Query_events(ctx context.Context, field graphql.Col
 		ec.fieldContext_Query_events,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().Events(ctx, fc.Args["did"].(string), fc.Args["from"].(time.Time), fc.Args["to"].(time.Time), fc.Args["filter"].(*model.EventFilter))
+			return ec.Resolvers.Query().Events(ctx, fc.Args["subject"].(string), fc.Args["from"].(time.Time), fc.Args["to"].(time.Time), fc.Args["filter"].(*model.EventFilter))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -10378,7 +10378,7 @@ func (ec *executionContext) _Query_segments(ctx context.Context, field graphql.C
 		ec.fieldContext_Query_segments,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().Segments(ctx, fc.Args["did"].(string), fc.Args["from"].(time.Time), fc.Args["to"].(time.Time), fc.Args["mechanism"].(model.DetectionMechanism), fc.Args["config"].(*model.SegmentConfig), fc.Args["signalRequests"].([]*model.SegmentSignalRequest), fc.Args["eventRequests"].([]*model.SegmentEventRequest), fc.Args["limit"].(*int), fc.Args["after"].(*time.Time))
+			return ec.Resolvers.Query().Segments(ctx, fc.Args["subject"].(string), fc.Args["from"].(time.Time), fc.Args["to"].(time.Time), fc.Args["mechanism"].(model.DetectionMechanism), fc.Args["config"].(*model.SegmentConfig), fc.Args["signalRequests"].([]*model.SegmentSignalRequest), fc.Args["eventRequests"].([]*model.SegmentEventRequest), fc.Args["limit"].(*int), fc.Args["after"].(*time.Time))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -10460,7 +10460,7 @@ func (ec *executionContext) _Query_dailyActivity(ctx context.Context, field grap
 		ec.fieldContext_Query_dailyActivity,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().DailyActivity(ctx, fc.Args["did"].(string), fc.Args["from"].(time.Time), fc.Args["to"].(time.Time), fc.Args["mechanism"].(model.DetectionMechanism), fc.Args["config"].(*model.SegmentConfig), fc.Args["signalRequests"].([]*model.SegmentSignalRequest), fc.Args["eventRequests"].([]*model.SegmentEventRequest), fc.Args["timezone"].(*string))
+			return ec.Resolvers.Query().DailyActivity(ctx, fc.Args["subject"].(string), fc.Args["from"].(time.Time), fc.Args["to"].(time.Time), fc.Args["mechanism"].(model.DetectionMechanism), fc.Args["config"].(*model.SegmentConfig), fc.Args["signalRequests"].([]*model.SegmentSignalRequest), fc.Args["eventRequests"].([]*model.SegmentEventRequest), fc.Args["timezone"].(*string))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next

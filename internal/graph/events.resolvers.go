@@ -13,6 +13,6 @@ import (
 )
 
 // Events is the resolver for the events field.
-func (r *queryResolver) Events(ctx context.Context, did string, from time.Time, to time.Time, filter *model.EventFilter) ([]*model.Event, error) {
-	return r.SignalRepo.GetEvents(ctx, did, from, to, filter)
+func (r *queryResolver) Events(ctx context.Context, subject string, from time.Time, to time.Time, filter *model.EventFilter) ([]*model.Event, error) {
+	return r.SignalRepo.GetEvents(ctx, subject, from, to, filter)
 }

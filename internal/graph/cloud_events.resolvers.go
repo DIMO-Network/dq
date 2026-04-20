@@ -42,8 +42,8 @@ func (r *cloudEventResolver) DataBase64(ctx context.Context, obj *CloudEventWrap
 }
 
 // LatestCloudEvent is the resolver for the latestCloudEvent field.
-func (r *queryResolver) LatestCloudEvent(ctx context.Context, did string, filter *model.CloudEventFilter) (*CloudEventWrapper, error) {
-	opts, err := r.requireSubjectOptsByDID(ctx, did, filter)
+func (r *queryResolver) LatestCloudEvent(ctx context.Context, subject string, filter *model.CloudEventFilter) (*CloudEventWrapper, error) {
+	opts, err := r.requireSubjectOptsByDID(ctx, subject, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -70,8 +70,8 @@ func (r *queryResolver) LatestCloudEvent(ctx context.Context, did string, filter
 }
 
 // CloudEvents is the resolver for the cloudEvents field.
-func (r *queryResolver) CloudEvents(ctx context.Context, did string, limit *int, filter *model.CloudEventFilter) ([]*CloudEventWrapper, error) {
-	opts, err := r.requireSubjectOptsByDID(ctx, did, filter)
+func (r *queryResolver) CloudEvents(ctx context.Context, subject string, limit *int, filter *model.CloudEventFilter) ([]*CloudEventWrapper, error) {
+	opts, err := r.requireSubjectOptsByDID(ctx, subject, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +119,8 @@ func (r *queryResolver) CloudEvents(ctx context.Context, did string, limit *int,
 }
 
 // AvailableCloudEventTypes is the resolver for the availableCloudEventTypes field.
-func (r *queryResolver) AvailableCloudEventTypes(ctx context.Context, did string, filter *model.CloudEventFilter) ([]*model.CloudEventTypeSummary, error) {
-	opts, err := r.requireSubjectOptsByDID(ctx, did, filter)
+func (r *queryResolver) AvailableCloudEventTypes(ctx context.Context, subject string, filter *model.CloudEventFilter) ([]*model.CloudEventTypeSummary, error) {
+	opts, err := r.requireSubjectOptsByDID(ctx, subject, filter)
 	if err != nil {
 		return nil, err
 	}
