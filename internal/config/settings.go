@@ -13,7 +13,7 @@ type Settings struct {
 	MonPort                   int             `yaml:"MON_PORT"`
 	EnablePprof               bool            `yaml:"ENABLE_PPROF"`
 	MaxRequestDuration        string          `yaml:"MAX_REQUEST_DURATION"`
-	Clickhouse                config.Settings `yaml:"SIGNAL"`
+	ClickhouseSignal          config.Settings `yaml:"SIGNAL"`
 	ClickhouseFileCatalogue   config.Settings `yaml:"FILE"`
 	TokenExchangeJWTKeySetURL string          `yaml:"TOKEN_EXCHANGE_JWK_KEY_SET_URL"`
 	TokenExchangeIssuer       string          `yaml:"TOKEN_EXCHANGE_ISSUER_URL"`

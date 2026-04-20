@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DIMO-Network/cloudevent"
 	chconfig "github.com/DIMO-Network/clickhouse-infra/pkg/connect/config"
 	"github.com/DIMO-Network/clickhouse-infra/pkg/container"
-	"github.com/DIMO-Network/model-garage/pkg/migrations"
-	"github.com/DIMO-Network/model-garage/pkg/vss"
+	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/config"
 	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/DIMO-Network/model-garage/pkg/migrations"
+	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -54,7 +54,7 @@ func (c *CHServiceTestSuite) SetupSuite() {
 	c.Require().NoError(err, "Failed to run migrations")
 
 	settings := config.Settings{
-		Clickhouse:         cfg,
+		ClickhouseSignal:   cfg,
 		MaxRequestDuration: "1s",
 	}
 	c.chService, err = NewService(settings)
