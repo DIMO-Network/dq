@@ -25,6 +25,7 @@ type CHService interface {
 	GetAggregatedSignals(ctx context.Context, subject string, aggArgs *model.AggregatedSignalArgs) ([]*ch.AggSignal, error)
 	GetAggregatedSignalsForRanges(ctx context.Context, subject string, ranges []ch.TimeRange, globalFrom, globalTo time.Time, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs) ([]*ch.AggSignalForRange, error)
 	GetLatestSignals(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error)
+	GetAllLatestSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error)
 	GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error)
 	GetSignalSummaries(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error)
 	GetEvents(ctx context.Context, subject string, from, to time.Time, filter *model.EventFilter) ([]*vss.Event, error)
@@ -216,6 +217,66 @@ func (r *Repository) GetEvents(ctx context.Context, did string, from, to time.Ti
 		}
 	}
 	return retEvents, nil
+}
+
+// GetSignalSnapshot returns the latest value for every available signal for the given subject.
+func (r *Repository) GetSignalSnapshot(ctx context.Context, subject string, filter *model.SignalFilter) (*model.SignalsSnapshotResponse, error) {
+	signals, err := r.chService.GetAllLatestSignals(ctx, subject, filter)
+	if err != nil {
+		return nil, handleDBError(ctx, err)
+	}
+	resp := &model.SignalsSnapshotResponse{Signals: []*model.LatestSignal{}}
+	var rawLocationSignal *vss.Signal
+	for _, signal := range signals {
+		if signal.Data.Name == model.LastSeenField && !signal.Data.Timestamp.Equal(unixEpoch) {
+			resp.LastSeen = &signal.Data.Timestamp
+			continue
+		}
+		if _, ok := r.queryableSignals[signal.Data.Name]; !ok {
+			continue
+		}
+		resp.Signals = append(resp.Signals, signalToLatestSignal(signal))
+		if signal.Data.Name == vss.FieldCurrentLocationCoordinates {
+			rawLocationSignal = signal
+		}
+	}
+	if rawLocationSignal != nil {
+		loc := rawLocationSignal.Data.ValueLocation
+		if approx := GetApproximateLoc(loc.Latitude, loc.Longitude); approx != nil {
+			resp.Signals = append(resp.Signals, &model.LatestSignal{
+				Name:      model.ApproximateCoordinatesField,
+				Timestamp: rawLocationSignal.Data.Timestamp,
+				ValueLocation: &model.Location{
+					Latitude:  approx.Lat,
+					Longitude: approx.Lng,
+					Hdop:      loc.HDOP,
+				},
+			})
+		}
+	}
+	return resp, nil
+}
+
+func signalToLatestSignal(signal *vss.Signal) *model.LatestSignal {
+	ls := &model.LatestSignal{
+		Name:      signal.Data.Name,
+		Timestamp: signal.Data.Timestamp,
+	}
+	loc := signal.Data.ValueLocation
+	if loc.Latitude != 0 || loc.Longitude != 0 {
+		ls.ValueLocation = &model.Location{
+			Latitude:  loc.Latitude,
+			Longitude: loc.Longitude,
+			Hdop:      loc.HDOP,
+		}
+	} else if signal.Data.ValueString != "" {
+		s := signal.Data.ValueString
+		ls.ValueString = &s
+	} else {
+		n := signal.Data.ValueNumber
+		ls.ValueNumber = &n
+	}
+	return ls
 }
 
 // handleDBError logs the error and returns a generic error message.

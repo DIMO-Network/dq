@@ -7,11 +7,14 @@ package graph
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
+	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
+	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
 )
 
 // Signals is the resolver for the signals field.
@@ -40,6 +43,39 @@ func (r *queryResolver) AvailableSignals(ctx context.Context, subject string, fi
 // DataSummary is the resolver for the dataSummary field.
 func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter *model.SignalFilter) (*model.DataSummary, error) {
 	return r.SignalRepo.GetDataSummary(ctx, subject, filter)
+}
+
+// SignalsSnapshot is the resolver for the signalsSnapshot field.
+func (r *queryResolver) SignalsSnapshot(ctx context.Context, subject string, filter *model.SignalFilter) (*model.SignalsSnapshotResponse, error) {
+	resp, err := r.SignalRepo.GetSignalSnapshot(ctx, subject, filter)
+	if err != nil {
+		return nil, err
+	}
+	tok, _ := ctx.Value(ClaimsContextKey{}).(*tokenclaims.Token)
+	var permissions []string
+	if tok != nil {
+		permissions = tok.Permissions
+	}
+	filtered := make([]*model.LatestSignal, 0, len(resp.Signals))
+	for _, sig := range resp.Signals {
+		if hasPrivilegesForSignal(sig.Name, permissions) {
+			filtered = append(filtered, sig)
+		}
+	}
+	resp.Signals = filtered
+	return resp, nil
+}
+
+func hasPrivilegesForSignal(name string, permissions []string) bool {
+	switch name {
+	case vss.FieldCurrentLocationCoordinates:
+		return slices.Contains(permissions, tokenclaims.PermissionGetLocationHistory)
+	case model.ApproximateCoordinatesField:
+		return slices.Contains(permissions, tokenclaims.PermissionGetApproximateLocation) ||
+			slices.Contains(permissions, tokenclaims.PermissionGetLocationHistory)
+	default:
+		return slices.Contains(permissions, tokenclaims.PermissionGetNonLocationHistory)
+	}
 }
 
 // CurrentLocationApproximateCoordinates is the resolver for the currentLocationApproximateCoordinates field.

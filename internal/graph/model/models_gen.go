@@ -118,6 +118,15 @@ type InCircleFilter struct {
 	Radius float64 `json:"radius"`
 }
 
+// A single signal value at a specific point in time, returned by signalsSnapshot.
+type LatestSignal struct {
+	Name          string    `json:"name"`
+	Timestamp     time.Time `json:"timestamp"`
+	ValueNumber   *float64  `json:"valueNumber,omitempty"`
+	ValueString   *string   `json:"valueString,omitempty"`
+	ValueLocation *Location `json:"valueLocation,omitempty"`
+}
+
 type Location struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
@@ -676,6 +685,11 @@ type SignalString struct {
 	Timestamp time.Time `json:"timestamp"`
 	// value of the signal
 	Value string `json:"value"`
+}
+
+type SignalsSnapshotResponse struct {
+	LastSeen *time.Time      `json:"lastSeen,omitempty"`
+	Signals  []*LatestSignal `json:"signals"`
 }
 
 // Filters that apply to string arrays.

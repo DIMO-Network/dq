@@ -56,7 +56,29 @@ type Query {
   """
   dataSummary(subject: String!, filter: SignalFilter): DataSummary
     @requiresVehicleToken
+
+  """
+  signalsSnapshot returns the latest value of every available signal for a vehicle, along with when any signal was last seen.
+  """
+  signalsSnapshot(subject: String!, filter: SignalFilter): SignalsSnapshotResponse
+    @requiresVehicleToken
 }
+"""
+A single signal value at a specific point in time, returned by signalsSnapshot.
+"""
+type LatestSignal {
+  name: String!
+  timestamp: Time!
+  valueNumber: Float
+  valueString: String
+  valueLocation: Location
+}
+
+type SignalsSnapshotResponse {
+  lastSeen: Time
+  signals: [LatestSignal!]!
+}
+
 type SignalAggregations {
   """
   Timestamp of the aggregated data.
