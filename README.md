@@ -47,4 +47,4 @@ latestCloudEvent(
 
 ### From Fetch
 
-The queries `indexes` and `latestIndex` have been removed. If a client does not want to incur the cost of loading the referenced documents, then it should not request the fields `data` or `dataBase64`.
+The queries `indexes` and `latestIndex` have been removed. If a client does not want to incur the cost of loading the referenced documents, then it should not request the fields `data` or `dataBase64`. Note that we no longer expose the `indexKey` field, since clients have no way of making use of it.
