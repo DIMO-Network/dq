@@ -38,6 +38,7 @@ type CHService interface {
 // Repository is the base repository for all repositories.
 type Repository struct {
 	queryableSignals map[string]struct{}
+	signalPrivileges map[string][]string
 	chService        CHService
 }
 
@@ -48,13 +49,26 @@ func NewRepository(chService CHService) (*Repository, error) {
 		return nil, fmt.Errorf("error reading definition file: %w", err)
 	}
 	queryableSignals := make(map[string]struct{}, len(definitions.FromName))
-	for vssName := range definitions.FromName {
-		queryableSignals[schema.VSSToJSONName(vssName)] = struct{}{}
+	signalPrivileges := make(map[string][]string, len(definitions.FromName))
+	for vssName, info := range definitions.FromName {
+		jsonName := schema.VSSToJSONName(vssName)
+		queryableSignals[jsonName] = struct{}{}
+		signalPrivileges[jsonName] = info.RequiredPrivileges
 	}
 	return &Repository{
 		chService:        chService,
 		queryableSignals: queryableSignals,
+		signalPrivileges: signalPrivileges,
 	}, nil
+}
+
+// RequiredPrivileges returns the privilege enum values required to read the named
+// signal. The second return is false for signals not in the definitions file
+// (e.g. derived signals like currentLocationApproximateCoordinates) — callers
+// should fail closed in that case.
+func (r *Repository) RequiredPrivileges(signalName string) ([]string, bool) {
+	privs, ok := r.signalPrivileges[signalName]
+	return privs, ok
 }
 
 // GetSignal returns the aggregated signals for the given DID, interval, from, to and filter.

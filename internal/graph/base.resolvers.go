@@ -11,11 +11,22 @@ import (
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
-	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
 )
+
+// privilegeEnumToPermission maps GraphQL Privilege enum values (as they appear
+// in model-garage definitions.yaml) to tokenclaims permission strings.
+var privilegeEnumToPermission = map[string]string{
+	"VEHICLE_NON_LOCATION_DATA":    tokenclaims.PermissionGetNonLocationHistory,
+	"VEHICLE_COMMANDS":             tokenclaims.PermissionExecuteCommands,
+	"VEHICLE_CURRENT_LOCATION":     tokenclaims.PermissionGetCurrentLocation,
+	"VEHICLE_ALL_TIME_LOCATION":    tokenclaims.PermissionGetLocationHistory,
+	"VEHICLE_VIN_CREDENTIAL":       tokenclaims.PermissionGetVINCredential,
+	"VEHICLE_APPROXIMATE_LOCATION": tokenclaims.PermissionGetApproximateLocation,
+	"VEHICLE_RAW_DATA":             tokenclaims.PermissionGetRawData,
+}
 
 // Signals is the resolver for the signals field.
 func (r *queryResolver) Signals(ctx context.Context, subject string, interval string, from time.Time, to time.Time, filter *model.SignalFilter) ([]*model.SignalAggregations, error) {
@@ -58,7 +69,7 @@ func (r *queryResolver) SignalsSnapshot(ctx context.Context, subject string, fil
 	}
 	filtered := make([]*model.LatestSignal, 0, len(resp.Signals))
 	for _, sig := range resp.Signals {
-		if hasPrivilegesForSignal(sig.Name, permissions) {
+		if hasPrivilegesForSignal(r.SignalRepo, sig.Name, permissions) {
 			filtered = append(filtered, sig)
 		}
 	}
@@ -66,16 +77,27 @@ func (r *queryResolver) SignalsSnapshot(ctx context.Context, subject string, fil
 	return resp, nil
 }
 
-func hasPrivilegesForSignal(name string, permissions []string) bool {
-	switch name {
-	case vss.FieldCurrentLocationCoordinates:
-		return slices.Contains(permissions, tokenclaims.PermissionGetLocationHistory)
-	case model.ApproximateCoordinatesField:
+func hasPrivilegesForSignal(repo *repositories.Repository, name string, permissions []string) bool {
+	// currentLocationApproximateCoordinates is a derived signal not in the
+	// definitions file; either approximate or all-time location suffices.
+	if name == model.ApproximateCoordinatesField {
 		return slices.Contains(permissions, tokenclaims.PermissionGetApproximateLocation) ||
 			slices.Contains(permissions, tokenclaims.PermissionGetLocationHistory)
-	default:
-		return slices.Contains(permissions, tokenclaims.PermissionGetNonLocationHistory)
 	}
+	required, ok := repo.RequiredPrivileges(name)
+	if !ok {
+		return false
+	}
+	for _, priv := range required {
+		perm, mapped := privilegeEnumToPermission[priv]
+		if !mapped {
+			return false
+		}
+		if !slices.Contains(permissions, perm) {
+			return false
+		}
+	}
+	return true
 }
 
 // CurrentLocationApproximateCoordinates is the resolver for the currentLocationApproximateCoordinates field.
