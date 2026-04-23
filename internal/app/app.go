@@ -22,6 +22,7 @@ import (
 	fetchgrpc "github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
 	gqlmetrics "github.com/DIMO-Network/server-garage/pkg/gql/metrics"
+	"github.com/DIMO-Network/server-garage/pkg/mcpserver"
 	"github.com/DIMO-Network/shared/pkg/middleware/metrics"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
 	"github.com/rs/zerolog"
@@ -34,8 +35,9 @@ var AppName = "dq"
 
 // App is the main application.
 type App struct {
-	Handler http.Handler
-	cleanup func()
+	Handler    http.Handler
+	MCPHandler http.Handler
+	cleanup    func()
 }
 
 // New creates a new application.
@@ -77,7 +79,8 @@ func New(settings config.Settings) (*App, error) {
 	cfg.Directives.IsSignal = noOp
 	cfg.Directives.HasAggregation = noOp
 
-	gqlSrv := newServer(graph.NewExecutableSchema(cfg))
+	es := graph.NewExecutableSchema(cfg)
+	gqlSrv := newServer(es)
 
 	jwtMiddleware, err := auth.NewJWTMiddleware(settings.TokenExchangeIssuer, settings.TokenExchangeJWTKeySetURL)
 	if err != nil {
@@ -89,21 +92,34 @@ func New(settings config.Settings) (*App, error) {
 		return nil, fmt.Errorf("couldn't create request time limit middleware: %w", err)
 	}
 
-	serverHandler := PanicRecoveryMiddleware(
-		LoggerMiddleware(
-			limiter.AddRequestTimeout(
-				jwtMiddleware.CheckJWT(
-					authLoggerMiddleware(
-						auth.AddClaimHandler(gqlSrv),
+	authChain := func(inner http.Handler) http.Handler {
+		return PanicRecoveryMiddleware(
+			LoggerMiddleware(
+				limiter.AddRequestTimeout(
+					jwtMiddleware.CheckJWT(
+						authLoggerMiddleware(
+							auth.AddClaimHandler(inner),
+						),
 					),
 				),
 			),
-		),
+		)
+	}
+
+	mcpHandler, err := mcpserver.New(
+		mcpserver.NewGQLGenExecutor(es),
+		"DIMO Query", "0.1.0", "dq",
+		mcpserver.WithTools(graph.MCPTools),
+		mcpserver.WithCondensedSchema(graph.CondensedSchema),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't create MCP handler: %w", err)
+	}
 
 	return &App{
-		Handler: serverHandler,
-		cleanup: func() {},
+		Handler:    authChain(gqlSrv),
+		MCPHandler: authChain(mcpHandler),
+		cleanup:    func() {},
 	}, nil
 }
 

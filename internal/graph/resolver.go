@@ -1,3 +1,4 @@
+//go:generate go run github.com/DIMO-Network/server-garage/cmd/mcpgen -schema ../../schema/ -prefix dq -out mcp_tools_gen.go -package graph
 package graph
 
 import (

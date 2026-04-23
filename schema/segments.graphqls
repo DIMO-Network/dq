@@ -74,6 +74,8 @@ extend type Query {
     """
     after: Time
   ): [Segment!]! @requiresVehicleToken @requiresAllOfPrivileges(privileges: [VEHICLE_ALL_TIME_LOCATION, VEHICLE_NON_LOCATION_DATA])
+    @mcpTool(name: "get_trip_segments", description: "Get vehicle trip/activity segments detected using a specified mechanism (FREQUENCY_ANALYSIS, IGNITION_DETECTION, CHANGE_POINT_DETECTION, IDLING, REFUEL, RECHARGE). Returns start/end locations, duration, and optional signal aggregates and event counts. Maximum date range: 31 days.", selection: "start { timestamp value { latitude longitude } } end { timestamp value { latitude longitude } } duration isOngoing startedBeforeRange signals { name agg value } eventCounts { name count }")
+    @mcpExample(description: "Trip segments with start/end locations and signal aggregates", query: "query Trips($subject:String!,$from:Time!,$to:Time!) { segments(subject:$subject,from:$from,to:$to,mechanism:FREQUENCY_ANALYSIS) { start{timestamp value{latitude longitude}} end{timestamp value{latitude longitude}} duration isOngoing signals{name agg value} eventCounts{name count} } }")
 
   """
   Returns one record per calendar day in the date range.
@@ -90,6 +92,8 @@ extend type Query {
     eventRequests: [SegmentEventRequest!]
     timezone: String
   ): [DailyActivity!]! @requiresVehicleToken @requiresAllOfPrivileges(privileges: [VEHICLE_ALL_TIME_LOCATION, VEHICLE_NON_LOCATION_DATA])
+    @mcpTool(name: "get_daily_activity", description: "Get per-day driving activity summaries for a vehicle. Returns segment count, total active duration, and signal aggregates per day. Maximum date range: 31 days.", selection: "segmentCount duration signals { name agg value } eventCounts { name count }")
+    @mcpExample(description: "Daily activity summaries", query: "query Daily($subject:String!,$from:Time!,$to:Time!) { dailyActivity(subject:$subject,from:$from,to:$to,mechanism:FREQUENCY_ANALYSIS) { segmentCount duration signals{name agg value} eventCounts{name count} } }")
 }
 
 input SegmentSignalRequest {

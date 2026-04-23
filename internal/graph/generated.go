@@ -38,6 +38,7 @@ type ResolverRoot interface {
 type DirectiveRoot struct {
 	HasAggregation          func(ctx context.Context, obj any, next graphql.Resolver) (res any, err error)
 	IsSignal                func(ctx context.Context, obj any, next graphql.Resolver) (res any, err error)
+	McpHide                 func(ctx context.Context, obj any, next graphql.Resolver) (res any, err error)
 	RequiresAllOfPrivileges func(ctx context.Context, obj any, next graphql.Resolver, privileges []string) (res any, err error)
 	RequiresOneOfPrivilege  func(ctx context.Context, obj any, next graphql.Resolver, privileges []string) (res any, err error)
 	RequiresVehicleToken    func(ctx context.Context, obj any, next graphql.Resolver) (res any, err error)
@@ -3309,28 +3310,36 @@ type Query {
     to: Time!
     filter: SignalFilter
   ): [SignalAggregations!] @requiresVehicleToken
+    @mcpTool(name: "get_signals_time_series", description: "Get aggregated signal time series for a vehicle over a date range. Returns signal values bucketed by the specified interval (e.g. '1h', '15m'). Use with signal field names and aggregation functions.", selection: "timestamp")
+    @mcpExample(description: "Hourly average speed over a time range", query: "query TimeSeries($subject:String!,$from:Time!,$to:Time!) { signals(subject:$subject,interval:\"1h\",from:$from,to:$to) { timestamp speed(agg:AVG) } }")
   """
   SignalsLatest returns the latest signals for a given vehicle DID.
   """
   signalsLatest(subject: String!, filter: SignalFilter): SignalCollection
     @requiresVehicleToken
+    @mcpTool(name: "get_latest_signals", description: "Get the most recent signal values for a vehicle by subject DID. Returns the last-seen timestamp for the vehicle.", selection: "lastSeen")
+    @mcpExample(description: "Latest speed and battery charge", query: "query Latest($subject:String!) { signalsLatest(subject:$subject) { lastSeen speed{timestamp value} powertrainTractionBatteryStateOfChargeCurrent{timestamp value} } }")
   """
   availableSignals returns a list of queryable signal names that have stored data for a given vehicle DID.
   """
   availableSignals(subject: String!, filter: SignalFilter): [String!]
     @requiresVehicleToken
+    @mcpTool(name: "get_available_signals", description: "List queryable signal names that have stored data for a vehicle by subject DID.", selection: "")
 
   """
   data summary of all signals for a given vehicle DID
   """
   dataSummary(subject: String!, filter: SignalFilter): DataSummary
     @requiresVehicleToken
+    @mcpTool(name: "get_data_summary", description: "Get a summary of all data available for a vehicle by subject DID. Returns total signal count, available signal names, first/last seen timestamps, and per-signal and per-event breakdowns.", selection: "numberOfSignals availableSignals firstSeen lastSeen signalDataSummary { name numberOfSignals firstSeen lastSeen } eventDataSummary { name numberOfEvents firstSeen lastSeen }")
 
   """
   signalsSnapshot returns the latest value of every available signal for a vehicle, along with when any signal was last seen.
   """
   signalsSnapshot(subject: String!, filter: SignalFilter): SignalsSnapshotResponse
     @requiresVehicleToken
+    @mcpTool(name: "get_signals_snapshot", description: "Get a point-in-time snapshot of all available signals for a vehicle by subject DID. Returns every signal the caller has permission to see.", selection: "lastSeen signals { name timestamp valueNumber valueString valueLocation { latitude longitude hdop } }")
+    @mcpExample(description: "Full snapshot of all signals for a vehicle", query: "query Snapshot($subject:String!) { signalsSnapshot(subject:$subject) { lastSeen signals { name timestamp valueNumber valueString valueLocation { latitude longitude hdop } } } }")
 }
 """
 A single signal value at a specific point in time, returned by signalsSnapshot.
@@ -3742,19 +3751,34 @@ input CloudEventFilter {
 
 extend type Query {
   """
-  Latest full cloud event matching the given DID and optional filter.
+  Latest full cloud event matching the given subject DID and optional filter.
   """
   latestCloudEvent(subject: String!, filter: CloudEventFilter): CloudEvent!
+    @mcpTool(
+      name: "get_latest_cloud_event"
+      description: "Get the latest full CloudEvent (header + JSON payload) for a subject DID, optionally filtered. Returns dataUrl (presigned S3 link) for large binary payloads instead of inlining them."
+      selection: "header { type source subject id time producer } data dataUrl"
+    )
 
   """
-  List full cloud events matching the given DID and optional filter.
+  List full cloud events matching the given subject DID and optional filter.
   """
   cloudEvents(subject: String!, limit: Int = 10, filter: CloudEventFilter): [CloudEvent!]!
+    @mcpTool(
+      name: "list_cloud_events"
+      description: "List full CloudEvents (headers + JSON payloads) for a subject DID, optionally filtered and limited (default 10). Large binary payloads are returned as presigned S3 URLs via dataUrl instead of inlined data."
+      selection: "header { type source subject id time producer } data dataUrl"
+    )
 
   """
   List cloud event types available for a subject, with counts and time ranges.
   """
   availableCloudEventTypes(subject: String!, filter: CloudEventFilter): [CloudEventTypeSummary!]!
+    @mcpTool(
+      name: "list_available_event_types"
+      description: "Summarize the CloudEvent types present for a subject DID. Returns each type with its count, firstSeen, and lastSeen timestamps — useful for discovering what kinds of events exist before querying them."
+      selection: "type count firstSeen lastSeen"
+    )
 }
 `, BuiltIn: false},
 	{Name: "../../schema/events.graphqls", Input: `extend type Query {
@@ -3783,6 +3807,7 @@ extend type Query {
     @requiresAllOfPrivileges(
       privileges: [VEHICLE_NON_LOCATION_DATA, VEHICLE_ALL_TIME_LOCATION]
     )
+    @mcpTool(name: "get_events", description: "Get discrete events for a vehicle in a time range. Returns event name, source, timestamp, duration, and optional metadata.", selection: "timestamp name source durationNs metadata")
 }
 
 type Event {
@@ -3818,6 +3843,10 @@ input EventFilter {
   """
   source: StringValueFilter
 }
+`, BuiltIn: false},
+	{Name: "../../schema/mcp.graphqls", Input: `directive @mcpTool(name: String!, description: String!, selection: String!, readOnly: Boolean = true) on FIELD_DEFINITION
+directive @mcpExample(description: String!, query: String!) repeatable on FIELD_DEFINITION
+directive @mcpHide on FIELD_DEFINITION
 `, BuiltIn: false},
 	{Name: "../../schema/segments.graphqls", Input: `enum DetectionMechanism {
   """
@@ -3895,6 +3924,8 @@ extend type Query {
     """
     after: Time
   ): [Segment!]! @requiresVehicleToken @requiresAllOfPrivileges(privileges: [VEHICLE_ALL_TIME_LOCATION, VEHICLE_NON_LOCATION_DATA])
+    @mcpTool(name: "get_trip_segments", description: "Get vehicle trip/activity segments detected using a specified mechanism (FREQUENCY_ANALYSIS, IGNITION_DETECTION, CHANGE_POINT_DETECTION, IDLING, REFUEL, RECHARGE). Returns start/end locations, duration, and optional signal aggregates and event counts. Maximum date range: 31 days.", selection: "start { timestamp value { latitude longitude } } end { timestamp value { latitude longitude } } duration isOngoing startedBeforeRange signals { name agg value } eventCounts { name count }")
+    @mcpExample(description: "Trip segments with start/end locations and signal aggregates", query: "query Trips($subject:String!,$from:Time!,$to:Time!) { segments(subject:$subject,from:$from,to:$to,mechanism:FREQUENCY_ANALYSIS) { start{timestamp value{latitude longitude}} end{timestamp value{latitude longitude}} duration isOngoing signals{name agg value} eventCounts{name count} } }")
 
   """
   Returns one record per calendar day in the date range.
@@ -3911,6 +3942,8 @@ extend type Query {
     eventRequests: [SegmentEventRequest!]
     timezone: String
   ): [DailyActivity!]! @requiresVehicleToken @requiresAllOfPrivileges(privileges: [VEHICLE_ALL_TIME_LOCATION, VEHICLE_NON_LOCATION_DATA])
+    @mcpTool(name: "get_daily_activity", description: "Get per-day driving activity summaries for a vehicle. Returns segment count, total active duration, and signal aggregates per day. Maximum date range: 31 days.", selection: "segmentCount duration signals { name agg value } eventCounts { name count }")
+    @mcpExample(description: "Daily activity summaries", query: "query Daily($subject:String!,$from:Time!,$to:Time!) { dailyActivity(subject:$subject,from:$from,to:$to,mechanism:FREQUENCY_ANALYSIS) { segmentCount duration signals{name agg value} eventCounts{name count} } }")
 }
 
 input SegmentSignalRequest {

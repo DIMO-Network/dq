@@ -24,6 +24,7 @@ extend type Query {
     @requiresAllOfPrivileges(
       privileges: [VEHICLE_NON_LOCATION_DATA, VEHICLE_ALL_TIME_LOCATION]
     )
+    @mcpTool(name: "get_events", description: "Get discrete events for a vehicle in a time range. Returns event name, source, timestamp, duration, and optional metadata.", selection: "timestamp name source durationNs metadata")
 }
 
 type Event {

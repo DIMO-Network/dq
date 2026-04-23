@@ -40,28 +40,36 @@ type Query {
     to: Time!
     filter: SignalFilter
   ): [SignalAggregations!] @requiresVehicleToken
+    @mcpTool(name: "get_signals_time_series", description: "Get aggregated signal time series for a vehicle over a date range. Returns signal values bucketed by the specified interval (e.g. '1h', '15m'). Use with signal field names and aggregation functions.", selection: "timestamp")
+    @mcpExample(description: "Hourly average speed over a time range", query: "query TimeSeries($subject:String!,$from:Time!,$to:Time!) { signals(subject:$subject,interval:\"1h\",from:$from,to:$to) { timestamp speed(agg:AVG) } }")
   """
   SignalsLatest returns the latest signals for a given vehicle DID.
   """
   signalsLatest(subject: String!, filter: SignalFilter): SignalCollection
     @requiresVehicleToken
+    @mcpTool(name: "get_latest_signals", description: "Get the most recent signal values for a vehicle by subject DID. Returns the last-seen timestamp for the vehicle.", selection: "lastSeen")
+    @mcpExample(description: "Latest speed and battery charge", query: "query Latest($subject:String!) { signalsLatest(subject:$subject) { lastSeen speed{timestamp value} powertrainTractionBatteryStateOfChargeCurrent{timestamp value} } }")
   """
   availableSignals returns a list of queryable signal names that have stored data for a given vehicle DID.
   """
   availableSignals(subject: String!, filter: SignalFilter): [String!]
     @requiresVehicleToken
+    @mcpTool(name: "get_available_signals", description: "List queryable signal names that have stored data for a vehicle by subject DID.", selection: "")
 
   """
   data summary of all signals for a given vehicle DID
   """
   dataSummary(subject: String!, filter: SignalFilter): DataSummary
     @requiresVehicleToken
+    @mcpTool(name: "get_data_summary", description: "Get a summary of all data available for a vehicle by subject DID. Returns total signal count, available signal names, first/last seen timestamps, and per-signal and per-event breakdowns.", selection: "numberOfSignals availableSignals firstSeen lastSeen signalDataSummary { name numberOfSignals firstSeen lastSeen } eventDataSummary { name numberOfEvents firstSeen lastSeen }")
 
   """
   signalsSnapshot returns the latest value of every available signal for a vehicle, along with when any signal was last seen.
   """
   signalsSnapshot(subject: String!, filter: SignalFilter): SignalsSnapshotResponse
     @requiresVehicleToken
+    @mcpTool(name: "get_signals_snapshot", description: "Get a point-in-time snapshot of all available signals for a vehicle by subject DID. Returns every signal the caller has permission to see.", selection: "lastSeen signals { name timestamp valueNumber valueString valueLocation { latitude longitude hdop } }")
+    @mcpExample(description: "Full snapshot of all signals for a vehicle", query: "query Snapshot($subject:String!) { signalsSnapshot(subject:$subject) { lastSeen signals { name timestamp valueNumber valueString valueLocation { latitude longitude hdop } } } }")
 }
 """
 A single signal value at a specific point in time, returned by signalsSnapshot.

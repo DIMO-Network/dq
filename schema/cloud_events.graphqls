@@ -67,17 +67,32 @@ input CloudEventFilter {
 
 extend type Query {
   """
-  Latest full cloud event matching the given DID and optional filter.
+  Latest full cloud event matching the given subject DID and optional filter.
   """
   latestCloudEvent(subject: String!, filter: CloudEventFilter): CloudEvent!
+    @mcpTool(
+      name: "get_latest_cloud_event"
+      description: "Get the latest full CloudEvent (header + JSON payload) for a subject DID, optionally filtered. Returns dataUrl (presigned S3 link) for large binary payloads instead of inlining them."
+      selection: "header { type source subject id time producer } data dataUrl"
+    )
 
   """
-  List full cloud events matching the given DID and optional filter.
+  List full cloud events matching the given subject DID and optional filter.
   """
   cloudEvents(subject: String!, limit: Int = 10, filter: CloudEventFilter): [CloudEvent!]!
+    @mcpTool(
+      name: "list_cloud_events"
+      description: "List full CloudEvents (headers + JSON payloads) for a subject DID, optionally filtered and limited (default 10). Large binary payloads are returned as presigned S3 URLs via dataUrl instead of inlined data."
+      selection: "header { type source subject id time producer } data dataUrl"
+    )
 
   """
   List cloud event types available for a subject, with counts and time ranges.
   """
   availableCloudEventTypes(subject: String!, filter: CloudEventFilter): [CloudEventTypeSummary!]!
+    @mcpTool(
+      name: "list_available_event_types"
+      description: "Summarize the CloudEvent types present for a subject DID. Returns each type with its count, firstSeen, and lastSeen timestamps — useful for discovering what kinds of events exist before querying them."
+      selection: "type count firstSeen lastSeen"
+    )
 }

@@ -21,6 +21,12 @@ resolver:
 
 omit_resolver_fields: true
 
+directives:
+  mcpTool:
+    skip_runtime: true
+  mcpExample:
+    skip_runtime: true
+
 models:
   SignalAggregations:
     model:
