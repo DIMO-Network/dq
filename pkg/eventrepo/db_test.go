@@ -15,6 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testClickHousePassword = "test-clickhouse-password"
+
 type TestContainer struct {
 	container *container.Container
 	onceSetup sync.Once
@@ -44,6 +46,7 @@ func setupClickHouseContainer(t *testing.T) *container.Container {
 		settings := chconfig.Settings{
 			User:     "default",
 			Database: "dimo",
+			Password: testClickHousePassword,
 		}
 
 		chContainer, err := container.CreateClickHouseContainer(ctx, settings)
