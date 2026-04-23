@@ -30,9 +30,11 @@ In dq, a caller with only `VEHICLE_NON_LOCATION_DATA` calling `signalsSnapshot` 
 
 **Fix applied:** `Repository` now builds a `jsonName → []privilegeEnum` map at init from the already-loaded `schema.Definitions` and exposes `RequiredPrivileges(name)`. `hasPrivilegesForSignal` consults it, maps each enum to the corresponding `tokenclaims` permission, and requires all. `ApproximateCoordinatesField` remains as an OR special case. Unknown signals fail closed.
 
-### 2. MCP support dropped without being in the README
+### 2. MCP support dropped without being in the README — FIXED
 
 Both source services shipped an `/mcp` endpoint backed by `mcpserver.New` + `graph.MCPTools` + `@mcpTool` / `@mcpExample` directives. dq removed all of it: no `mcp.graphqls`, no `mcp_tools_gen.go`, no `directives:` section in `gqlgen.yml`, no `/mcp` route in `cmd/dq/main.go`. If removing MCP is intentional, add it to the migration notes; if not, it's a silent feature loss.
+
+**Fix applied:** Restored `/mcp` with a single merged `dq_` tool prefix and display name "DIMO Query" (server-garage bumped v0.0.7 → v0.1.1). Re-annotated 11 queries that still exist in dq: `signals`, `signalsLatest`, `availableSignals`, `signalsSnapshot`, `dataSummary`, `segments`, `dailyActivity`, `events`, `latestCloudEvent`, `cloudEvents`, `availableCloudEventTypes`. Examples rewritten to use `subject` and `FREQUENCY_ANALYSIS`-style enum values. `mcpgen` wired via `//go:generate` in `internal/graph/resolver.go`, picked up by the existing `make generate` target. `/mcp` shares the same auth chain as `/query` via a new `authChain` closure in `internal/app/app.go`. Side effect: `hasPrivilegesForSignal` + `privilegeEnumToPermission` were moved out of `base.resolvers.go` into a new `internal/graph/privilege_filter.go` — gqlgen strips helper functions from resolver files on regen.
 
 ### 3. gRPC interceptor stack thinned out
 
