@@ -43,12 +43,20 @@ const (
 	lastSeenTS = "max(" + vss.TimestampCol + ") AS ts"
 )
 
-// Aggregation functions for latest signals.
+// Aggregation functions for latest signals. Shapes must stay byte-identical
+// to the aggregates in the signal_latest_by_subject_source_name projection;
+// ClickHouse matches projections by exact aggregate-expression text.
 const (
 	latestString    = "argMax(" + vss.ValueStringCol + ", " + vss.TimestampCol + ") as " + vss.ValueStringCol
 	latestNumber    = "argMax(" + vss.ValueNumberCol + ", " + vss.TimestampCol + ") as " + vss.ValueNumberCol
-	latestLocation  = "argMax(" + vss.ValueLocationCol + ", " + vss.TimestampCol + ") as " + AggLocationCol
 	latestTimestamp = "max(" + vss.TimestampCol + ") as ts"
+
+	// latestLocationCond excludes (0, 0) points from the latest-location
+	// computation. Kept in sync with the projection's argMaxIf/maxIf
+	// conditions.
+	latestLocationCond = "(tupleElement(" + vss.ValueLocationCol + ", 'latitude') != 0) OR (tupleElement(" + vss.ValueLocationCol + ", 'longitude') != 0)"
+	latestLocation     = "argMaxIf(" + vss.ValueLocationCol + ", " + vss.TimestampCol + ", " + latestLocationCond + ") as " + AggLocationCol
+	latestLocationTS   = "maxIf(" + vss.TimestampCol + ", " + latestLocationCond + ") as ts"
 )
 
 // Aggregation functions for string signals.
@@ -302,23 +310,19 @@ func batchLocationCaseExprWithAlias(alias string, locationArgs []model.LocationS
 	return fmt.Sprintf("CASE %s ELSE %s END AS %s", strings.Join(parts, " "), locationZeroTuple, AggLocationCol)
 }
 
-// getLatestQuery creates a query to get the latest signal value for each signal names
-// returns the query statement and the arguments list,
-/*
-SELECT
-  name,
-  max(timestamp),
-  argMax(value_string, timestamp) as value_string,
-  argMax(value_number, timestamp) as value_number
-FROM
-  signal
-WHERE
-  subject = '...' AND
-  (name = 'speed' OR name = 'currentLocationLatitude' OR name = 'currentLocationLongitude' OR name = 'powertrainFuelSystemSupportedFuelTypes' OR name = 'none')
-GROUP BY
-  name
-*/
-func getLatestQuery(subject string, latestArgs *model.LatestSignalsArgs, fromTS *time.Time) (string, []any) {
+// getLatestQuery builds the query (or UNION ALL of queries) that returns the
+// latest value per signal name for a subject.
+//
+// Non-location and location signals use different aggregate shapes so both
+// match the signal_latest_by_subject_source_name projection:
+//
+//   - non-location: argMax(value_*, timestamp), max(timestamp)
+//   - location:     argMaxIf/maxIf filtered by "location is not (0, 0)"
+//
+// Each branch is a separate SELECT so the projection matcher (which is
+// byte-sensitive to aggregate expressions) matches each cleanly. The queries
+// are combined with UNION ALL.
+func getLatestQuery(subject string, latestArgs *model.LatestSignalsArgs) (string, []any) {
 	signalNames := make([]string, 0, len(latestArgs.SignalNames))
 	for name := range latestArgs.SignalNames {
 		signalNames = append(signalNames, name)
@@ -329,38 +333,68 @@ func getLatestQuery(subject string, latestArgs *model.LatestSignalsArgs, fromTS 
 		locationSignalNames = append(locationSignalNames, name)
 	}
 
+	stmts := make([]string, 0, 2)
+	args := make([][]any, 0, 2)
+	if len(signalNames) > 0 {
+		s, a := getLatestNonLocationQuery(subject, signalNames, latestArgs.Filter)
+		stmts = append(stmts, s)
+		args = append(args, a)
+	}
+	if len(locationSignalNames) > 0 {
+		s, a := getLatestLocationQuery(subject, locationSignalNames, latestArgs.Filter)
+		stmts = append(stmts, s)
+		args = append(args, a)
+	}
+	if len(stmts) == 0 {
+		return "", nil
+	}
+	if len(stmts) == 1 {
+		return stmts[0], args[0]
+	}
+	return unionAll(stmts, args)
+}
+
+// getLatestNonLocationQuery selects max(ts), argMax(value_number), argMax(value_string)
+// for the given signal names. Shape is aligned with the projection aggregates.
+func getLatestNonLocationQuery(subject string, signalNames []string, filter *model.SignalFilter) (string, []any) {
 	mods := []qm.QueryMod{
 		qm.Select(vss.NameCol),
 		qm.Select(latestTimestamp),
 		qm.Select(latestNumber),
 		qm.Select(latestString),
+		// keep the same output column set as the location branch so UNION ALL stays well-typed
+		qm.Select(locValAsZero),
+		qm.From(vss.TableName),
+		qm.Where(subjectWhere, subject),
+		qm.WhereIn(nameIn, signalNames),
+		qm.GroupBy(vss.NameCol),
+	}
+	mods = append(mods, getFilterMods(filter)...)
+	return newQuery(mods...)
+}
+
+// getLatestLocationQuery selects maxIf(ts)/argMaxIf(value_location) filtered
+// to rows where the location is not (0, 0). Matches the projection's
+// argMaxIf/maxIf aggregates exactly.
+func getLatestLocationQuery(subject string, locationSignalNames []string, filter *model.SignalFilter) (string, []any) {
+	mods := []qm.QueryMod{
+		qm.Select(vss.NameCol),
+		qm.Select(latestLocationTS),
+		qm.Select(numValAsNull),
+		qm.Select(strValAsNull),
 		qm.Select(latestLocation),
 		qm.From(vss.TableName),
 		qm.Where(subjectWhere, subject),
-		qm.Expr(
-			qm.WhereIn(nameIn, signalNames),
-			qm.Or2(
-				qm.Expr(
-					qm.WhereIn(nameIn, locationSignalNames),
-					qm.Expr(
-						qmhelper.Where(vss.ValueLocationCol+".latitude", qmhelper.NEQ, 0),
-						qm.Or2(qmhelper.Where(vss.ValueLocationCol+".longitude", qmhelper.NEQ, 0)),
-					),
-				),
-			),
-		),
+		qm.WhereIn(nameIn, locationSignalNames),
 		qm.GroupBy(vss.NameCol),
 	}
-	mods = append(mods, getFilterMods(latestArgs.Filter)...)
-	if fromTS != nil {
-		mods = append(mods, qm.Where(vss.TimestampCol+" >= ?", *fromTS))
-	}
+	mods = append(mods, getFilterMods(filter)...)
 	return newQuery(mods...)
 }
 
 // getAllLatestQuery creates a query to get the latest signal value for ALL signal names.
 // Unlike getLatestQuery, this does not filter by signal name.
-func getAllLatestQuery(subject string, filter *model.SignalFilter, fromTS *time.Time) (string, []any) {
+func getAllLatestQuery(subject string, filter *model.SignalFilter) (string, []any) {
 	mods := []qm.QueryMod{
 		qm.Select(vss.NameCol),
 		qm.Select(latestTimestamp),
@@ -370,9 +404,6 @@ func getAllLatestQuery(subject string, filter *model.SignalFilter, fromTS *time.
 		qm.From(vss.TableName),
 		qm.Where(subjectWhere, subject),
 		qm.GroupBy(vss.NameCol),
-	}
-	if fromTS != nil {
-		mods = append(mods, whereTimestampFrom(*fromTS))
 	}
 	mods = append(mods, getFilterMods(filter)...)
 	return newQuery(mods...)
@@ -392,7 +423,7 @@ FROM
 WHERE
 	subject = '...'
 */
-func getLastSeenQuery(subject string, sigArgs *model.SignalArgs, fromTS *time.Time) (string, []any) {
+func getLastSeenQuery(subject string, sigArgs *model.SignalArgs) (string, []any) {
 	if sigArgs == nil {
 		return "", nil
 	}
@@ -406,9 +437,6 @@ func getLastSeenQuery(subject string, sigArgs *model.SignalArgs, fromTS *time.Ti
 		qm.Where(subjectWhere, subject),
 	}
 	mods = append(mods, getFilterMods(sigArgs.Filter)...)
-	if fromTS != nil {
-		mods = append(mods, qm.Where(vss.TimestampCol+" >= ?", *fromTS))
-	}
 	return newQuery(mods...)
 }
 
@@ -735,19 +763,25 @@ func buildSegmentIndexMultiIf(timestampCol string, ranges []TimeRange) string {
 	return "multiIf(" + strings.Join(parts, ", ") + ", -1) AS seg_idx"
 }
 
+// getDistinctQuery returns distinct signal names seen for a subject. Uses
+// GROUP BY (not DISTINCT) so the ClickHouse planner can match the
+// (subject, source, name) aggregating projection on the signal table; without
+// that projection this is a full-history scan per subject.
 func getDistinctQuery(subject string, filter *model.SignalFilter) (string, []any) {
 	mods := []qm.QueryMod{
-		qm.Distinct(vss.NameCol),
+		qm.Select(vss.NameCol),
 		qm.From(vss.TableName),
 		qm.Where(subjectWhere, subject),
+		qm.GroupBy(vss.NameCol),
 		qm.OrderBy(vss.NameCol),
 	}
 	mods = append(mods, getFilterMods(filter)...)
-	stmt, args := newQuery(mods...)
-	return stmt, args
+	return newQuery(mods...)
 }
 
-// select Count(*), max(timestamp), min(timestamp), name, from signal where subject = '...' GROUP BY name
+// getSignalSummariesQuery summarizes signals by name for a subject. Relies on
+// the (subject, source, name) projection on the signal table to keep this
+// cheap; without that projection this is a full-history scan per subject.
 func getSignalSummariesQuery(subject string, filter *model.SignalFilter) (string, []any) {
 	mods := []qm.QueryMod{
 		qm.Select(vss.NameCol),
@@ -760,8 +794,7 @@ func getSignalSummariesQuery(subject string, filter *model.SignalFilter) (string
 		qm.OrderBy(vss.NameCol),
 	}
 	mods = append(mods, getFilterMods(filter)...)
-	stmt, args := newQuery(mods...)
-	return stmt, args
+	return newQuery(mods...)
 }
 
 // getFilterMods returns the query mods for the filter.
@@ -792,7 +825,9 @@ func appendEventFilterMods(mods []qm.QueryMod, filter *model.EventFilter) []qm.Q
 	return mods
 }
 
-// getEventSummariesQuery returns a query that summarizes events by name for a subject (all time).
+// getEventSummariesQuery summarizes events by name for a subject. Relies on
+// the (subject, source, name) projection on the event table to keep this
+// cheap; without that projection this is a full-history scan per subject.
 func getEventSummariesQuery(subject string) (string, []any) {
 	mods := []qm.QueryMod{
 		qm.Select(vss.EventNameCol + " AS name"),

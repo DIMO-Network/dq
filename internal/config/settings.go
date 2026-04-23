@@ -26,6 +26,4 @@ type Settings struct {
 	S3AWSSecretAccessKey string `yaml:"S3_AWS_SECRET_ACCESS_KEY"`
 	// Identity API for device→vehicle DID resolution
 	IdentityAPIURL string `yaml:"IDENTITY_API_URL"`
-	// Signals
-	LatestSignalsLookbackDays int `yaml:"LATEST_SIGNALS_LOOKBACK_DAYS"`
 }
