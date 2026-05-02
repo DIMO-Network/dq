@@ -93,7 +93,7 @@ func TestGetLatestIndexKey(t *testing.T) {
 		},
 	}
 
-	indexService := eventrepo.New(conn, nil, nil, "")
+	indexService := eventrepo.New(conn, nil, nil, "", "")
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -172,7 +172,7 @@ func TestGetDataFromIndex(t *testing.T) {
 		ContentLength: ref(int64(len(content))),
 	}, nil).AnyTimes()
 
-	indexService := eventrepo.New(conn, mockS3Client, nil, "")
+	indexService := eventrepo.New(conn, mockS3Client, nil, "", "")
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -204,7 +204,7 @@ func TestStoreObject(t *testing.T) {
 	mockS3Client := NewMockObjectGetter(ctrl)
 	mockS3Client.EXPECT().PutObject(gomock.Any(), gomock.Any(), gomock.Any()).Return(&s3.PutObjectOutput{}, nil).AnyTimes()
 
-	indexService := eventrepo.New(conn, mockS3Client, nil, "")
+	indexService := eventrepo.New(conn, mockS3Client, nil, "", "")
 
 	content := []byte(`{"vin": "1HGCM82633A123456"}`)
 	did := cloudevent.ERC721DID{
@@ -333,7 +333,7 @@ func TestGetData(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			mockS3Client := NewMockObjectGetter(ctrl)
 
-			indexService := eventrepo.New(conn, mockS3Client, nil, "")
+			indexService := eventrepo.New(conn, mockS3Client, nil, "", "")
 			// Allow GetObject calls in any order since fetches are concurrent.
 			if len(tt.expectedIndexKeys) > 0 {
 				mockS3Client.EXPECT().GetObject(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
@@ -425,7 +425,7 @@ func TestGetEventWithAllHeaderFields(t *testing.T) {
 	eventDataEnvelope := []byte(`{"data":` + string(eventData) + `}`)
 
 	// Create service
-	indexService := eventrepo.New(conn, mockS3Client, nil, "")
+	indexService := eventrepo.New(conn, mockS3Client, nil, "", "")
 
 	// Test retrieving the event
 	t.Run("retrieve event with full headers", func(t *testing.T) {
@@ -535,8 +535,12 @@ func ref[T any](x T) *T {
 // returns the raw bytes and the map of event index to index key.
 func encodeTestParquet(t *testing.T, events []cloudevent.RawEvent, objectKey string) ([]byte, map[int]string) {
 	t.Helper()
+	stored := make([]cloudevent.StoredEvent, len(events))
+	for i, ev := range events {
+		stored[i] = cloudevent.StoredEvent{RawEvent: ev}
+	}
 	var buf bytes.Buffer
-	indexKeys, err := parquet.Encode(&buf, events, objectKey)
+	indexKeys, err := parquet.Encode(&buf, stored, objectKey)
 	require.NoError(t, err)
 	return buf.Bytes(), indexKeys
 }
@@ -609,7 +613,7 @@ func TestGetCloudEventFromIndex_ParquetRef(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockS3 := mockS3ParquetReader(t, ctrl, parquetBytes)
 
-	indexService := eventrepo.New(conn, mockS3, nil, "test-parquet-bucket")
+	indexService := eventrepo.New(conn, mockS3, nil, "test-parquet-bucket", "")
 
 	// Build the index object as GetCloudEventFromIndex expects
 	index := cloudevent.CloudEvent[eventrepo.ObjectInfo]{
@@ -688,7 +692,7 @@ func TestListCloudEventsFromIndexes_ParquetCaching(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockS3 := mockS3ParquetReader(t, ctrl, parquetBytes)
 
-	indexService := eventrepo.New(conn, mockS3, nil, "test-parquet-bucket")
+	indexService := eventrepo.New(conn, mockS3, nil, "test-parquet-bucket", "")
 
 	indexes := []cloudevent.CloudEvent[eventrepo.ObjectInfo]{
 		{CloudEventHeader: hdr0, Data: eventrepo.ObjectInfo{Key: indexKeys[0]}},
@@ -780,7 +784,7 @@ func TestListIndexesAdvanced(t *testing.T) {
 	keyTypeStatusSource1Producer3 := insertTestData(t, ctx, conn, eventIdx3)
 	keyTypeStatusSource3Producer4 := insertTestData(t, ctx, conn, eventIdx4)
 
-	indexService := eventrepo.New(conn, nil, nil, "")
+	indexService := eventrepo.New(conn, nil, nil, "", "")
 
 	tests := []struct {
 		name              string
@@ -1065,7 +1069,7 @@ func TestGetCloudEventTypeSummaries(t *testing.T) {
 	insertTestData(t, ctx, conn, status3)
 	insertTestData(t, ctx, conn, fp1)
 
-	indexService := eventrepo.New(conn, nil, nil, "")
+	indexService := eventrepo.New(conn, nil, nil, "", "")
 
 	t.Run("no filter returns all types", func(t *testing.T) {
 		opts := &grpc.SearchOptions{

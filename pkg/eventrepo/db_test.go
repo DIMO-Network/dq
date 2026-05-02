@@ -69,5 +69,5 @@ func insertTestData(t *testing.T, ctx context.Context, conn clickhouse.Conn, ind
 
 	err := conn.Exec(ctx, chindexer.InsertStmt, values...)
 	require.NoError(t, err)
-	return values[len(values)-1].(string)
+	return chindexer.CloudEventToObjectKey(index)
 }

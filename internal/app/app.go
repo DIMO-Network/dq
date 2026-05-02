@@ -56,7 +56,7 @@ func New(settings config.Settings) (*App, error) {
 		return nil, fmt.Errorf("failed to create ClickHouse connection for event repo: %w", err)
 	}
 	s3Client := s3ClientFromSettings(&settings)
-	eventService := eventrepo.New(chConn, s3Client, s3.NewPresignClient(s3Client), settings.ParquetBucket)
+	eventService := eventrepo.New(chConn, s3Client, s3.NewPresignClient(s3Client), settings.ParquetBucket, settings.BlobBucket)
 
 	buckets := []string{settings.CloudEventBucket, settings.EphemeralBucket, settings.ParquetBucket}
 
@@ -142,7 +142,7 @@ func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.
 	}
 
 	s3Client := s3ClientFromSettings(settings)
-	eventService := eventrepo.New(chConn, s3Client, s3.NewPresignClient(s3Client), settings.ParquetBucket)
+	eventService := eventrepo.New(chConn, s3Client, s3.NewPresignClient(s3Client), settings.ParquetBucket, settings.BlobBucket)
 
 	buckets := []string{settings.CloudEventBucket, settings.EphemeralBucket, settings.ParquetBucket}
 	rpcServer := rpc.NewServer(buckets, eventService)

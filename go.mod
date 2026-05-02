@@ -6,7 +6,7 @@ require (
 	github.com/99designs/gqlgen v0.17.89
 	github.com/ClickHouse/clickhouse-go/v2 v2.45.0
 	github.com/DIMO-Network/clickhouse-infra v0.0.8
-	github.com/DIMO-Network/cloudevent v0.2.7
+	github.com/DIMO-Network/cloudevent v0.2.8
 	github.com/DIMO-Network/model-garage v1.0.11
 	github.com/DIMO-Network/server-garage v0.1.1
 	github.com/DIMO-Network/shared v1.1.7
@@ -18,6 +18,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
 	github.com/ethereum/go-ethereum v1.17.1
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.2
+	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
@@ -102,7 +103,6 @@ require (
 	github.com/moby/sys/user v0.4.0 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/moby/term v0.5.2 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.4.1 // indirect
 	github.com/morikuni/aec v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect

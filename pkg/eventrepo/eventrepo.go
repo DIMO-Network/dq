@@ -36,11 +36,19 @@ type Service struct {
 	chConn    clickhouse.Conn
 	// parquetBucket is the object storage bucket for Iceberg Parquet files.
 	parquetBucket string
+	// blobBucket is the object storage bucket for externalized event payloads
+	// (referenced by data_index_key).
+	blobBucket string
 }
 
 // ObjectInfo is the information about the object in S3.
 type ObjectInfo struct {
+	// Key is the index_key — a pointer into parquet (key#row) or a legacy JSON object.
 	Key string
+	// DataIndexKey, when non-empty, is the key in the blob bucket holding the
+	// event's externalized payload. Set by the producer when the payload was
+	// split out of the inline event.
+	DataIndexKey string
 }
 
 // ObjectGetter is an interface for getting an object from S3.
@@ -54,37 +62,34 @@ type Presigner interface {
 	PresignGetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.PresignOptions)) (*v4.PresignedHTTPRequest, error)
 }
 
-// BlobKeyPrefix is the S3 key prefix used for large binary blob objects.
-// Keys with this prefix are served via presigned URL instead of inline in the response.
-const BlobKeyPrefix = "cloudevent/blobs/"
-
 // presignTTL is the lifetime of generated presigned S3 URLs.
 const presignTTL = 15 * time.Minute
 
 // New creates a new instance of Service.
-func New(chConn clickhouse.Conn, objGetter ObjectGetter, presigner Presigner, parquetBucket string) *Service {
+func New(chConn clickhouse.Conn, objGetter ObjectGetter, presigner Presigner, parquetBucket, blobBucket string) *Service {
 	return &Service{
 		objGetter:     objGetter,
 		presigner:     presigner,
 		chConn:        chConn,
 		parquetBucket: parquetBucket,
+		blobBucket:    blobBucket,
 	}
 }
 
-// PresignBlobURL returns a short-lived presigned GET URL for the given S3 key in the parquet bucket.
+// PresignBlobURL returns a short-lived presigned GET URL for the given S3 key in the blob bucket.
 func (s *Service) PresignBlobURL(ctx context.Context, key string) (string, error) {
 	if s.presigner == nil {
 		return "", fmt.Errorf("presigner not configured")
 	}
-	if s.parquetBucket == "" {
-		return "", fmt.Errorf("parquet bucket not configured")
+	if s.blobBucket == "" {
+		return "", fmt.Errorf("blob bucket not configured")
 	}
 	req, err := s.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.parquetBucket),
+		Bucket: aws.String(s.blobBucket),
 		Key:    aws.String(key),
 	}, s3.WithPresignExpires(presignTTL))
 	if err != nil {
-		return "", fmt.Errorf("presign %s/%s: %w", s.parquetBucket, key, err)
+		return "", fmt.Errorf("presign %s/%s: %w", s.blobBucket, key, err)
 	}
 	return req.URL, nil
 }
@@ -143,6 +148,7 @@ func (s *Service) ListIndexesAdvanced(ctx context.Context, limit int, advancedOp
 			chindexer.DataVersionColumn,
 			chindexer.ExtrasColumn,
 			chindexer.IndexKeyColumn,
+			chindexer.DataIndexKeyColumn,
 		),
 		qm.From(chindexer.TableName),
 		qm.OrderBy(chindexer.TimestampColumn + order),
@@ -164,7 +170,7 @@ func (s *Service) ListIndexesAdvanced(ctx context.Context, limit int, advancedOp
 	var extras string
 	for rows.Next() {
 		var event cloudevent.CloudEvent[ObjectInfo]
-		err = rows.Scan(&event.Subject, &event.Time, &event.Type, &event.ID, &event.Source, &event.Producer, &event.DataContentType, &event.DataVersion, &extras, &event.Data.Key)
+		err = rows.Scan(&event.Subject, &event.Time, &event.Type, &event.ID, &event.Source, &event.Producer, &event.DataContentType, &event.DataVersion, &extras, &event.Data.Key, &event.Data.DataIndexKey)
 		if err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("failed to scan cloud event: %w", err)
@@ -349,12 +355,12 @@ func (s *Service) ListCloudEventsFromIndexes(ctx context.Context, indexes []clou
 			}
 			defer func() { _ = pr.Close() }()
 			for _, item := range items {
-				event, err := pr.SeekToRow(item.rowOffset)
+				stored, err := pr.SeekToRow(item.rowOffset)
 				if err != nil {
 					return fmt.Errorf("seek to row %d in %s: %w", item.rowOffset, item.objectKey, err)
 				}
-				event.Tags = grpc.TagsOrEmpty(event.Tags)
-				events[item.idx] = event
+				stored.Tags = grpc.TagsOrEmpty(stored.Tags)
+				events[item.idx] = stored.RawEvent
 			}
 			return nil
 		})
@@ -387,7 +393,15 @@ func (s *Service) ListCloudEventsFromIndexes(ctx context.Context, indexes []clou
 }
 
 // GetCloudEventFromIndex fetches and returns the cloud event for the given index.
+// Events with a non-empty DataIndexKey have their payload externalized to the
+// blob bucket; this method returns header-only since the data is meant to be
+// served via presigned URL by the GraphQL layer (see PresignBlobURL).
 func (s *Service) GetCloudEventFromIndex(ctx context.Context, index *cloudevent.CloudEvent[ObjectInfo], bucketName string) (cloudevent.RawEvent, error) {
+	if index.Data.DataIndexKey != "" {
+		hdr := index.CloudEventHeader
+		hdr.Tags = grpc.TagsOrEmpty(hdr.Tags)
+		return cloudevent.RawEvent{CloudEventHeader: hdr}, nil
+	}
 	if parquet.IsParquetRef(index.Data.Key) {
 		return s.getCloudEventFromParquet(ctx, index.Data.Key)
 	}
@@ -454,12 +468,12 @@ func (s *Service) getCloudEventFromParquet(ctx context.Context, key string) (clo
 		return cloudevent.RawEvent{}, fmt.Errorf("create s3 reader for %s: %w", objectKey, err)
 	}
 
-	event, err := parquet.SeekToRow(reader, reader.Size(), rowOffset)
+	stored, err := parquet.SeekToRow(reader, reader.Size(), rowOffset)
 	if err != nil {
 		return cloudevent.RawEvent{}, fmt.Errorf("seek to row %d in %s: %w", rowOffset, objectKey, err)
 	}
-	event.Tags = grpc.TagsOrEmpty(event.Tags)
-	return event, nil
+	stored.Tags = grpc.TagsOrEmpty(stored.Tags)
+	return stored.RawEvent, nil
 }
 
 // parseParquetRef parses a parquet index key into bucket, object key, and row offset.

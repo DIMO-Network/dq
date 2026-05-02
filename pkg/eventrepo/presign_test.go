@@ -26,7 +26,7 @@ func TestPresignBlobURL(t *testing.T) {
 		expectedURL = "https://s3.amazonaws.com/test-bucket/cloudevent/blobs/some-scan.bin?X-Amz-Signature=abc123"
 	)
 
-	svc := eventrepo.New(nil, nil, mockPresigner, bucket)
+	svc := eventrepo.New(nil, nil, mockPresigner, "", bucket)
 
 	mockPresigner.EXPECT().
 		PresignGetObject(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -54,7 +54,7 @@ func TestPresignBlobURL_PresignerError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockPresigner := NewMockPresigner(ctrl)
 
-	svc := eventrepo.New(nil, nil, mockPresigner, "test-bucket")
+	svc := eventrepo.New(nil, nil, mockPresigner, "", "test-bucket")
 
 	mockPresigner.EXPECT().
 		PresignGetObject(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -67,7 +67,7 @@ func TestPresignBlobURL_PresignerError(t *testing.T) {
 
 func TestPresignBlobURL_NilPresigner(t *testing.T) {
 	t.Parallel()
-	svc := eventrepo.New(nil, nil, nil, "test-bucket")
+	svc := eventrepo.New(nil, nil, nil, "", "test-bucket")
 
 	_, err := svc.PresignBlobURL(context.Background(), "cloudevent/blobs/test.bin")
 	require.Error(t, err)
@@ -78,9 +78,9 @@ func TestPresignBlobURL_NoBucket(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockPresigner := NewMockPresigner(ctrl)
 
-	svc := eventrepo.New(nil, nil, mockPresigner, "")
+	svc := eventrepo.New(nil, nil, mockPresigner, "", "")
 
 	_, err := svc.PresignBlobURL(context.Background(), "cloudevent/blobs/test.bin")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "parquet bucket not configured")
+	assert.Contains(t, err.Error(), "blob bucket not configured")
 }
