@@ -36,7 +36,9 @@ func (s *Server) GetLatestIndex(ctx context.Context, req *grpc.GetLatestIndexReq
 	var err error
 
 	if req.GetAdvancedOptions() != nil {
-		index, err = s.eventService.GetLatestIndexAdvanced(ctx, req.GetAdvancedOptions())
+		// gRPC callers see no tombstone suppression by default; the GraphQL
+		// includeDeleted flag is the public surface for opting in.
+		index, err = s.eventService.GetLatestIndexAdvanced(ctx, req.GetAdvancedOptions(), true)
 	} else {
 		index, err = s.eventService.GetLatestIndex(ctx, req.GetOptions())
 	}
@@ -63,7 +65,7 @@ func (s *Server) ListIndexes(ctx context.Context, req *grpc.ListIndexesRequest) 
 	var err error
 
 	if req.GetAdvancedOptions() != nil {
-		indexObjs, err = s.eventService.ListIndexesAdvanced(ctx, int(req.GetLimit()), req.GetAdvancedOptions())
+		indexObjs, err = s.eventService.ListIndexesAdvanced(ctx, int(req.GetLimit()), req.GetAdvancedOptions(), true)
 	} else {
 		indexObjs, err = s.eventService.ListIndexes(ctx, int(req.GetLimit()), req.GetOptions())
 	}
@@ -92,7 +94,7 @@ func (s *Server) ListCloudEvents(ctx context.Context, req *grpc.ListCloudEventsR
 	var err error
 
 	if req.GetAdvancedOptions() != nil {
-		metaList, err = s.eventService.ListIndexesAdvanced(ctx, int(req.GetLimit()), req.GetAdvancedOptions())
+		metaList, err = s.eventService.ListIndexesAdvanced(ctx, int(req.GetLimit()), req.GetAdvancedOptions(), true)
 	} else {
 		metaList, err = s.eventService.ListIndexes(ctx, int(req.GetLimit()), req.GetOptions())
 	}
@@ -121,7 +123,7 @@ func (s *Server) GetLatestCloudEvent(ctx context.Context, req *grpc.GetLatestClo
 	var err error
 
 	if req.GetAdvancedOptions() != nil {
-		metadata, err = s.eventService.GetLatestIndexAdvanced(ctx, req.GetAdvancedOptions())
+		metadata, err = s.eventService.GetLatestIndexAdvanced(ctx, req.GetAdvancedOptions(), true)
 	} else {
 		metadata, err = s.eventService.GetLatestIndex(ctx, req.GetOptions())
 	}

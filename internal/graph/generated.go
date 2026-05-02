@@ -128,13 +128,13 @@ type ComplexityRoot struct {
 	}
 
 	Query struct {
-		AvailableCloudEventTypes func(childComplexity int, subject string, filter *model.CloudEventFilter) int
+		AvailableCloudEventTypes func(childComplexity int, subject string, filter *model.CloudEventFilter, includeDeleted *bool) int
 		AvailableSignals         func(childComplexity int, subject string, filter *model.SignalFilter) int
-		CloudEvents              func(childComplexity int, subject string, limit *int, filter *model.CloudEventFilter) int
+		CloudEvents              func(childComplexity int, subject string, limit *int, filter *model.CloudEventFilter, includeDeleted *bool) int
 		DailyActivity            func(childComplexity int, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) int
 		DataSummary              func(childComplexity int, subject string, filter *model.SignalFilter) int
 		Events                   func(childComplexity int, subject string, from time.Time, to time.Time, filter *model.EventFilter) int
-		LatestCloudEvent         func(childComplexity int, subject string, filter *model.CloudEventFilter) int
+		LatestCloudEvent         func(childComplexity int, subject string, filter *model.CloudEventFilter, includeDeleted *bool) int
 		Segments                 func(childComplexity int, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, limit *int, after *time.Time) int
 		Signals                  func(childComplexity int, subject string, interval string, from time.Time, to time.Time, filter *model.SignalFilter) int
 		SignalsLatest            func(childComplexity int, subject string, filter *model.SignalFilter) int
@@ -438,9 +438,9 @@ type QueryResolver interface {
 	AvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error)
 	DataSummary(ctx context.Context, subject string, filter *model.SignalFilter) (*model.DataSummary, error)
 	SignalsSnapshot(ctx context.Context, subject string, filter *model.SignalFilter) (*model.SignalsSnapshotResponse, error)
-	LatestCloudEvent(ctx context.Context, subject string, filter *model.CloudEventFilter) (*CloudEventWrapper, error)
-	CloudEvents(ctx context.Context, subject string, limit *int, filter *model.CloudEventFilter) ([]*CloudEventWrapper, error)
-	AvailableCloudEventTypes(ctx context.Context, subject string, filter *model.CloudEventFilter) ([]*model.CloudEventTypeSummary, error)
+	LatestCloudEvent(ctx context.Context, subject string, filter *model.CloudEventFilter, includeDeleted *bool) (*CloudEventWrapper, error)
+	CloudEvents(ctx context.Context, subject string, limit *int, filter *model.CloudEventFilter, includeDeleted *bool) ([]*CloudEventWrapper, error)
+	AvailableCloudEventTypes(ctx context.Context, subject string, filter *model.CloudEventFilter, includeDeleted *bool) ([]*model.CloudEventTypeSummary, error)
 	Events(ctx context.Context, subject string, from time.Time, to time.Time, filter *model.EventFilter) ([]*model.Event, error)
 	Segments(ctx context.Context, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, limit *int, after *time.Time) ([]*model.Segment, error)
 	DailyActivity(ctx context.Context, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) ([]*model.DailyActivity, error)
@@ -911,7 +911,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.AvailableCloudEventTypes(childComplexity, args["subject"].(string), args["filter"].(*model.CloudEventFilter)), true
+		return e.ComplexityRoot.Query.AvailableCloudEventTypes(childComplexity, args["subject"].(string), args["filter"].(*model.CloudEventFilter), args["includeDeleted"].(*bool)), true
 	case "Query.availableSignals":
 		if e.ComplexityRoot.Query.AvailableSignals == nil {
 			break
@@ -933,7 +933,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.CloudEvents(childComplexity, args["subject"].(string), args["limit"].(*int), args["filter"].(*model.CloudEventFilter)), true
+		return e.ComplexityRoot.Query.CloudEvents(childComplexity, args["subject"].(string), args["limit"].(*int), args["filter"].(*model.CloudEventFilter), args["includeDeleted"].(*bool)), true
 	case "Query.dailyActivity":
 		if e.ComplexityRoot.Query.DailyActivity == nil {
 			break
@@ -978,7 +978,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Query.LatestCloudEvent(childComplexity, args["subject"].(string), args["filter"].(*model.CloudEventFilter)), true
+		return e.ComplexityRoot.Query.LatestCloudEvent(childComplexity, args["subject"].(string), args["filter"].(*model.CloudEventFilter), args["includeDeleted"].(*bool)), true
 	case "Query.segments":
 		if e.ComplexityRoot.Query.Segments == nil {
 			break
@@ -3752,8 +3752,10 @@ input CloudEventFilter {
 extend type Query {
   """
   Latest full cloud event matching the given subject DID and optional filter.
+  Tombstoned attestations are hidden from the result by default; pass
+  includeDeleted: true to disable tombstone suppression.
   """
-  latestCloudEvent(subject: String!, filter: CloudEventFilter): CloudEvent!
+  latestCloudEvent(subject: String!, filter: CloudEventFilter, includeDeleted: Boolean = false): CloudEvent!
     @mcpTool(
       name: "get_latest_cloud_event"
       description: "Get the latest full CloudEvent (header + JSON payload) for a subject DID, optionally filtered. Returns dataUrl (presigned S3 link) for large binary payloads instead of inlining them."
@@ -3762,8 +3764,10 @@ extend type Query {
 
   """
   List full cloud events matching the given subject DID and optional filter.
+  Tombstoned attestations are hidden from the result by default; pass
+  includeDeleted: true to disable tombstone suppression.
   """
-  cloudEvents(subject: String!, limit: Int = 10, filter: CloudEventFilter): [CloudEvent!]!
+  cloudEvents(subject: String!, limit: Int = 10, filter: CloudEventFilter, includeDeleted: Boolean = false): [CloudEvent!]!
     @mcpTool(
       name: "list_cloud_events"
       description: "List full CloudEvents (headers + JSON payloads) for a subject DID, optionally filtered and limited (default 10). Large binary payloads are returned as presigned S3 URLs via dataUrl instead of inlined data."
@@ -3771,9 +3775,11 @@ extend type Query {
     )
 
   """
-  List cloud event types available for a subject, with counts and time ranges.
+  List cloud event types available for a subject, with counts and time
+  ranges. Tombstoned attestations are excluded from counts by default;
+  pass includeDeleted: true to disable tombstone suppression.
   """
-  availableCloudEventTypes(subject: String!, filter: CloudEventFilter): [CloudEventTypeSummary!]!
+  availableCloudEventTypes(subject: String!, filter: CloudEventFilter, includeDeleted: Boolean = false): [CloudEventTypeSummary!]!
     @mcpTool(
       name: "list_available_event_types"
       description: "Summarize the CloudEvent types present for a subject DID. Returns each type with its count, firstSeen, and lastSeen timestamps — useful for discovering what kinds of events exist before querying them."
@@ -5990,6 +5996,11 @@ func (ec *executionContext) field_Query_availableCloudEventTypes_args(ctx contex
 		return nil, err
 	}
 	args["filter"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "includeDeleted", ec.unmarshalOBoolean2ᚖbool)
+	if err != nil {
+		return nil, err
+	}
+	args["includeDeleted"] = arg2
 	return args, nil
 }
 
@@ -6027,6 +6038,11 @@ func (ec *executionContext) field_Query_cloudEvents_args(ctx context.Context, ra
 		return nil, err
 	}
 	args["filter"] = arg2
+	arg3, err := graphql.ProcessArgField(ctx, rawArgs, "includeDeleted", ec.unmarshalOBoolean2ᚖbool)
+	if err != nil {
+		return nil, err
+	}
+	args["includeDeleted"] = arg3
 	return args, nil
 }
 
@@ -6131,6 +6147,11 @@ func (ec *executionContext) field_Query_latestCloudEvent_args(ctx context.Contex
 		return nil, err
 	}
 	args["filter"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "includeDeleted", ec.unmarshalOBoolean2ᚖbool)
+	if err != nil {
+		return nil, err
+	}
+	args["includeDeleted"] = arg2
 	return args, nil
 }
 
@@ -10501,7 +10522,7 @@ func (ec *executionContext) _Query_latestCloudEvent(ctx context.Context, field g
 		ec.fieldContext_Query_latestCloudEvent,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().LatestCloudEvent(ctx, fc.Args["subject"].(string), fc.Args["filter"].(*model.CloudEventFilter))
+			return ec.Resolvers.Query().LatestCloudEvent(ctx, fc.Args["subject"].(string), fc.Args["filter"].(*model.CloudEventFilter), fc.Args["includeDeleted"].(*bool))
 		},
 		nil,
 		ec.marshalNCloudEvent2ᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚐCloudEventWrapper,
@@ -10552,7 +10573,7 @@ func (ec *executionContext) _Query_cloudEvents(ctx context.Context, field graphq
 		ec.fieldContext_Query_cloudEvents,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().CloudEvents(ctx, fc.Args["subject"].(string), fc.Args["limit"].(*int), fc.Args["filter"].(*model.CloudEventFilter))
+			return ec.Resolvers.Query().CloudEvents(ctx, fc.Args["subject"].(string), fc.Args["limit"].(*int), fc.Args["filter"].(*model.CloudEventFilter), fc.Args["includeDeleted"].(*bool))
 		},
 		nil,
 		ec.marshalNCloudEvent2ᚕᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚐCloudEventWrapperᚄ,
@@ -10603,7 +10624,7 @@ func (ec *executionContext) _Query_availableCloudEventTypes(ctx context.Context,
 		ec.fieldContext_Query_availableCloudEventTypes,
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Query().AvailableCloudEventTypes(ctx, fc.Args["subject"].(string), fc.Args["filter"].(*model.CloudEventFilter))
+			return ec.Resolvers.Query().AvailableCloudEventTypes(ctx, fc.Args["subject"].(string), fc.Args["filter"].(*model.CloudEventFilter), fc.Args["includeDeleted"].(*bool))
 		},
 		nil,
 		ec.marshalNCloudEventTypeSummary2ᚕᚖgithubᚗcomᚋDIMOᚑNetworkᚋdqᚋinternalᚋgraphᚋmodelᚐCloudEventTypeSummaryᚄ,

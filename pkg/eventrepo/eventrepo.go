@@ -95,20 +95,24 @@ func (s *Service) PresignBlobURL(ctx context.Context, key string) (string, error
 }
 
 // GetLatestIndex returns the latest cloud event index that matches the given options.
+// Tombstoned attestations are not suppressed; callers that want suppression should
+// use GetLatestIndexAdvanced with includeDeleted=false.
 func (s *Service) GetLatestIndex(ctx context.Context, opts *grpc.SearchOptions) (cloudevent.CloudEvent[ObjectInfo], error) {
 	advancedOpts := convertSearchOptionsToAdvanced(opts)
-	return s.GetLatestIndexAdvanced(ctx, advancedOpts)
+	return s.GetLatestIndexAdvanced(ctx, advancedOpts, true)
 }
 
 // GetLatestIndexAdvanced returns the latest cloud event index that matches the given advanced options.
-func (s *Service) GetLatestIndexAdvanced(ctx context.Context, advancedOpts *grpc.AdvancedSearchOptions) (cloudevent.CloudEvent[ObjectInfo], error) {
+// When includeDeleted is false, rows whose (source, id) appears in a dimo.tombstone
+// row's voids_id for the same subject are suppressed.
+func (s *Service) GetLatestIndexAdvanced(ctx context.Context, advancedOpts *grpc.AdvancedSearchOptions, includeDeleted bool) (cloudevent.CloudEvent[ObjectInfo], error) {
 	// Only clone when we actually need to change TimestampAsc.
 	opts := advancedOpts
 	if advancedOpts != nil && advancedOpts.GetTimestampAsc().GetValue() {
 		opts = proto.Clone(advancedOpts).(*grpc.AdvancedSearchOptions)
 		opts.TimestampAsc = wrapperspb.Bool(false)
 	}
-	events, err := s.ListIndexesAdvanced(ctx, 1, opts)
+	events, err := s.ListIndexesAdvanced(ctx, 1, opts, includeDeleted)
 	if err != nil {
 		return cloudevent.CloudEvent[ObjectInfo]{}, err
 	}
@@ -116,9 +120,11 @@ func (s *Service) GetLatestIndexAdvanced(ctx context.Context, advancedOpts *grpc
 }
 
 // ListIndexes fetches and returns a list of index for cloud events that match the given options.
+// Tombstoned attestations are not suppressed; callers that want suppression should
+// use ListIndexesAdvanced with includeDeleted=false.
 func (s *Service) ListIndexes(ctx context.Context, limit int, opts *grpc.SearchOptions) ([]cloudevent.CloudEvent[ObjectInfo], error) {
 	advancedOpts := convertSearchOptionsToAdvanced(opts)
-	return s.ListIndexesAdvanced(ctx, limit, advancedOpts)
+	return s.ListIndexesAdvanced(ctx, limit, advancedOpts, true)
 }
 
 // maxQueryLimit is the maximum number of rows a single query may return.
@@ -126,7 +132,9 @@ func (s *Service) ListIndexes(ctx context.Context, limit int, opts *grpc.SearchO
 const maxQueryLimit = 1000
 
 // ListIndexesAdvanced fetches and returns a list of index for cloud events that match the given advanced options.
-func (s *Service) ListIndexesAdvanced(ctx context.Context, limit int, advancedOpts *grpc.AdvancedSearchOptions) ([]cloudevent.CloudEvent[ObjectInfo], error) {
+// When includeDeleted is false, rows tombstoned by a dimo.tombstone event with a matching
+// (source, target_id) pair for the same subject are suppressed.
+func (s *Service) ListIndexesAdvanced(ctx context.Context, limit int, advancedOpts *grpc.AdvancedSearchOptions, includeDeleted bool) ([]cloudevent.CloudEvent[ObjectInfo], error) {
 	if limit <= 0 {
 		limit = 1
 	}
@@ -159,6 +167,11 @@ func (s *Service) ListIndexesAdvanced(ctx context.Context, limit int, advancedOp
 	if advancedOpts != nil {
 		advancedMods := AdvancedSearchOptionsToQueryMod(advancedOpts)
 		mods = append(mods, advancedMods...)
+	}
+	if !includeDeleted {
+		if mod := voidsSuppressionMod(advancedOpts); mod != nil {
+			mods = append(mods, mod)
+		}
 	}
 	query, args := newQuery(mods...)
 	rows, err := s.chConn.Query(ctx, query, args...)
@@ -204,12 +217,16 @@ type CloudEventTypeSummary struct {
 }
 
 // GetCloudEventTypeSummaries returns per-type counts and time ranges for the given search options.
+// Tombstoned attestations are not suppressed; callers that want suppression should
+// use GetCloudEventTypeSummariesAdvanced with includeDeleted=false.
 func (s *Service) GetCloudEventTypeSummaries(ctx context.Context, opts *grpc.SearchOptions) ([]CloudEventTypeSummary, error) {
-	return s.GetCloudEventTypeSummariesAdvanced(ctx, convertSearchOptionsToAdvanced(opts))
+	return s.GetCloudEventTypeSummariesAdvanced(ctx, convertSearchOptionsToAdvanced(opts), true)
 }
 
 // GetCloudEventTypeSummariesAdvanced returns event type summaries filtered by advanced search options.
-func (s *Service) GetCloudEventTypeSummariesAdvanced(ctx context.Context, advancedOpts *grpc.AdvancedSearchOptions) ([]CloudEventTypeSummary, error) {
+// When includeDeleted is false, rows tombstoned by a dimo.tombstone event with a matching
+// (source, target_id) pair for the same subject are excluded from the counts.
+func (s *Service) GetCloudEventTypeSummariesAdvanced(ctx context.Context, advancedOpts *grpc.AdvancedSearchOptions, includeDeleted bool) ([]CloudEventTypeSummary, error) {
 	mods := []qm.QueryMod{
 		qm.Select(
 			chindexer.TypeColumn,
@@ -224,6 +241,11 @@ func (s *Service) GetCloudEventTypeSummariesAdvanced(ctx context.Context, advanc
 
 	if advancedOpts != nil {
 		mods = append(mods, AdvancedSearchOptionsToQueryMod(advancedOpts)...)
+	}
+	if !includeDeleted {
+		if mod := voidsSuppressionMod(advancedOpts); mod != nil {
+			mods = append(mods, mod)
+		}
 	}
 
 	query, args := newQuery(mods...)
@@ -252,14 +274,16 @@ func (s *Service) GetCloudEventTypeSummariesAdvanced(ctx context.Context, advanc
 }
 
 // ListCloudEvents fetches and returns the cloud events that match the given options.
+// Tombstoned attestations are not suppressed; callers that want suppression should
+// use ListCloudEventsAdvanced with includeDeleted=false.
 func (s *Service) ListCloudEvents(ctx context.Context, bucketName string, limit int, opts *grpc.SearchOptions) ([]cloudevent.RawEvent, error) {
 	advancedOpts := convertSearchOptionsToAdvanced(opts)
-	return s.ListCloudEventsAdvanced(ctx, bucketName, limit, advancedOpts)
+	return s.ListCloudEventsAdvanced(ctx, bucketName, limit, advancedOpts, true)
 }
 
 // ListCloudEventsAdvanced fetches and returns the cloud events that match the given advanced options.
-func (s *Service) ListCloudEventsAdvanced(ctx context.Context, bucketName string, limit int, advancedOpts *grpc.AdvancedSearchOptions) ([]cloudevent.RawEvent, error) {
-	events, err := s.ListIndexesAdvanced(ctx, limit, advancedOpts)
+func (s *Service) ListCloudEventsAdvanced(ctx context.Context, bucketName string, limit int, advancedOpts *grpc.AdvancedSearchOptions, includeDeleted bool) ([]cloudevent.RawEvent, error) {
+	events, err := s.ListIndexesAdvanced(ctx, limit, advancedOpts, includeDeleted)
 	if err != nil {
 		return nil, err
 	}
@@ -272,14 +296,16 @@ func (s *Service) ListCloudEventsAdvanced(ctx context.Context, bucketName string
 }
 
 // GetLatestCloudEvent fetches and returns the latest cloud event that matches the given options.
+// Tombstoned attestations are not suppressed; callers that want suppression should
+// use GetLatestCloudEventAdvanced with includeDeleted=false.
 func (s *Service) GetLatestCloudEvent(ctx context.Context, bucketName string, opts *grpc.SearchOptions) (cloudevent.RawEvent, error) {
 	advancedOpts := convertSearchOptionsToAdvanced(opts)
-	return s.GetLatestCloudEventAdvanced(ctx, bucketName, advancedOpts)
+	return s.GetLatestCloudEventAdvanced(ctx, bucketName, advancedOpts, true)
 }
 
 // GetLatestCloudEventAdvanced fetches and returns the latest cloud event that matches the given advanced options.
-func (s *Service) GetLatestCloudEventAdvanced(ctx context.Context, bucketName string, advancedOpts *grpc.AdvancedSearchOptions) (cloudevent.RawEvent, error) {
-	cloudIdx, err := s.GetLatestIndexAdvanced(ctx, advancedOpts)
+func (s *Service) GetLatestCloudEventAdvanced(ctx context.Context, bucketName string, advancedOpts *grpc.AdvancedSearchOptions, includeDeleted bool) (cloudevent.RawEvent, error) {
+	cloudIdx, err := s.GetLatestIndexAdvanced(ctx, advancedOpts, includeDeleted)
 	if err != nil {
 		return cloudevent.RawEvent{}, err
 	}
@@ -599,6 +625,29 @@ func convertSearchOptionsToAdvanced(opts *grpc.SearchOptions) *grpc.AdvancedSear
 	}
 
 	return advanced
+}
+
+// voidsSuppressionMod returns a QueryMod that excludes rows whose (source, id)
+// pair appears as (source, voids_id) on a dimo.tombstone row for the same
+// subject. Returns nil when no subject is constrained on opts (e.g. a global
+// query); without a subject anchor the inner subquery would scan the whole
+// table, which we don't want to do silently.
+func voidsSuppressionMod(opts *grpc.AdvancedSearchOptions) qm.QueryMod {
+	if opts == nil {
+		return nil
+	}
+	subjects := opts.GetSubject().GetIn()
+	if len(subjects) == 0 {
+		return nil
+	}
+	clause := "(" + chindexer.SourceColumn + ", " + chindexer.IDColumn + ") NOT IN (" +
+		"SELECT " + chindexer.SourceColumn + ", " + chindexer.VoidsIDColumn +
+		" FROM " + chindexer.TableName +
+		" WHERE " + chindexer.SubjectColumn + " IN (?)" +
+		" AND " + chindexer.TypeColumn + " = ?" +
+		" AND " + chindexer.VoidsIDColumn + " != ''" +
+		")"
+	return qm.Where(clause, subjects, cloudevent.TypeAttestationTombstone)
 }
 
 func AdvancedSearchOptionsToQueryMod(opts *grpc.AdvancedSearchOptions) []qm.QueryMod {

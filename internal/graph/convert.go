@@ -58,3 +58,11 @@ func resolveLimit(limit *int) int {
 	}
 	return defaultLimit
 }
+
+// resolveIncludeDeleted maps the GraphQL `includeDeleted` argument (which has
+// a default of false in the schema, but may arrive as nil when the caller did
+// not supply a value at all) to the eventrepo flag. False means tombstoned
+// attestations are suppressed; true means they are returned.
+func resolveIncludeDeleted(p *bool) bool {
+	return p != nil && *p
+}

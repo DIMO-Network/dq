@@ -999,7 +999,7 @@ func TestListIndexesAdvanced(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			results, err := indexService.ListIndexesAdvanced(t.Context(), 10, tt.advancedOpts)
+			results, err := indexService.ListIndexesAdvanced(t.Context(), 10, tt.advancedOpts, true)
 			if tt.expectedError {
 				require.Error(t, err, "Expected error but got none")
 			} else {

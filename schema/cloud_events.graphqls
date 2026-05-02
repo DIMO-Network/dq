@@ -68,8 +68,10 @@ input CloudEventFilter {
 extend type Query {
   """
   Latest full cloud event matching the given subject DID and optional filter.
+  Tombstoned attestations are hidden from the result by default; pass
+  includeDeleted: true to disable tombstone suppression.
   """
-  latestCloudEvent(subject: String!, filter: CloudEventFilter): CloudEvent!
+  latestCloudEvent(subject: String!, filter: CloudEventFilter, includeDeleted: Boolean = false): CloudEvent!
     @mcpTool(
       name: "get_latest_cloud_event"
       description: "Get the latest full CloudEvent (header + JSON payload) for a subject DID, optionally filtered. Returns dataUrl (presigned S3 link) for large binary payloads instead of inlining them."
@@ -78,8 +80,10 @@ extend type Query {
 
   """
   List full cloud events matching the given subject DID and optional filter.
+  Tombstoned attestations are hidden from the result by default; pass
+  includeDeleted: true to disable tombstone suppression.
   """
-  cloudEvents(subject: String!, limit: Int = 10, filter: CloudEventFilter): [CloudEvent!]!
+  cloudEvents(subject: String!, limit: Int = 10, filter: CloudEventFilter, includeDeleted: Boolean = false): [CloudEvent!]!
     @mcpTool(
       name: "list_cloud_events"
       description: "List full CloudEvents (headers + JSON payloads) for a subject DID, optionally filtered and limited (default 10). Large binary payloads are returned as presigned S3 URLs via dataUrl instead of inlined data."
@@ -87,9 +91,11 @@ extend type Query {
     )
 
   """
-  List cloud event types available for a subject, with counts and time ranges.
+  List cloud event types available for a subject, with counts and time
+  ranges. Tombstoned attestations are excluded from counts by default;
+  pass includeDeleted: true to disable tombstone suppression.
   """
-  availableCloudEventTypes(subject: String!, filter: CloudEventFilter): [CloudEventTypeSummary!]!
+  availableCloudEventTypes(subject: String!, filter: CloudEventFilter, includeDeleted: Boolean = false): [CloudEventTypeSummary!]!
     @mcpTool(
       name: "list_available_event_types"
       description: "Summarize the CloudEvent types present for a subject DID. Returns each type with its count, firstSeen, and lastSeen timestamps — useful for discovering what kinds of events exist before querying them."
