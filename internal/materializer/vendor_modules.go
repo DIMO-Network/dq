@@ -5,6 +5,7 @@ import (
 	"github.com/DIMO-Network/model-garage/pkg/hashdog"
 	"github.com/DIMO-Network/model-garage/pkg/modules"
 	"github.com/DIMO-Network/model-garage/pkg/ruptela"
+	"github.com/DIMO-Network/model-garage/pkg/tesla"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -55,4 +56,10 @@ func RegisterVendorModules(cfg VendorConfig) {
 		ChainID:                 cfg.ChainID,
 	}
 	SignalRegistry.Override(modules.HashDogSource.String(), hashDogModule)
+
+	// Tesla: stateless module, registered upstream by model-garage's own
+	// init(). Without it Tesla raw status would fall through to the default
+	// module and decode to nothing — live triggers would see Tesla signals
+	// while decoded tables silently miss them.
+	SignalRegistry.Override(modules.TeslaSource.String(), &tesla.Module{})
 }
