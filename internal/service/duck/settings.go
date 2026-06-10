@@ -1,5 +1,7 @@
 package duck
 
+import "strings"
+
 // Default values applied by Config.withDefaults.
 const (
 	// DefaultRawPrefix is the default key prefix for raw cloudevent parquet files.
@@ -57,6 +59,12 @@ func (c Config) withDefaults() Config {
 	if c.DecodedPrefix == "" {
 		c.DecodedPrefix = DefaultDecodedPrefix
 	}
+	// The materializer normalizes its prefixes WITH a trailing slash; the
+	// path builders here join with "/" themselves. Trim so an operator
+	// setting "decoded/v1/" doesn't build double-slash keys that match
+	// nothing.
+	c.RawPrefix = strings.TrimSuffix(c.RawPrefix, "/")
+	c.DecodedPrefix = strings.TrimSuffix(c.DecodedPrefix, "/")
 	if c.MaxConns <= 0 {
 		c.MaxConns = DefaultMaxConns
 	}
