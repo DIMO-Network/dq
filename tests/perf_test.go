@@ -14,8 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/DIMO-Network/dq/internal/materializer"
 	"github.com/DIMO-Network/dq/internal/service/duck"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -119,4 +122,69 @@ func TestQueryPerformance(t *testing.T) {
 
 func mkdirAll(dir string) error {
 	return os.MkdirAll(dir, 0o755)
+}
+
+// TestMaterializerPerformance measures post-fact decode throughput: raw
+// dimo.status bundles (written exactly like din's sink) through one
+// materializer pass to decoded parquet + latest/summary buckets.
+//
+// Run: go test ./tests/ -run TestMaterializerPerformance -v -perf
+func TestMaterializerPerformance(t *testing.T) {
+	if !*runPerf {
+		t.Skip("pass -perf to run the performance gate")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	store := newFSStore(t, root)
+
+	const (
+		bundles         = 20
+		eventsPerBundle = 2_000
+		signalsPerEvent = 5
+		vehicles        = 100
+	)
+	day := time.Now().UTC().AddDate(0, 0, -3).Truncate(24 * time.Hour)
+
+	genStart := time.Now()
+	seq := 0
+	for b := range bundles {
+		events := make([]cloudevent.StoredEvent, 0, eventsPerBundle)
+		for i := range eventsPerBundle {
+			n := b*eventsPerBundle + i
+			subject := fmt.Sprintf("did:erc721:137:%s:%d", vehicleNFT.Hex(), n%vehicles)
+			ts := day.Add(time.Duration(n) * 50 * time.Millisecond)
+			signals := make([]map[string]any, signalsPerEvent)
+			for s := range signalsPerEvent {
+				signals[s] = speedAt(ts.Add(time.Duration(s)*time.Second), float64(n%130))
+			}
+			events = append(events, deviceStatus(fmt.Sprintf("perf-%d", n), subject, ts, signals...))
+		}
+		seq++
+		writeRawBundle(t, store, day, seq, events...)
+	}
+	totalEvents := bundles * eventsPerBundle
+	totalSignals := totalEvents * signalsPerEvent
+	t.Logf("generated %d raw events (%d signals) in %d bundles in %s",
+		totalEvents, totalSignals, bundles, time.Since(genStart).Round(time.Millisecond))
+
+	runner := materializer.New(materializer.Config{
+		ChainID:           137,
+		VehicleNFTAddress: vehicleNFT,
+	}, store, zerolog.Nop())
+
+	matStart := time.Now()
+	processed, err := runner.RunOnce(ctx)
+	require.NoError(t, err)
+	for processed != 0 {
+		processed, err = runner.RunOnce(ctx)
+		require.NoError(t, err)
+	}
+	matDur := time.Since(matStart)
+
+	eps := float64(totalEvents) / matDur.Seconds()
+	sps := float64(totalSignals) / matDur.Seconds()
+	t.Logf("materialized %d events (%d signals) in %s — %.0f events/s, %.0f signals/s",
+		totalEvents, totalSignals, matDur.Round(time.Millisecond), eps, sps)
+
+	require.Greater(t, eps, 1_000.0, "perf gate: materializer must sustain >1k events/s")
 }
