@@ -42,13 +42,29 @@ type App struct {
 
 // New creates a new application.
 func New(settings config.Settings) (*App, error) {
+	logger := appLogger()
+
 	chService, err := ch.NewService(settings)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't create ClickHouse service: %w", err)
 	}
-	signalRepo, err := repositories.NewRepository(chService)
+	backend, backendCleanup, err := newQueryBackend(&settings, chService, logger)
 	if err != nil {
+		return nil, err
+	}
+	signalRepo, err := repositories.NewRepository(backend)
+	if err != nil {
+		backendCleanup()
 		return nil, fmt.Errorf("couldn't create signal repository: %w", err)
+	}
+
+	var stopMaterializer func()
+	if settings.MaterializerEnabled {
+		stopMaterializer, err = startMaterializer(&settings, logger)
+		if err != nil {
+			backendCleanup()
+			return nil, fmt.Errorf("couldn't start materializer: %w", err)
+		}
 	}
 
 	chConn, err := chClientFromSettings(&settings.ClickhouseFileCatalogue)
@@ -119,7 +135,12 @@ func New(settings config.Settings) (*App, error) {
 	return &App{
 		Handler:    authChain(gqlSrv),
 		MCPHandler: authChain(mcpHandler),
-		cleanup:    func() {},
+		cleanup: func() {
+			if stopMaterializer != nil {
+				stopMaterializer()
+			}
+			backendCleanup()
+		},
 	}, nil
 }
 

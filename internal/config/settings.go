@@ -26,4 +26,38 @@ type Settings struct {
 	S3AWSSecretAccessKey string `yaml:"S3_AWS_SECRET_ACCESS_KEY"`
 	// Identity API for device→vehicle DID resolution
 	IdentityAPIURL string `yaml:"IDENTITY_API_URL"`
+	// QueryBackend selects the signal/event query backend: clickhouse (default),
+	// duckdb, or shadow (serve from clickhouse, mirror to duckdb and compare).
+	QueryBackend string `yaml:"QUERY_BACKEND"`
+	// DuckDB parse-on-read query engine (maps into duck.Config).
+	DuckDBMemoryLimit   string `yaml:"DUCKDB_MEMORY_LIMIT"`
+	DuckDBThreads       int    `yaml:"DUCKDB_THREADS"`
+	DuckDBExtensionDir  string `yaml:"DUCKDB_EXTENSION_DIR"`
+	DuckDBTempDirectory string `yaml:"DUCKDB_TEMP_DIRECTORY"`
+	DuckDBMaxConns      int    `yaml:"DUCKDB_MAX_CONNS"`
+	// DuckDBS3Endpoint is a custom S3 endpoint for DuckDB's httpfs (e.g. MinIO).
+	DuckDBS3Endpoint string `yaml:"DUCKDB_S3_ENDPOINT"`
+	// RawPrefix is the key prefix for raw cloudevent parquet files in ParquetBucket.
+	RawPrefix string `yaml:"RAW_PREFIX"`
+	// DecodedPrefix is the key prefix for decoded signal/event/latest/summary parquet files.
+	DecodedPrefix string `yaml:"DECODED_PREFIX"`
+	// Materializer (post-fact decode loop raw -> decoded parquet).
+	MaterializerEnabled      bool   `yaml:"MATERIALIZER_ENABLED"`
+	MaterializerPollInterval string `yaml:"MATERIALIZER_POLL_INTERVAL"`
+	// DIMO registry chain settings for vendor module DID construction.
+	DIMORegistryChainID   uint64 `yaml:"DIMO_REGISTRY_CHAIN_ID"`
+	VehicleNFTAddress     string `yaml:"VEHICLE_NFT_ADDRESS"`
+	AftermarketNFTAddress string `yaml:"AFTERMARKET_NFT_ADDRESS"`
+	SyntheticNFTAddress   string `yaml:"SYNTHETIC_NFT_ADDRESS"`
 }
+
+// Query backend values for QueryBackend.
+const (
+	// QueryBackendClickHouse serves all queries from ClickHouse (default).
+	QueryBackendClickHouse = "clickhouse"
+	// QueryBackendDuckDB serves signal/event queries from DuckDB over parquet.
+	QueryBackendDuckDB = "duckdb"
+	// QueryBackendShadow serves from ClickHouse while mirroring queries to
+	// DuckDB in the background and comparing results.
+	QueryBackendShadow = "shadow"
+)

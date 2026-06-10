@@ -20,8 +20,11 @@ const approximateLocationResolution = 6
 
 var unixEpoch = time.Unix(0, 0).UTC()
 
-// CHService is the interface for the ClickHouse service.
-type CHService interface {
+// Backend is the signal/latest/summary/event query surface shared by the
+// ClickHouse service (internal/service/ch) and the DuckDB parse-on-read
+// query layer (internal/service/duck). Both *ch.Service and *duck.Queries
+// satisfy it (see assertions in backend.go).
+type Backend interface {
 	GetAggregatedSignals(ctx context.Context, subject string, aggArgs *model.AggregatedSignalArgs) ([]*ch.AggSignal, error)
 	GetAggregatedSignalsForRanges(ctx context.Context, subject string, ranges []ch.TimeRange, globalFrom, globalTo time.Time, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs) ([]*ch.AggSignalForRange, error)
 	GetLatestSignals(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error)
@@ -32,7 +35,18 @@ type CHService interface {
 	GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*ch.EventCount, error)
 	GetEventCountsForRanges(ctx context.Context, subject string, ranges []ch.TimeRange, eventNames []string) ([]*ch.EventCountForRange, error)
 	GetEventSummaries(ctx context.Context, subject string) ([]*ch.EventSummary, error)
+}
+
+// SegmentsBackend is the segment-detection surface, currently only
+// implemented by ClickHouse.
+type SegmentsBackend interface {
 	GetSegments(ctx context.Context, subject string, from, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig) ([]*model.Segment, error)
+}
+
+// CHService is the full query surface the Repository depends on.
+type CHService interface {
+	Backend
+	SegmentsBackend
 }
 
 // Repository is the base repository for all repositories.
