@@ -37,6 +37,7 @@ import (
 
 	"github.com/DIMO-Network/cloudevent"
 	ceparquet "github.com/DIMO-Network/cloudevent/parquet"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/rs/zerolog"
 )
 
@@ -67,6 +68,11 @@ type Config struct {
 	DecodedPrefix string
 	// PollInterval is how often Run polls for new raw objects.
 	PollInterval time.Duration
+	// ChainID and VehicleNFTAddress gate dimo.status signal decoding to
+	// vehicle-NFT subjects, mirroring dis signalconvert and din's
+	// decodestream. A zero VehicleNFTAddress disables the gate (tests).
+	ChainID           uint64
+	VehicleNFTAddress common.Address
 	// BatchMaxFiles caps how many raw files are processed per batch.
 	BatchMaxFiles int
 	// Types is the list of cloudevent types to materialize.
@@ -322,6 +328,12 @@ type decodedBatch struct {
 // batch: partial decodes are salvaged and failures only bump errorCount.
 func (r *Runner) decodeBatch(ctx context.Context, b rawBatch) (*decodedBatch, error) {
 	dec := &decodedBatch{}
+	// At-least-once ingest can land the same event in multiple raw bundles
+	// within one batch; dedup on the header uniqueness key so decoded rows
+	// (and summary counts) see each event once. Cross-batch duplicates are
+	// rare (redelivery lands in adjacent bundles) and collapse later in
+	// raw compaction.
+	seen := make(map[string]struct{})
 	for _, key := range b.keys {
 		data, err := r.store.GetObject(ctx, key)
 		if err != nil {
@@ -336,8 +348,16 @@ func (r *Runner) decodeBatch(ctx context.Context, b rawBatch) (*decodedBatch, er
 			continue
 		}
 		for i := range events {
+			eventKey := events[i].Key()
+			if _, dup := seen[eventKey]; dup {
+				continue
+			}
+			seen[eventKey] = struct{}{}
 			switch b.ceType {
 			case cloudevent.TypeStatus:
+				if !r.isVehicleSignalMessage(&events[i].RawEvent) {
+					continue
+				}
 				rows, failed := r.convertSignals(ctx, &events[i].RawEvent)
 				dec.signals = append(dec.signals, rows...)
 				dec.signalCount += len(rows)
@@ -351,6 +371,20 @@ func (r *Runner) decodeBatch(ctx context.Context, b rawBatch) (*decodedBatch, er
 		}
 	}
 	return dec, nil
+}
+
+// isVehicleSignalMessage mirrors dis signalconvert: only ERC-721 vehicle
+// subjects on the configured chain decode to signals. Disabled when no
+// vehicle contract is configured.
+func (r *Runner) isVehicleSignalMessage(rawEvent *cloudevent.RawEvent) bool {
+	if r.cfg.VehicleNFTAddress == (common.Address{}) {
+		return true
+	}
+	did, err := cloudevent.DecodeERC721DID(rawEvent.Subject)
+	if err != nil {
+		return false
+	}
+	return did.ChainID == r.cfg.ChainID && did.ContractAddress.Cmp(r.cfg.VehicleNFTAddress) == 0
 }
 
 // writeDataObjects writes the decoded signal and event parquet objects,

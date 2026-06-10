@@ -123,9 +123,11 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 
 	store := newS3ObjectStore(s3ClientFromSettings(settings), settings.ParquetBucket)
 	runner := materializer.New(materializer.Config{
-		RawPrefix:     settings.RawPrefix,
-		DecodedPrefix: settings.DecodedPrefix,
-		PollInterval:  pollInterval,
+		RawPrefix:         settings.RawPrefix,
+		DecodedPrefix:     settings.DecodedPrefix,
+		PollInterval:      pollInterval,
+		ChainID:           settings.DIMORegistryChainID,
+		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
 	}, store, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
