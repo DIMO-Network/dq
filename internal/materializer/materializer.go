@@ -79,6 +79,9 @@ type Config struct {
 	VehicleNFTAddress common.Address
 	// BatchMaxFiles caps how many raw files are processed per batch.
 	BatchMaxFiles int
+	// BatchMaxBytes caps the total raw object size per batch; the whole
+	// batch is decoded in memory, so this bounds the working set.
+	BatchMaxBytes int64
 	// Types is the list of cloudevent types to materialize.
 	Types []string
 	// Workers bounds the per-batch fan-out: concurrent raw-object
@@ -99,6 +102,7 @@ const (
 	defaultDecodedPrefix = "decoded/v1/"
 	defaultPollInterval  = 15 * time.Second
 	defaultBatchMaxFiles = 64
+	defaultBatchMaxBytes = 1 << 30 // decode working set is a multiple of this
 
 	// batchHashLen is how many hex chars of the batchID are embedded in
 	// decoded data object names.
@@ -131,6 +135,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.BatchMaxFiles <= 0 {
 		c.BatchMaxFiles = defaultBatchMaxFiles
+	}
+	if c.BatchMaxBytes <= 0 {
+		c.BatchMaxBytes = defaultBatchMaxBytes
 	}
 	if len(c.Types) == 0 {
 		c.Types = []string{cloudevent.TypeStatus, cloudevent.TypeEvents}
@@ -217,9 +224,9 @@ func (r *Runner) RunOnce(ctx context.Context) (int, error) {
 			processed += len(b.keys)
 			batchesTotal.WithLabelValues(ceType).Inc()
 		}
-		if len(batches) > 0 {
-			lagSeconds.WithLabelValues(ceType).Set(0) // pass drained everything pending
-		}
+		// Every pending batch for this type committed; anything newer
+		// arrived after the list and gets measured next pass.
+		lagSeconds.WithLabelValues(ceType).Set(0)
 	}
 	return processed, nil
 }
@@ -241,7 +248,7 @@ func (r *Runner) pendingBatches(ctx context.Context, ceType string, watermark ma
 		return nil, fmt.Errorf("listing %s: %w", prefix, err)
 	}
 
-	byPartition := make(map[string][]string)
+	byPartition := make(map[string][]ObjectInfo)
 	for _, obj := range objects {
 		if !strings.HasSuffix(obj.Key, ".parquet") {
 			continue
@@ -255,7 +262,7 @@ func (r *Runner) pendingBatches(ctx context.Context, ceType string, watermark ma
 		if obj.Key <= watermark[partition] {
 			continue // already processed
 		}
-		byPartition[partition] = append(byPartition[partition], obj.Key)
+		byPartition[partition] = append(byPartition[partition], obj)
 	}
 
 	partitions := make([]string, 0, len(byPartition))
@@ -266,10 +273,22 @@ func (r *Runner) pendingBatches(ctx context.Context, ceType string, watermark ma
 
 	batches := make([]rawBatch, 0, len(partitions))
 	for _, p := range partitions {
-		keys := byPartition[p]
-		sort.Strings(keys)
-		if len(keys) > r.cfg.BatchMaxFiles {
-			keys = keys[:r.cfg.BatchMaxFiles]
+		infos := byPartition[p]
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Key < infos[j].Key })
+		// Cut on file count or aggregate bytes, whichever hits first — the
+		// whole batch is decoded in memory. Always take at least one file
+		// so an oversized object can't stall the watermark.
+		var keys []string
+		var bytesTotal int64
+		for _, info := range infos {
+			if len(keys) >= r.cfg.BatchMaxFiles {
+				break
+			}
+			if len(keys) > 0 && bytesTotal+info.Size > r.cfg.BatchMaxBytes {
+				break
+			}
+			keys = append(keys, info.Key)
+			bytesTotal += info.Size
 		}
 		batches = append(batches, rawBatch{partition: p, ceType: ceType, keys: keys})
 	}
@@ -303,11 +322,12 @@ func (r *Runner) processBatch(ctx context.Context, b rawBatch, watermark map[str
 
 	if !manifestExists {
 		// Step 2: latest/summary read-merge-write, idempotent per bucket
-		// via the embedded batch stamp.
-		if err := r.updateLatestBuckets(ctx, batchID, dec.signals); err != nil {
-			return err
-		}
-		if err := r.updateSummaryBuckets(ctx, batchID, dec.signals); err != nil {
+		// via the embedded batch stamp. The two bucket families are
+		// disjoint key sets — update them concurrently.
+		bg, bgCtx := errgroup.WithContext(ctx)
+		bg.Go(func() error { return r.updateLatestBuckets(bgCtx, batchID, dec.signals) })
+		bg.Go(func() error { return r.updateSummaryBuckets(bgCtx, batchID, dec.signals) })
+		if err := bg.Wait(); err != nil {
 			return err
 		}
 
@@ -417,6 +437,10 @@ func (r *Runner) decodeBatch(ctx context.Context, b rawBatch) (*decodedBatch, er
 			}
 			jobs = append(jobs, &ev.RawEvent)
 		}
+		// Events still referenced by jobs stay live through their backing
+		// array; dropping the outer slice lets everything skipped (dups,
+		// non-vehicle subjects) get collected before conversion.
+		decoded[i] = nil
 	}
 
 	// Stage 3: model-garage conversion is the CPU-heavy step — fan out.

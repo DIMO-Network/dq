@@ -86,13 +86,19 @@ func (s *s3ObjectStore) PutObject(ctx context.Context, key string, body []byte) 
 	return nil
 }
 
-// DeleteObject removes one object; S3 delete is quiet on missing keys.
+// DeleteObject removes one object. AWS S3 deletes are quiet on missing
+// keys, but S3-compatible stores (MinIO) can 404 — treat that as done so
+// compaction recovery stays idempotent.
 func (s *s3ObjectStore) DeleteObject(ctx context.Context, key string) error {
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		var noKey *types.NoSuchKey
+		if errors.As(err, &noKey) {
+			return nil
+		}
 		return fmt.Errorf("deleting s3://%s/%s: %w", s.bucket, key, err)
 	}
 	return nil

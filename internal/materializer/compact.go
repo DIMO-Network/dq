@@ -40,8 +40,22 @@ const (
 	compactionPrefix = "_compaction/"
 	// compactedName is the merged output per partition. A fixed name makes
 	// recompaction (late batches after a first compaction) overwrite
-	// atomically instead of accumulating merge generations.
+	// atomically instead of accumulating merge generations. Note for S3:
+	// a GET racing the overwrite PUT returns the previous generation (never
+	// a torn object) — acceptable, since the previous generation is a
+	// correct, just staler, view of the partition.
 	compactedName = "compacted.parquet"
+
+	// recompactMinFiles triggers a re-merge once a partition already has a
+	// compacted.parquet: any late batch file alongside it qualifies.
+	// Without this, fewer than CompactMinFiles-1 late files would sit
+	// uncompacted forever.
+	recompactMinFiles = 2
+
+	// defaultCompactMaxSourceBytes skips partitions whose aggregate size
+	// exceeds the cap — the whole merge is held in memory. Oversized
+	// partitions wait for chunked merging (future work) and stay readable.
+	defaultCompactMaxSourceBytes = 2 << 30
 )
 
 // compactionManifest records an in-flight partition merge for recovery.
@@ -71,7 +85,7 @@ func (r *Runner) CompactOnce(ctx context.Context) (int, error) {
 		if err != nil {
 			return compacted, fmt.Errorf("listing %s: %w", prefix, err)
 		}
-		byDate := make(map[string][]string)
+		byDate := make(map[string][]ObjectInfo)
 		for _, obj := range objects {
 			rest := strings.TrimPrefix(obj.Key, prefix)
 			dir, file := path.Split(rest)
@@ -79,11 +93,29 @@ func (r *Runner) CompactOnce(ctx context.Context) (int, error) {
 			if !found || !strings.HasSuffix(file, ".parquet") {
 				continue
 			}
-			byDate[date] = append(byDate[date], obj.Key)
+			byDate[date] = append(byDate[date], obj)
 		}
 		for _, date := range sortedKeys(byDate) {
-			keys := byDate[date]
-			if date >= today || len(keys) < r.cfg.CompactMinFiles {
+			infos := byDate[date]
+			if date >= today {
+				continue
+			}
+			minFiles := r.cfg.CompactMinFiles
+			var totalBytes int64
+			keys := make([]string, 0, len(infos))
+			for _, info := range infos {
+				keys = append(keys, info.Key)
+				totalBytes += info.Size
+				if path.Base(info.Key) == compactedName {
+					minFiles = recompactMinFiles
+				}
+			}
+			if len(keys) < minFiles {
+				continue
+			}
+			if totalBytes > defaultCompactMaxSourceBytes {
+				r.log.Warn().Str("table", table).Str("date", date).Int64("bytes", totalBytes).
+					Msg("partition exceeds compaction size cap; skipping (needs chunked merge)")
 				continue
 			}
 			if err := r.compactPartition(ctx, deleter, table, date, keys); err != nil {
