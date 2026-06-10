@@ -58,7 +58,7 @@ func NewRaw(svc *Service, bucket, rawPrefix string) *Raw {
 }
 
 // rawColumns matches cloudevent/parquet.ParquetRow.
-const rawColumns = "subject, time, type, id, source, producer, data_content_type, data_version, extras, data, data_base64, data_index_key"
+const rawColumns = "subject, time, type, id, source, producer, data_content_type, data_version, extras, data, data_base64, data_index_key, voids_id"
 
 // ListCloudEvents returns events matching filter, newest first, capped at
 // limit. Duplicate rows (at-least-once ingest, compaction grace window)
@@ -252,10 +252,10 @@ type rowScanner interface {
 // header, restore non-column fields from extras, attach payload.
 func scanStoredEvent(row rowScanner) (cloudevent.StoredEvent, error) {
 	var ev cloudevent.StoredEvent
-	var extras, data, dataIndexKey *string
+	var extras, data, dataIndexKey, voidsID *string
 	var dataBase64 []byte
 	if err := row.Scan(&ev.Subject, &ev.Time, &ev.Type, &ev.ID, &ev.Source, &ev.Producer,
-		&ev.DataContentType, &ev.DataVersion, &extras, &data, &dataBase64, &dataIndexKey); err != nil {
+		&ev.DataContentType, &ev.DataVersion, &extras, &data, &dataBase64, &dataIndexKey, &voidsID); err != nil {
 		return ev, fmt.Errorf("scanning raw cloudevent: %w", err)
 	}
 	ev.SpecVersion = cloudevent.SpecVersion
@@ -275,6 +275,9 @@ func scanStoredEvent(row rowScanner) (cloudevent.StoredEvent, error) {
 	}
 	if dataIndexKey != nil {
 		ev.DataIndexKey = *dataIndexKey
+	}
+	if voidsID != nil {
+		ev.VoidsID = *voidsID
 	}
 	return ev, nil
 }

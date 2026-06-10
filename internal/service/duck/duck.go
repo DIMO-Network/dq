@@ -80,6 +80,10 @@ func bootstrapQueries(cfg Config) []string {
 		queries = append(queries, fmt.Sprintf("SET temp_directory = %s", sqlString(cfg.TempDirectory)))
 	}
 	queries = append(queries, "SET enable_object_cache = true")
+	// Decoded parquet timestamps are TIMESTAMPTZ and our queries inline
+	// naive make_timestamp literals, which DuckDB resolves in the session
+	// TimeZone. Pin UTC so results don't depend on the host zone.
+	queries = append(queries, "SET TimeZone = 'UTC'")
 
 	// extension_directory must be set before INSTALL/LOAD so pre-baked
 	// extensions (see Dockerfile) are found.
