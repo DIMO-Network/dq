@@ -45,7 +45,7 @@ func NewQueries(svc *Service, bucket string) *Queries {
 // <root>/<decodedPrefix>/summary/bucket=<HashBucket(subjectDID)>/summary.parquet.
 func SummaryBucketPath(bucket, decodedPrefix, subjectDID string) string {
 	pb := NewPathBuilder(bucket)
-	return pb.Join(decodedPrefix, "summary", fmt.Sprintf("bucket=%d", HashBucket(subjectDID)), "summary.parquet")
+	return pb.Join(decodedPrefix, "summary", fmt.Sprintf("bucket=%03d", HashBucket(subjectDID)), "summary.parquet")
 }
 
 // EventGlobs returns explicit per-day parquet globs for decoded events:

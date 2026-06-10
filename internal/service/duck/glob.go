@@ -76,7 +76,7 @@ func DecodedSignalGlobs(bucket, decodedPrefix string, from, to time.Time) []stri
 // <root>/<decodedPrefix>/latest/bucket=<HashBucket(subjectDID)>/latest.parquet.
 func LatestBucketPath(bucket, decodedPrefix, subjectDID string) string {
 	pb := NewPathBuilder(bucket)
-	return pb.Join(decodedPrefix, "latest", fmt.Sprintf("bucket=%d", HashBucket(subjectDID)), "latest.parquet")
+	return pb.Join(decodedPrefix, "latest", fmt.Sprintf("bucket=%03d", HashBucket(subjectDID)), "latest.parquet")
 }
 
 // HashBucket maps a subject DID to its latest-bucket number in

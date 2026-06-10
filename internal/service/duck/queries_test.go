@@ -94,7 +94,7 @@ var latestFixtureColumns = []string{
 
 func writeLatestFixture(t *testing.T, svc *Service, root, subject string, rows []latestFixture) {
 	t.Helper()
-	path := filepath.Join(root, "decoded", "v1", "latest", fmt.Sprintf("bucket=%d", HashBucket(subject)), "latest.parquet")
+	path := filepath.Join(root, "decoded", "v1", "latest", fmt.Sprintf("bucket=%03d", HashBucket(subject)), "latest.parquet")
 	valueRows := make([]string, len(rows))
 	for i, r := range rows {
 		valueRows[i] = fmt.Sprintf("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
@@ -117,7 +117,7 @@ var summaryFixtureColumns = []string{"subject", "source", "name", "count", "firs
 
 func writeSummaryFixture(t *testing.T, svc *Service, root, subject string, rows []summaryFixture) {
 	t.Helper()
-	path := filepath.Join(root, "decoded", "v1", "summary", fmt.Sprintf("bucket=%d", HashBucket(subject)), "summary.parquet")
+	path := filepath.Join(root, "decoded", "v1", "summary", fmt.Sprintf("bucket=%03d", HashBucket(subject)), "summary.parquet")
 	valueRows := make([]string, len(rows))
 	for i, r := range rows {
 		valueRows[i] = fmt.Sprintf("(%s, %s, %s, CAST(%d AS UBIGINT), %s, %s)",

@@ -1,6 +1,7 @@
 package duck
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -112,4 +113,22 @@ func TestReadParquetSQL(t *testing.T) {
 	got := ReadParquetSQL([]string{"s3://b/raw/type=t/date=2026-06-01/*.parquet", "/local/o'brien.parquet"})
 	want := "read_parquet(['s3://b/raw/type=t/date=2026-06-01/*.parquet', '/local/o''brien.parquet'], hive_partitioning=true, union_by_name=true)"
 	require.Equal(t, want, got)
+}
+
+// TestLatestBucketPath_ZeroPadded pins the %03d format: the materializer
+// writes bucket=042-style directories, so a %d reader would miss every
+// bucket below 100. Regression for a real reader/writer drift.
+func TestLatestBucketPath_ZeroPadded(t *testing.T) {
+	subject := ""
+	for i := range 100000 {
+		s := fmt.Sprintf("did:erc721:137:0xPad:%d", i)
+		if HashBucket(s) < 10 {
+			subject = s
+			break
+		}
+	}
+	require.NotEmpty(t, subject, "expected to find a low-bucket subject")
+	path := LatestBucketPath("b", "decoded/v1", subject)
+	assert.Contains(t, path, fmt.Sprintf("bucket=%03d/", HashBucket(subject)))
+	assert.Regexp(t, `bucket=00\d/`, path)
 }
