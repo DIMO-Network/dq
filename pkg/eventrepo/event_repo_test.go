@@ -535,8 +535,12 @@ func ref[T any](x T) *T {
 // returns the raw bytes and the map of event index to index key.
 func encodeTestParquet(t *testing.T, events []cloudevent.RawEvent, objectKey string) ([]byte, map[int]string) {
 	t.Helper()
+	stored := make([]cloudevent.StoredEvent, len(events))
+	for i, ev := range events {
+		stored[i] = cloudevent.StoredEvent{RawEvent: ev}
+	}
 	var buf bytes.Buffer
-	indexKeys, err := parquet.Encode(&buf, events, objectKey)
+	indexKeys, err := parquet.Encode(&buf, stored, objectKey)
 	require.NoError(t, err)
 	return buf.Bytes(), indexKeys
 }

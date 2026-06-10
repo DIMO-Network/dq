@@ -354,7 +354,7 @@ func (s *Service) ListCloudEventsFromIndexes(ctx context.Context, indexes []clou
 					return fmt.Errorf("seek to row %d in %s: %w", item.rowOffset, item.objectKey, err)
 				}
 				event.Tags = grpc.TagsOrEmpty(event.Tags)
-				events[item.idx] = event
+				events[item.idx] = event.RawEvent
 			}
 			return nil
 		})
@@ -459,7 +459,7 @@ func (s *Service) getCloudEventFromParquet(ctx context.Context, key string) (clo
 		return cloudevent.RawEvent{}, fmt.Errorf("seek to row %d in %s: %w", rowOffset, objectKey, err)
 	}
 	event.Tags = grpc.TagsOrEmpty(event.Tags)
-	return event, nil
+	return event.RawEvent, nil
 }
 
 // parseParquetRef parses a parquet index key into bucket, object key, and row offset.
