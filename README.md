@@ -48,3 +48,27 @@ latestCloudEvent(
 ### From Fetch
 
 The queries `indexes` and `latestIndex` have been removed. If a client does not want to incur the cost of loading the referenced documents, then it should not request the fields `data` or `dataBase64`. Note that we no longer expose the `indexKey` field, since clients have no way of making use of it.
+
+## Storage backends (parse-on-read)
+
+With `QUERY_BACKEND=duckdb` the service reads raw and decoded parquet straight from object storage. The backend is inferred from `ParquetBucket` — no separate switch:
+
+| Value | Backend |
+|---|---|
+| `my-bucket` | S3 (DuckDB httpfs + materializer S3 client) |
+| `/data/pipeline` or `file:///data/pipeline` | Local filesystem |
+
+Paths must be absolute. The materializer's filesystem store publishes atomically (temp file + fsync + rename), so din's compactor never reads a torn watermark and DuckDB never globs a partial file.
+
+### Single-node quickstart
+
+Run against the same root din writes to:
+
+```bash
+PARQUET_BUCKET=/data/pipeline \
+QUERY_BACKEND=duckdb \
+MATERIALIZER_ENABLED=true \
+go run ./cmd/dq
+```
+
+Limitations in this mode: segment detection and the eventrepo fetch path (ClickHouse index + S3 presign) still require their backing services; the duckdb signal/event/raw query surfaces work fully from local parquet.

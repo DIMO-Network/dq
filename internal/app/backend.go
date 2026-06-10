@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/config"
+	"github.com/DIMO-Network/dq/internal/fsstore"
 	"github.com/DIMO-Network/dq/internal/materializer"
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/dq/internal/service/ch"
@@ -101,10 +102,6 @@ func closeDuck(duckSvc *duck.Service, logger zerolog.Logger) func() {
 // materializer poll loop in a goroutine. The returned stop function cancels
 // the loop and waits for it to exit.
 func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func(), error) {
-	if isLocalBucket(settings.ParquetBucket) {
-		return nil, fmt.Errorf("materializer requires an S3 parquet bucket, got %q", settings.ParquetBucket)
-	}
-
 	var pollInterval time.Duration
 	if settings.MaterializerPollInterval != "" {
 		var err error
@@ -121,7 +118,17 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 		SyntheticNFTAddress:   common.HexToAddress(settings.SyntheticNFTAddress),
 	})
 
-	store := newS3ObjectStore(s3ClientFromSettings(settings), settings.ParquetBucket)
+	// Local path → filesystem store (single-node); bucket name → S3.
+	var store materializer.ObjectStore
+	if isLocalBucket(settings.ParquetBucket) {
+		var err error
+		store, err = fsstore.New(strings.TrimPrefix(settings.ParquetBucket, "file://"))
+		if err != nil {
+			return nil, fmt.Errorf("creating filesystem store: %w", err)
+		}
+	} else {
+		store = newS3ObjectStore(s3ClientFromSettings(settings), settings.ParquetBucket)
+	}
 	runner := materializer.New(materializer.Config{
 		RawPrefix:         settings.RawPrefix,
 		DecodedPrefix:     settings.DecodedPrefix,

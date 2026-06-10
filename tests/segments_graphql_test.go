@@ -159,7 +159,7 @@ func buildSegmentsFixture(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
 	root := t.TempDir()
-	store := &fsStore{root: root}
+	store := newFSStore(t, root)
 
 	writeRawBundle(t, store, segDay, 1,
 		deviceStatus("seg-drive", segmentsVehicle, driveStart.Add(5*time.Minute),

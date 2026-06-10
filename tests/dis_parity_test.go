@@ -147,7 +147,7 @@ func newGraphQLClient(t *testing.T, root string) *client.Client {
 func TestDISParity_RuptelaPayloadThroughGraphQL(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := &fsStore{root: root}
+	store := newFSStore(t, root)
 
 	// Stage 1: the real device payload lands as a raw bundle, exactly as
 	// din's sink writes it.
@@ -266,7 +266,7 @@ func TestDISParity_RuptelaPayloadThroughGraphQL(t *testing.T) {
 func TestDISParity_LocationSignals(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := &fsStore{root: root}
+	store := newFSStore(t, root)
 
 	fixture := loadRuptelaFixture(t)
 	writeRawBundle(t, store, fixture.Time, 1, fixture)

@@ -17,15 +17,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
 	ceparquet "github.com/DIMO-Network/cloudevent/parquet"
+	"github.com/DIMO-Network/dq/internal/fsstore"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/materializer"
 	"github.com/DIMO-Network/dq/internal/service/duck"
@@ -43,49 +41,14 @@ var (
 	nonVehicle = "did:erc721:137:0x0000000000000000000000000000000000000001:9"
 )
 
-// fsStore implements materializer.ObjectStore over a local directory — the
-// same files DuckDB later reads through local-path globs, so the store IS
-// the bucket.
-type fsStore struct {
-	root string
-}
-
-func (f *fsStore) path(key string) string { return filepath.Join(f.root, filepath.FromSlash(key)) }
-
-func (f *fsStore) List(_ context.Context, prefix string) ([]materializer.ObjectInfo, error) {
-	var out []materializer.ObjectInfo
-	err := filepath.Walk(f.root, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return err
-		}
-		rel, err := filepath.Rel(f.root, p)
-		if err != nil {
-			return err
-		}
-		key := filepath.ToSlash(rel)
-		if strings.HasPrefix(key, prefix) {
-			out = append(out, materializer.ObjectInfo{Key: key, Size: info.Size()})
-		}
-		return nil
-	})
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
-	return out, err
-}
-
-func (f *fsStore) GetObject(_ context.Context, key string) ([]byte, error) {
-	body, err := os.ReadFile(f.path(key))
-	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("%w: %s", materializer.ErrNotFound, key)
-	}
-	return body, err
-}
-
-func (f *fsStore) PutObject(_ context.Context, key string, body []byte) error {
-	p := f.path(key)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(p, body, 0o644)
+// newFSStore opens the production filesystem store over root — the same
+// files DuckDB later reads through local-path globs, so the store IS the
+// bucket.
+func newFSStore(t *testing.T, root string) *fsstore.Store {
+	t.Helper()
+	store, err := fsstore.New(root)
+	require.NoError(t, err)
+	return store
 }
 
 // deviceStatus builds a dimo.status raw event exactly as din stores it:
@@ -114,7 +77,7 @@ func speedAt(ts time.Time, v float64) map[string]any {
 // writeRawBundle persists events the way din's sink does: hive partition
 // from the bundle's event-time date, ingest-<ms>-<seq> naming (sorts like
 // din's ULIDs), rows sorted by (subject,time), zstd, subject bloom filter.
-func writeRawBundle(t *testing.T, store *fsStore, day time.Time, seq int, events ...cloudevent.StoredEvent) string {
+func writeRawBundle(t *testing.T, store materializer.ObjectStore, day time.Time, seq int, events ...cloudevent.StoredEvent) string {
 	t.Helper()
 	key := fmt.Sprintf("raw/type=dimo.status/date=%s/ingest-%013d-SEQ%04d.parquet",
 		day.UTC().Format("2006-01-02"), 1749470000000+int64(seq), seq)
@@ -129,7 +92,7 @@ func writeRawBundle(t *testing.T, store *fsStore, day time.Time, seq int, events
 func TestPipelineEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := &fsStore{root: root}
+	store := newFSStore(t, root)
 
 	// --- Stage 1: raw bundles land as din writes them. ---------------------
 	day1 := time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
