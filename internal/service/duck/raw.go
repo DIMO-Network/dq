@@ -3,12 +3,17 @@ package duck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
 )
+
+// ErrNotFound reports that a query matched no stored cloud event. Callers
+// (e.g. the eventrepo facade) use errors.Is to tell absence from I/O failure.
+var ErrNotFound = errors.New("cloud event not found")
 
 // DefaultRawScanWindowDays bounds date-unbounded raw queries. Older data is
 // reachable with explicit time bounds; LatestCloudEvent walks past it.
@@ -99,7 +104,7 @@ func (r *Raw) LatestCloudEvent(ctx context.Context, filter RawFilter) (cloudeven
 			return events[0], nil
 		}
 	}
-	return cloudevent.StoredEvent{}, fmt.Errorf("no cloud event found for subject %q within %d days", filter.Subject, latestWalkMaxDays)
+	return cloudevent.StoredEvent{}, fmt.Errorf("no cloud event found for subject %q within %d days: %w", filter.Subject, latestWalkMaxDays, ErrNotFound)
 }
 
 // AvailableCloudEventTypes returns the distinct event types present for a

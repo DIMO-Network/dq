@@ -83,7 +83,9 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 		args = append(args, a...)
 	}
 
-	return q.querySignals(ctx, strings.Join(stmts, " UNION ALL "), args)
+	// ORDER BY makes the result deterministic so shadow-compare against
+	// ClickHouse diffs values, not engine-specific GROUP BY ordering.
+	return q.querySignals(ctx, strings.Join(stmts, " UNION ALL ")+" ORDER BY name", args)
 }
 
 // GetAllLatestSignals returns the latest value for every signal name stored
@@ -118,7 +120,7 @@ func (q *Queries) GetAllLatestSignals(ctx context.Context, subject string, filte
 	args := append([]any{subject}, srcArgs...)
 
 	lastSeenStmt, lastSeenArgs := lastSeenQuery(table, subject, srcSQL, srcArgs)
-	stmt := mainStmt + " UNION ALL " + lastSeenStmt
+	stmt := mainStmt + " UNION ALL " + lastSeenStmt + " ORDER BY name"
 	args = append(args, lastSeenArgs...)
 
 	return q.querySignals(ctx, stmt, args)

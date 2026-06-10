@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -232,7 +234,33 @@ func (s *ShadowBackend) GetSegments(ctx context.Context, subject string, from, t
 	return s.primary.GetSegments(ctx, subject, from, to, mechanism, config)
 }
 
-var timeType = reflect.TypeOf(time.Time{})
+var (
+	timeType        = reflect.TypeOf(time.Time{})
+	signalSliceType = reflect.TypeOf([]*vss.Signal(nil))
+)
+
+// sortedSignals returns a copy ordered by (name, timestamp) with nils first,
+// giving diffValues a canonical order for slices that have none.
+func sortedSignals(in []*vss.Signal) []*vss.Signal {
+	out := slices.Clone(in)
+	slices.SortStableFunc(out, func(x, y *vss.Signal) int {
+		if x == nil || y == nil {
+			return boolToInt(y == nil) - boolToInt(x == nil)
+		}
+		if c := strings.Compare(x.Data.Name, y.Data.Name); c != 0 {
+			return c
+		}
+		return x.Data.Timestamp.Compare(y.Data.Timestamp)
+	})
+	return out
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 // diffValues deep-compares two values like reflect.DeepEqual, with two
 // telemetry-specific relaxations: floats are equal within floatEpsilon (NaN
@@ -283,6 +311,13 @@ func diffValues(a, b reflect.Value, path string) (string, bool) {
 	case reflect.Slice, reflect.Array:
 		if a.Kind() == reflect.Slice && a.IsNil() != b.IsNil() && a.Len() == 0 && b.Len() == 0 {
 			return "", true // treat nil and empty slices as equal
+		}
+		// Latest-signal results carry no ordering guarantee from either
+		// backend (GROUP BY output order is engine-specific), so compare
+		// them as sets keyed by (name, timestamp) rather than by position.
+		if a.Type() == signalSliceType && a.CanInterface() && b.CanInterface() {
+			a = reflect.ValueOf(sortedSignals(a.Interface().([]*vss.Signal)))
+			b = reflect.ValueOf(sortedSignals(b.Interface().([]*vss.Signal)))
 		}
 		if a.Len() != b.Len() {
 			return fmt.Sprintf("%s: length %d != %d", path, a.Len(), b.Len()), false
