@@ -341,7 +341,7 @@ func stringAggExpr(aggType model.StringAggregation) string {
 	case model.StringAggregationRand:
 		return "arg_max(value_string, rnd)"
 	case model.StringAggregationUnique:
-		return "string_agg(DISTINCT value_string, ',')"
+		return "string_agg(DISTINCT value_string ORDER BY value_string, ',')"
 	case model.StringAggregationTop:
 		return "mode(value_string)"
 	case model.StringAggregationFirst:
