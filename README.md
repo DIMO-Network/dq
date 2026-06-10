@@ -60,6 +60,10 @@ With `QUERY_BACKEND=duckdb` the service reads raw and decoded parquet straight f
 
 Paths must be absolute. The materializer's filesystem store publishes atomically (temp file + fsync + rename), so din's compactor never reads a torn watermark and DuckDB never globs a partial file.
 
+### Clone layout (required until cloudevent is released)
+
+This branch builds against a local cloudevent checkout via a `replace` directive — clone `cloudevent` as a sibling directory and check out `feat/parquet-sort-zstd-bloom`.
+
 ### Single-node quickstart
 
 Run against the same root din writes to:
@@ -71,4 +75,11 @@ MATERIALIZER_ENABLED=true \
 go run ./cmd/dq
 ```
 
-Limitations in this mode: segment detection and the eventrepo fetch path (ClickHouse index + S3 presign) still require their backing services; the duckdb signal/event/raw query surfaces work fully from local parquet.
+**Honest caveat (current state):** the server still requires a reachable ClickHouse at startup even in duckdb mode (segments backend, eventrepo, gRPC fetch) — decoupling is a tracked work item. Until then, the fastest way to see the full parse-on-read path run locally with zero infra is the test suite, which exercises raw bundles → materializer → DuckDB → real GraphQL execution end to end:
+
+```bash
+go test ./tests/ -v -run 'TestPipelineEndToEnd|TestDISParity'
+go test ./tests/ -v -perf -run 'TestQueryPerformance|TestMaterializerPerformance'
+```
+
+Other limitations in single-node mode: segment detection and the eventrepo fetch path (ClickHouse index + S3 presign) keep their backing services; the duckdb signal/event/raw query surfaces work fully from local parquet.
