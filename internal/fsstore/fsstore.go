@@ -20,7 +20,10 @@ import (
 	"github.com/DIMO-Network/dq/internal/materializer"
 )
 
-var _ materializer.ObjectStore = (*Store)(nil)
+var (
+	_ materializer.ObjectStore  = (*Store)(nil)
+	_ materializer.CompactStore = (*Store)(nil)
+)
 
 // tempPrefix marks in-flight writes; List hides any dot-named entry.
 const tempPrefix = ".tmp-"
@@ -106,6 +109,15 @@ func (s *Store) GetObject(_ context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("get object %s: %w", key, err)
 	}
 	return body, nil
+}
+
+// DeleteObject removes the object at key; missing keys are ignored (S3
+// quiet-delete parity).
+func (s *Store) DeleteObject(_ context.Context, key string) error {
+	if err := os.Remove(s.path(key)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("delete object %s: %w", key, err)
+	}
+	return nil
 }
 
 // PutObject durably writes body at key: temp file in the target directory,

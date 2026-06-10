@@ -30,15 +30,19 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
 	ceparquet "github.com/DIMO-Network/cloudevent/parquet"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/errgroup"
 )
 
 // ErrNotFound must be returned (possibly wrapped) by ObjectStore.GetObject
@@ -77,6 +81,17 @@ type Config struct {
 	BatchMaxFiles int
 	// Types is the list of cloudevent types to materialize.
 	Types []string
+	// Workers bounds the per-batch fan-out: concurrent raw-object
+	// fetch+decode, model-garage conversion, data-object writes, and
+	// bucket read-merge-writes. Defaults to GOMAXPROCS.
+	Workers int
+	// CompactInterval is how often closed decoded date partitions are
+	// merged into one file each. Requires a store with DeleteObject;
+	// negative disables. Defaults to 1h.
+	CompactInterval time.Duration
+	// CompactMinFiles is the per-partition file count that triggers a
+	// merge. Defaults to 4.
+	CompactMinFiles int
 }
 
 const (
@@ -120,6 +135,15 @@ func (c Config) withDefaults() Config {
 	if len(c.Types) == 0 {
 		c.Types = []string{cloudevent.TypeStatus, cloudevent.TypeEvents}
 	}
+	if c.Workers <= 0 {
+		c.Workers = runtime.GOMAXPROCS(0)
+	}
+	if c.CompactInterval == 0 {
+		c.CompactInterval = time.Hour
+	}
+	if c.CompactMinFiles <= 0 {
+		c.CompactMinFiles = 4
+	}
 	return c
 }
 
@@ -145,6 +169,9 @@ func New(cfg Config, store ObjectStore, log zerolog.Logger) *Runner {
 func (r *Runner) Run(ctx context.Context) error {
 	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
+	// Start a full interval out so a restart loop doesn't compact every
+	// boot; recovery of interrupted merges still runs inside CompactOnce.
+	lastCompact := time.Now()
 	for {
 		processed, err := r.RunOnce(ctx)
 		if err != nil {
@@ -155,6 +182,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		} else if processed > 0 {
 			continue // drain the backlog without waiting
 		}
+		r.maybeCompact(ctx, &lastCompact)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -178,6 +206,7 @@ func (r *Runner) RunOnce(ctx context.Context) (int, error) {
 		if err != nil {
 			return processed, err
 		}
+		observeLag(ceType, batches)
 		for _, b := range batches {
 			if ctx.Err() != nil {
 				return processed, ctx.Err()
@@ -186,6 +215,10 @@ func (r *Runner) RunOnce(ctx context.Context) (int, error) {
 				return processed, fmt.Errorf("processing batch %s: %w", b.partition, err)
 			}
 			processed += len(b.keys)
+			batchesTotal.WithLabelValues(ceType).Inc()
+		}
+		if len(batches) > 0 {
+			lagSeconds.WithLabelValues(ceType).Set(0) // pass drained everything pending
 		}
 	}
 	return processed, nil
@@ -302,6 +335,10 @@ func (r *Runner) processBatch(ctx context.Context, b rawBatch, watermark map[str
 		return fmt.Errorf("writing watermark: %w", err)
 	}
 
+	rowsTotal.WithLabelValues("signals").Add(float64(dec.signalCount))
+	rowsTotal.WithLabelValues("events").Add(float64(dec.eventCount))
+	errorsTotal.Add(float64(dec.errorCount))
+
 	r.log.Info().
 		Str("partition", b.partition).
 		Str("batchId", batchID).
@@ -328,47 +365,93 @@ type decodedBatch struct {
 // batch: partial decodes are salvaged and failures only bump errorCount.
 func (r *Runner) decodeBatch(ctx context.Context, b rawBatch) (*decodedBatch, error) {
 	dec := &decodedBatch{}
-	// At-least-once ingest can land the same event in multiple raw bundles
-	// within one batch; dedup on the header uniqueness key so decoded rows
-	// (and summary counts) see each event once. Cross-batch duplicates are
-	// rare (redelivery lands in adjacent bundles) and collapse later in
-	// raw compaction.
+
+	// Stage 1: fetch + parquet-decode every raw object concurrently (I/O
+	// bound against S3). Results stay indexed by input position so the
+	// dedup pass below is deterministic.
+	decoded := make([][]cloudevent.StoredEvent, len(b.keys))
+	var undecodable atomic.Int64
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(r.cfg.Workers)
+	for i, key := range b.keys {
+		g.Go(func() error {
+			data, err := r.store.GetObject(gctx, key)
+			if err != nil {
+				return fmt.Errorf("getting raw object %s: %w", key, err)
+			}
+			events, err := ceparquet.Decode(bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				// An unreadable raw file is terminal for its rows but must
+				// not block the watermark; the bytes stay in place for
+				// recovery.
+				r.log.Error().Err(err).Str("key", key).Msg("undecodable raw parquet file")
+				undecodable.Add(1)
+				return nil
+			}
+			decoded[i] = events
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	dec.errorCount += int(undecodable.Load())
+
+	// Stage 2: sequential dedup in key order (first occurrence wins,
+	// deterministic). At-least-once ingest can land the same event in
+	// multiple raw bundles within one batch; dedup on the header
+	// uniqueness key so decoded rows (and summary counts) see each event
+	// once. Cross-batch duplicates are rare (redelivery lands in adjacent
+	// bundles) and collapse later in raw compaction.
 	seen := make(map[string]struct{})
-	for _, key := range b.keys {
-		data, err := r.store.GetObject(ctx, key)
-		if err != nil {
-			return nil, fmt.Errorf("getting raw object %s: %w", key, err)
-		}
-		events, err := ceparquet.Decode(bytes.NewReader(data), int64(len(data)))
-		if err != nil {
-			// An unreadable raw file is terminal for its rows but must not
-			// block the watermark; the bytes stay in place for recovery.
-			r.log.Error().Err(err).Str("key", key).Msg("undecodable raw parquet file")
-			dec.errorCount++
-			continue
-		}
-		for i := range events {
-			eventKey := events[i].Key()
-			if _, dup := seen[eventKey]; dup {
+	var jobs []*cloudevent.RawEvent
+	for i := range decoded {
+		for j := range decoded[i] {
+			ev := &decoded[i][j]
+			if _, dup := seen[ev.Key()]; dup {
 				continue
 			}
-			seen[eventKey] = struct{}{}
+			seen[ev.Key()] = struct{}{}
+			if b.ceType == cloudevent.TypeStatus && !r.isVehicleSignalMessage(&ev.RawEvent) {
+				continue
+			}
+			jobs = append(jobs, &ev.RawEvent)
+		}
+	}
+
+	// Stage 3: model-garage conversion is the CPU-heavy step — fan out.
+	// Conversion is stateless per event; results are merged in input order
+	// so output content stays deterministic (writers re-sort anyway).
+	type convResult struct {
+		signals []SignalRow
+		events  []EventRow
+		failed  int
+	}
+	results := make([]convResult, len(jobs))
+	conv, convCtx := errgroup.WithContext(ctx)
+	conv.SetLimit(r.cfg.Workers)
+	for i, raw := range jobs {
+		conv.Go(func() error {
 			switch b.ceType {
 			case cloudevent.TypeStatus:
-				if !r.isVehicleSignalMessage(&events[i].RawEvent) {
-					continue
-				}
-				rows, failed := r.convertSignals(ctx, &events[i].RawEvent)
-				dec.signals = append(dec.signals, rows...)
-				dec.signalCount += len(rows)
-				dec.errorCount += failed
+				rows, failed := r.convertSignals(convCtx, raw)
+				results[i] = convResult{signals: rows, failed: failed}
 			case cloudevent.TypeEvents:
-				rows, failed := r.convertEvents(ctx, &events[i].RawEvent)
-				dec.events = append(dec.events, rows...)
-				dec.eventCount += len(rows)
-				dec.errorCount += failed
+				rows, failed := r.convertEvents(convCtx, raw)
+				results[i] = convResult{events: rows, failed: failed}
 			}
-		}
+			return nil
+		})
+	}
+	if err := conv.Wait(); err != nil {
+		return nil, err
+	}
+	for i := range results {
+		dec.signals = append(dec.signals, results[i].signals...)
+		dec.signalCount += len(results[i].signals)
+		dec.events = append(dec.events, results[i].events...)
+		dec.eventCount += len(results[i].events)
+		dec.errorCount += results[i].failed
 	}
 	return dec, nil
 }
@@ -394,40 +477,61 @@ func (r *Runner) writeDataObjects(ctx context.Context, b rawBatch, batchID strin
 	firstBase := strings.TrimSuffix(path.Base(b.keys[0]), ".parquet")
 	objectName := "batch-" + firstBase + "-" + batchID[:batchHashLen] + ".parquet"
 
-	var outputs []string
-
 	signalsByDate := make(map[string][]SignalRow)
 	for _, row := range dec.signals {
 		date := row.Timestamp.UTC().Format(datePartitionFormat)
 		signalsByDate[date] = append(signalsByDate[date], row)
 	}
-	for _, date := range sortedKeys(signalsByDate) {
-		key := r.cfg.DecodedPrefix + "signals/date=" + date + "/" + objectName
-		body, err := writeSignalParquet(signalsByDate[date])
-		if err != nil {
-			return nil, fmt.Errorf("encoding signal parquet: %w", err)
-		}
-		if err := r.store.PutObject(ctx, key, body); err != nil {
-			return nil, fmt.Errorf("writing %s: %w", key, err)
-		}
-		outputs = append(outputs, key)
-	}
-
 	eventsByDate := make(map[string][]EventRow)
 	for _, row := range dec.events {
 		date := row.Timestamp.UTC().Format(datePartitionFormat)
 		eventsByDate[date] = append(eventsByDate[date], row)
 	}
+
+	// Encode (zstd, CPU) and PUT (S3 latency) every date partition
+	// concurrently; each output key is independent.
+	var (
+		mu      sync.Mutex
+		outputs []string
+	)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(r.cfg.Workers)
+	for _, date := range sortedKeys(signalsByDate) {
+		key := r.cfg.DecodedPrefix + "signals/date=" + date + "/" + objectName
+		rows := signalsByDate[date]
+		g.Go(func() error {
+			body, err := writeSignalParquet(rows)
+			if err != nil {
+				return fmt.Errorf("encoding signal parquet: %w", err)
+			}
+			if err := r.store.PutObject(gctx, key, body); err != nil {
+				return fmt.Errorf("writing %s: %w", key, err)
+			}
+			mu.Lock()
+			outputs = append(outputs, key)
+			mu.Unlock()
+			return nil
+		})
+	}
 	for _, date := range sortedKeys(eventsByDate) {
 		key := r.cfg.DecodedPrefix + "events/date=" + date + "/" + objectName
-		body, err := writeEventParquet(eventsByDate[date])
-		if err != nil {
-			return nil, fmt.Errorf("encoding event parquet: %w", err)
-		}
-		if err := r.store.PutObject(ctx, key, body); err != nil {
-			return nil, fmt.Errorf("writing %s: %w", key, err)
-		}
-		outputs = append(outputs, key)
+		rows := eventsByDate[date]
+		g.Go(func() error {
+			body, err := writeEventParquet(rows)
+			if err != nil {
+				return fmt.Errorf("encoding event parquet: %w", err)
+			}
+			if err := r.store.PutObject(gctx, key, body); err != nil {
+				return fmt.Errorf("writing %s: %w", key, err)
+			}
+			mu.Lock()
+			outputs = append(outputs, key)
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	sort.Strings(outputs)

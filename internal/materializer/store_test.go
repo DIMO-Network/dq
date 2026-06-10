@@ -53,6 +53,13 @@ func (s *memStore) PutObject(_ context.Context, key string, body []byte) error {
 	return nil
 }
 
+func (s *memStore) DeleteObject(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.objects, key)
+	return nil
+}
+
 func (s *memStore) keys(prefix string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

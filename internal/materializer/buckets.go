@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"slices"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // numBuckets is the number of latest/summary hash buckets.
@@ -59,35 +61,41 @@ func (r *Runner) updateLatestBuckets(ctx context.Context, batchID string, signal
 		byBucket[b] = append(byBucket[b], row)
 	}
 
+	// Buckets are disjoint files — read-merge-write them concurrently.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(r.cfg.Workers)
 	for _, bucket := range sortedBuckets(byBucket) {
-		key := r.latestBucketKey(bucket)
-		existing, stamp, err := loadBucket[LatestRow](ctx, r.store, key)
-		if err != nil {
-			return fmt.Errorf("reading latest bucket %s: %w", key, err)
-		}
-		if stamp == batchID {
-			continue // already applied by a crashed run of this batch
-		}
+		g.Go(func() error {
+			key := r.latestBucketKey(bucket)
+			existing, stamp, err := loadBucket[LatestRow](gctx, r.store, key)
+			if err != nil {
+				return fmt.Errorf("reading latest bucket %s: %w", key, err)
+			}
+			if stamp == batchID {
+				return nil // already applied by a crashed run of this batch
+			}
 
-		merged := make(map[latestKey]*LatestRow, len(existing))
-		for i := range existing {
-			row := existing[i]
-			merged[latestKey{subject: row.Subject, source: row.Source, name: row.Name}] = &row
-		}
-		for _, sig := range byBucket[bucket] {
-			applySignalToLatest(merged, sig)
-		}
+			merged := make(map[latestKey]*LatestRow, len(existing))
+			for i := range existing {
+				row := existing[i]
+				merged[latestKey{subject: row.Subject, source: row.Source, name: row.Name}] = &row
+			}
+			for _, sig := range byBucket[bucket] {
+				applySignalToLatest(merged, sig)
+			}
 
-		rows := sortedRowValues(merged)
-		body, err := writeBucketParquet(rows, batchID)
-		if err != nil {
-			return fmt.Errorf("encoding latest bucket %s: %w", key, err)
-		}
-		if err := r.store.PutObject(ctx, key, body); err != nil {
-			return fmt.Errorf("writing latest bucket %s: %w", key, err)
-		}
+			rows := sortedRowValues(merged)
+			body, err := writeBucketParquet(rows, batchID)
+			if err != nil {
+				return fmt.Errorf("encoding latest bucket %s: %w", key, err)
+			}
+			if err := r.store.PutObject(gctx, key, body); err != nil {
+				return fmt.Errorf("writing latest bucket %s: %w", key, err)
+			}
+			return nil
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
 func sortedBuckets[V any](m map[uint32]V) []uint32 {
@@ -155,54 +163,60 @@ func (r *Runner) updateSummaryBuckets(ctx context.Context, batchID string, signa
 		byBucket[b] = append(byBucket[b], row)
 	}
 
+	// Buckets are disjoint files — read-merge-write them concurrently.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(r.cfg.Workers)
 	for _, bucket := range sortedBuckets(byBucket) {
-		key := r.summaryBucketKey(bucket)
-		existing, stamp, err := loadBucket[SummaryRow](ctx, r.store, key)
-		if err != nil {
-			return fmt.Errorf("reading summary bucket %s: %w", key, err)
-		}
-		if stamp == batchID {
-			continue // already applied by a crashed run of this batch
-		}
+		g.Go(func() error {
+			key := r.summaryBucketKey(bucket)
+			existing, stamp, err := loadBucket[SummaryRow](gctx, r.store, key)
+			if err != nil {
+				return fmt.Errorf("reading summary bucket %s: %w", key, err)
+			}
+			if stamp == batchID {
+				return nil // already applied by a crashed run of this batch
+			}
 
-		merged := make(map[latestKey]*SummaryRow, len(existing))
-		for i := range existing {
-			row := existing[i]
-			merged[latestKey{subject: row.Subject, source: row.Source, name: row.Name}] = &row
-		}
-		for _, sig := range byBucket[bucket] {
-			k := latestKey{subject: sig.Subject, source: sig.Source, name: sig.Name}
-			cur, ok := merged[k]
-			if !ok {
-				merged[k] = &SummaryRow{
-					Subject:   sig.Subject,
-					Source:    sig.Source,
-					Name:      sig.Name,
-					Count:     1,
-					FirstSeen: sig.Timestamp,
-					LastSeen:  sig.Timestamp,
+			merged := make(map[latestKey]*SummaryRow, len(existing))
+			for i := range existing {
+				row := existing[i]
+				merged[latestKey{subject: row.Subject, source: row.Source, name: row.Name}] = &row
+			}
+			for _, sig := range byBucket[bucket] {
+				k := latestKey{subject: sig.Subject, source: sig.Source, name: sig.Name}
+				cur, ok := merged[k]
+				if !ok {
+					merged[k] = &SummaryRow{
+						Subject:   sig.Subject,
+						Source:    sig.Source,
+						Name:      sig.Name,
+						Count:     1,
+						FirstSeen: sig.Timestamp,
+						LastSeen:  sig.Timestamp,
+					}
+					continue
 				}
-				continue
+				cur.Count++
+				if sig.Timestamp.Before(cur.FirstSeen) {
+					cur.FirstSeen = sig.Timestamp
+				}
+				if sig.Timestamp.After(cur.LastSeen) {
+					cur.LastSeen = sig.Timestamp
+				}
 			}
-			cur.Count++
-			if sig.Timestamp.Before(cur.FirstSeen) {
-				cur.FirstSeen = sig.Timestamp
-			}
-			if sig.Timestamp.After(cur.LastSeen) {
-				cur.LastSeen = sig.Timestamp
-			}
-		}
 
-		rows := sortedRowValues(merged)
-		body, err := writeBucketParquet(rows, batchID)
-		if err != nil {
-			return fmt.Errorf("encoding summary bucket %s: %w", key, err)
-		}
-		if err := r.store.PutObject(ctx, key, body); err != nil {
-			return fmt.Errorf("writing summary bucket %s: %w", key, err)
-		}
+			rows := sortedRowValues(merged)
+			body, err := writeBucketParquet(rows, batchID)
+			if err != nil {
+				return fmt.Errorf("encoding summary bucket %s: %w", key, err)
+			}
+			if err := r.store.PutObject(gctx, key, body); err != nil {
+				return fmt.Errorf("writing summary bucket %s: %w", key, err)
+			}
+			return nil
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
 // loadBucket reads a latest/summary bucket object, treating a missing

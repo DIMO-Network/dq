@@ -20,7 +20,10 @@ type s3ObjectStore struct {
 	bucket string
 }
 
-var _ materializer.ObjectStore = (*s3ObjectStore)(nil)
+var (
+	_ materializer.ObjectStore  = (*s3ObjectStore)(nil)
+	_ materializer.CompactStore = (*s3ObjectStore)(nil)
+)
 
 func newS3ObjectStore(client *s3.Client, bucket string) *s3ObjectStore {
 	return &s3ObjectStore{client: client, bucket: bucket}
@@ -79,6 +82,18 @@ func (s *s3ObjectStore) PutObject(ctx context.Context, key string, body []byte) 
 	})
 	if err != nil {
 		return fmt.Errorf("putting s3://%s/%s: %w", s.bucket, key, err)
+	}
+	return nil
+}
+
+// DeleteObject removes one object; S3 delete is quiet on missing keys.
+func (s *s3ObjectStore) DeleteObject(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("deleting s3://%s/%s: %w", s.bucket, key, err)
 	}
 	return nil
 }
