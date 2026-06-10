@@ -35,9 +35,7 @@ func snapshotState(t *testing.T, store *memStore, r *Runner) storeState {
 		st.dataKeys = append(st.dataKeys, key)
 		st.signalRows = append(st.signalRows, readSignalRows(t, store, key)...)
 	}
-	for _, key := range store.keys("decoded/v1/events/") {
-		st.dataKeys = append(st.dataKeys, key)
-	}
+	st.dataKeys = append(st.dataKeys, store.keys("decoded/v1/events/")...)
 	for _, key := range store.keys("decoded/v1/latest/") {
 		rows, _, err := loadBucket[LatestRow](ctx, store, key)
 		require.NoError(t, err)
