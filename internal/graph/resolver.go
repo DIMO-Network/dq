@@ -16,7 +16,7 @@ type ClaimsContextKey struct{}
 
 // Resolver is the root resolver for the dq GraphQL schema.
 type Resolver struct {
-	SignalRepo      *repositories.Repository
+	SignalRepo     *repositories.Repository
 	EventService   *eventrepo.Service
 	Buckets        []string
 	IdentityClient identity.Client

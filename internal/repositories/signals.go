@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/proto"
+	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/DIMO-Network/dq/internal/service/ch"
 	"github.com/DIMO-Network/model-garage/pkg/schema"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
-	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/dq/internal/service/ch"
 	"github.com/uber/h3-go/v4"
 )
 

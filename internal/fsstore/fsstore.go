@@ -158,5 +158,11 @@ func (s *Store) PutObject(_ context.Context, key string, body []byte) error {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("publishing %s: %w", key, err)
 	}
+	// fsync the directory: the rename is not durable until the directory
+	// entry is — and watermark.json must never silently vanish on crash.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }

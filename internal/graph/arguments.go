@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
-	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
 // aggregationArgsFromContext creates aggregated signals arguments from the context and provided arguments.

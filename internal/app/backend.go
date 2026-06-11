@@ -135,6 +135,11 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 		PollInterval:      pollInterval,
 		ChainID:           settings.DIMORegistryChainID,
 		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
+		Workers:           settings.MaterializerWorkers,
+		BatchMaxFiles:     settings.MaterializerBatchFiles,
+		BatchMaxBytes:     settings.MaterializerBatchBytes,
+		CompactInterval:   time.Duration(settings.CompactIntervalSeconds) * time.Second,
+		CompactMinFiles:   settings.CompactMinFiles,
 	}, store, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())

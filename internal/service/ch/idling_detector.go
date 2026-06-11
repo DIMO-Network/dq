@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
 const (

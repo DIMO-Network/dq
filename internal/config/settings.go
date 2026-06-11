@@ -44,6 +44,11 @@ type Settings struct {
 	// Materializer (post-fact decode loop raw -> decoded parquet).
 	MaterializerEnabled      bool   `yaml:"MATERIALIZER_ENABLED"`
 	MaterializerPollInterval string `yaml:"MATERIALIZER_POLL_INTERVAL"`
+	MaterializerWorkers      int    `yaml:"MATERIALIZER_WORKERS"`
+	MaterializerBatchFiles   int    `yaml:"MATERIALIZER_BATCH_FILES"`
+	MaterializerBatchBytes   int64  `yaml:"MATERIALIZER_BATCH_BYTES"`
+	CompactIntervalSeconds   int    `yaml:"COMPACT_INTERVAL_SECONDS"`
+	CompactMinFiles          int    `yaml:"COMPACT_MIN_FILES"`
 	// DIMO registry chain settings for vendor module DID construction.
 	DIMORegistryChainID   uint64 `yaml:"DIMO_REGISTRY_CHAIN_ID"`
 	VehicleNFTAddress     string `yaml:"VEHICLE_NFT_ADDRESS"`

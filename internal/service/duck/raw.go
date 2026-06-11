@@ -84,7 +84,9 @@ func (r *Raw) LatestCloudEvent(ctx context.Context, filter RawFilter) (cloudeven
 		floor = filter.After
 	}
 
-	for chunkEnd := to; chunkEnd.After(floor); chunkEnd = chunkEnd.AddDate(0, 0, -7) {
+	// >= floor (not >): a zero-width window (After == Before on one day)
+	// must still scan that day's partition.
+	for chunkEnd := to; !chunkEnd.Before(floor); chunkEnd = chunkEnd.AddDate(0, 0, -7) {
 		chunkStart := chunkEnd.AddDate(0, 0, -7)
 		if chunkStart.Before(floor) {
 			chunkStart = floor

@@ -24,10 +24,10 @@ import (
 	gqlmetrics "github.com/DIMO-Network/server-garage/pkg/gql/metrics"
 	"github.com/DIMO-Network/server-garage/pkg/mcpserver"
 	"github.com/DIMO-Network/shared/pkg/middleware/metrics"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // AppName is the name of the application.
@@ -82,7 +82,7 @@ func New(settings config.Settings) (*App, error) {
 	}
 
 	resolver := &graph.Resolver{
-		SignalRepo:      signalRepo,
+		SignalRepo:     signalRepo,
 		EventService:   eventService,
 		Buckets:        buckets,
 		IdentityClient: identityClient,

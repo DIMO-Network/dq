@@ -6,10 +6,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/DIMO-Network/model-garage/pkg/vss"
-	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/service/ch"
+	"github.com/DIMO-Network/model-garage/pkg/vss"
+	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
 	"golang.org/x/sync/errgroup"
 )
 

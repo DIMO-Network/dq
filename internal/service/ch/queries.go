@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
-	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/aarondl/sqlboiler/v4/drivers"
 	"github.com/aarondl/sqlboiler/v4/queries"
 	"github.com/aarondl/sqlboiler/v4/queries/qm"
@@ -72,7 +72,6 @@ const (
 	locationTupleType = "Tuple(latitude Float64, longitude Float64, hdop Float64, heading Float64)"
 	locationZeroTuple = "CAST(tuple(0, 0, 0, 0), '" + locationTupleType + "')"
 )
-
 
 // FieldType indicates the type of values in the aggregation.
 type FieldType uint8
