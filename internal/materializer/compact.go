@@ -100,6 +100,9 @@ func (r *Runner) CompactOnce(ctx context.Context) (int, error) {
 			if date >= today {
 				continue
 			}
+			if !r.cfg.ownsPartition(table + "/date=" + date) {
+				continue // another shard compacts this partition
+			}
 			minFiles := r.cfg.CompactMinFiles
 			var totalBytes int64
 			keys := make([]string, 0, len(infos))

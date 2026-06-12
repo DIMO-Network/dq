@@ -140,6 +140,8 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 		BatchMaxBytes:     settings.MaterializerBatchBytes,
 		CompactInterval:   time.Duration(settings.CompactIntervalSeconds) * time.Second,
 		CompactMinFiles:   settings.CompactMinFiles,
+		ShardIndex:        settings.MaterializerShardIndex,
+		ShardCount:        settings.MaterializerShardCount,
 	}, store, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -23,7 +23,7 @@ const nonZeroLocCond = "(loc_lat_nonzero != 0 OR loc_lon_nonzero != 0)"
 //   - IncludeLastSeen adds the virtual lastSeen row (max timestamp over all
 //     signals, materialized per (subject, source) under model.LastSeenField)
 func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error) {
-	table, err := q.tableExpr(ctx, []string{q.latestPath(subject)})
+	table, err := q.tableExpr(ctx, q.latestPaths(subject))
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 // ch.Service.GetAllLatestSignals: the timestamp is the unconditional
 // max(timestamp) while the location value comes from the nonzero columns.
 func (q *Queries) GetAllLatestSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error) {
-	table, err := q.tableExpr(ctx, []string{q.latestPath(subject)})
+	table, err := q.tableExpr(ctx, q.latestPaths(subject))
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func lastSeenQuery(table, subject, srcSQL string, srcArgs []any) (string, []any)
 // GetAvailableSignals returns the distinct signal names stored for a subject,
 // from the summary bucket, sorted ascending. Returns nil when none.
 func (q *Queries) GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
-	table, err := q.tableExpr(ctx, []string{q.summaryPath(subject)})
+	table, err := q.tableExpr(ctx, q.summaryPaths(subject))
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +185,7 @@ func (q *Queries) GetAvailableSignals(ctx context.Context, subject string, filte
 // timestamps for a subject from the summary bucket, aggregated across
 // sources, mirroring ch.Service.GetSignalSummaries.
 func (q *Queries) GetSignalSummaries(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
-	table, err := q.tableExpr(ctx, []string{q.summaryPath(subject)})
+	table, err := q.tableExpr(ctx, q.summaryPaths(subject))
 	if err != nil {
 		return nil, err
 	}

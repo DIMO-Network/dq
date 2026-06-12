@@ -72,11 +72,17 @@ func DecodedSignalGlobs(bucket, decodedPrefix string, from, to time.Time) []stri
 	return globs
 }
 
-// LatestBucketPath returns the latest/summary parquet path for a subject:
-// <root>/<decodedPrefix>/latest/bucket=<HashBucket(subjectDID)>/latest.parquet.
-func LatestBucketPath(bucket, decodedPrefix, subjectDID string) string {
+// LatestBucketPaths returns the latest parquet patterns for a subject —
+// the single-replica path plus the sharded-materializer namespace
+// (latest/shard=*/bucket=NNN). Aggregations (max/arg_max) merge shard
+// files natively, so both layouts and mid-migration mixes read correctly.
+func LatestBucketPaths(bucket, decodedPrefix, subjectDID string) []string {
 	pb := NewPathBuilder(bucket)
-	return pb.Join(decodedPrefix, "latest", fmt.Sprintf("bucket=%03d", HashBucket(subjectDID)), "latest.parquet")
+	b := fmt.Sprintf("bucket=%03d", HashBucket(subjectDID))
+	return []string{
+		pb.Join(decodedPrefix, "latest", b, "latest.parquet"),
+		pb.Join(decodedPrefix, "latest", "shard=*", b, "latest.parquet"),
+	}
 }
 
 // HashBucket maps a subject DID to its latest-bucket number in

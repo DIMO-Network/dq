@@ -49,6 +49,8 @@ type Settings struct {
 	MaterializerBatchBytes   int64  `yaml:"MATERIALIZER_BATCH_BYTES"`
 	CompactIntervalSeconds   int    `yaml:"COMPACT_INTERVAL_SECONDS"`
 	CompactMinFiles          int    `yaml:"COMPACT_MIN_FILES"`
+	MaterializerShardIndex   int    `yaml:"MATERIALIZER_SHARD_INDEX"`
+	MaterializerShardCount   int    `yaml:"MATERIALIZER_SHARD_COUNT"`
 	// DIMO registry chain settings for vendor module DID construction.
 	DIMORegistryChainID   uint64 `yaml:"DIMO_REGISTRY_CHAIN_ID"`
 	VehicleNFTAddress     string `yaml:"VEHICLE_NFT_ADDRESS"`

@@ -1,0 +1,37 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "dq.fullname" . }}-alerts
+  labels:
+    {{- include "dq.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: dq-materializer
+      rules:
+        - alert: DQMaterializerDecodeLag
+          expr: max by (type) (dq_materializer_lag_seconds) > 300
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: materializer decode lag over 5m for 10m
+            description: >-
+              Raw cloudevents are arriving faster than the materializer
+              decodes them ({{ "{{ $labels.type }}" }}). Queries serve stale
+              data; din's raw compactor is also gated behind this cursor.
+        - alert: DQMaterializerStalled
+          expr: rate(dq_materializer_batches_total[30m]) == 0 and max(dq_materializer_lag_seconds) > 0
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: materializer has pending work but committed no batches in 30m
+            description: watermark is not advancing — decode pipeline is stuck.
+        - alert: DQShadowMismatch
+          expr: increase(dq_shadow_mismatch_total[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: shadow backend disagreement
+            description: DuckDB and ClickHouse returned different results for the same query.

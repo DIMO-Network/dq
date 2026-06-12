@@ -29,6 +29,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"path"
 	"runtime"
 	"runtime/debug"
@@ -84,6 +85,11 @@ type Config struct {
 	BatchMaxBytes int64
 	// Types is the list of cloudevent types to materialize.
 	Types []string
+	// SettleWindow excludes raw keys younger than this from batching. A
+	// sink flush mints its object key before the PUT; a slow PUT could
+	// otherwise land below an already-advanced cursor and never decode.
+	// The window is the decode-lag floor. Defaults to 90s.
+	SettleWindow time.Duration
 	// Workers bounds the per-batch fan-out: concurrent raw-object
 	// fetch+decode, model-garage conversion, data-object writes, and
 	// bucket read-merge-writes. Defaults to GOMAXPROCS.
@@ -95,6 +101,25 @@ type Config struct {
 	// CompactMinFiles is the per-partition file count that triggers a
 	// merge. Defaults to 4.
 	CompactMinFiles int
+	// ShardIndex/ShardCount split raw partitions across N materializer
+	// replicas by partition hash. Each shard owns disjoint partitions,
+	// writes its own watermark file and its own latest/summary bucket
+	// namespace, so shards never write the same object. 0/1 = the
+	// single-replica layout, unchanged.
+	ShardIndex int
+	ShardCount int
+}
+
+// ownsPartition reports whether this shard processes the given raw
+// partition ("type=T/date=D"). The same hash assigns decoded-compaction
+// ownership (over "table/date=D" strings).
+func (c Config) ownsPartition(partition string) bool {
+	if c.ShardCount <= 1 {
+		return true
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(partition))
+	return int(h.Sum32()%uint32(c.ShardCount)) == c.ShardIndex
 }
 
 const (
@@ -142,6 +167,9 @@ func (c Config) withDefaults() Config {
 	if len(c.Types) == 0 {
 		c.Types = []string{cloudevent.TypeStatus, cloudevent.TypeEvents}
 	}
+	if c.SettleWindow == 0 {
+		c.SettleWindow = 90 * time.Second
+	}
 	if c.Workers <= 0 {
 		c.Workers = runtime.GOMAXPROCS(0)
 	}
@@ -150,6 +178,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.CompactMinFiles <= 0 {
 		c.CompactMinFiles = 4
+	}
+	if c.ShardCount <= 0 {
+		c.ShardCount = 1
+	}
+	if c.ShardIndex < 0 || c.ShardIndex >= c.ShardCount {
+		c.ShardIndex = 0
 	}
 	return c
 }
@@ -259,8 +293,17 @@ func (r *Runner) pendingBatches(ctx context.Context, ceType string, watermark ma
 			continue
 		}
 		partition := "type=" + ceType + "/" + datePart
+		if !r.cfg.ownsPartition(partition) {
+			continue // another shard's partition
+		}
 		if obj.Key <= watermark[partition] {
 			continue // already processed
+		}
+		// Settle window: never advance the cursor over a key younger than
+		// the slowest plausible sink flush — once the cursor passes a key,
+		// that key can never be decoded.
+		if ts := ingestKeyTime(obj.Key); !ts.IsZero() && time.Since(ts) < r.cfg.SettleWindow {
+			continue
 		}
 		byPartition[partition] = append(byPartition[partition], obj)
 	}
@@ -574,7 +617,10 @@ func (r *Runner) objectExists(ctx context.Context, key string) (bool, error) {
 }
 
 func (r *Runner) watermarkKey() string {
-	return r.cfg.DecodedPrefix + "_state/watermark.json"
+	if r.cfg.ShardCount <= 1 {
+		return r.cfg.DecodedPrefix + "_state/watermark.json"
+	}
+	return fmt.Sprintf("%s_state/watermark-p%03dof%03d.json", r.cfg.DecodedPrefix, r.cfg.ShardIndex, r.cfg.ShardCount)
 }
 
 func (r *Runner) manifestKey(batchID string) string {

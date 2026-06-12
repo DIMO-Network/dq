@@ -1,0 +1,46 @@
+replicaCount: 2
+image:
+  repository: dimozone/dq
+  pullPolicy: IfNotPresent
+  tag: ''
+cronJob:
+  enabled: false
+  schedule: 0 0 * * 0
+env:
+  PORT: 8080
+  MON_PORT: 8888
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/auth-tls-secret: ingress/cf-origin-ca
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: 'on'
+    nginx.ingress.kubernetes.io/enable-cors: 'true'
+    nginx.ingress.kubernetes.io/cors-allow-origin: https://app.dimo.zone, https://admin.team.dimo.zone
+    nginx.ingress.kubernetes.io/limit-rps: '50'
+    external-dns.alpha.kubernetes.io/hostname: dq.dimo.zone
+  hosts:
+    - host: dq.dimo.zone
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+resources:
+  limits:
+    cpu: 1
+    memory: 1024Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podDisruptionBudget:
+  minAvailable: 1
+kafka:
+  clusterName: kafka-prod-dimo-kafka

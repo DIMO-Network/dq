@@ -16,7 +16,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -171,28 +170,42 @@ func checkDecodedSignals(ctx context.Context, store materializer.ObjectStore, de
 	return nil
 }
 
-// checkWatermark validates cursor key shapes and partition agreement.
+// checkWatermark validates cursor key shapes and partition agreement
+// across every cursor file (watermark.json single replica, or one
+// watermark-pNNNofMMM.json per shard). Sharded cursors must also be
+// disjoint: two shards claiming the same partition is a split-brain.
 func checkWatermark(ctx context.Context, store materializer.ObjectStore, rawPrefix, decodedPrefix string, report *Report) error {
-	body, err := store.GetObject(ctx, decodedPrefix+"_state/watermark.json")
-	if errors.Is(err, materializer.ErrNotFound) {
-		return nil // nothing materialized yet is a valid state
-	}
+	objects, err := store.List(ctx, decodedPrefix+"_state/watermark")
 	if err != nil {
-		return fmt.Errorf("reading watermark: %w", err)
+		return fmt.Errorf("listing watermarks: %w", err)
 	}
-	var watermark map[string]string
-	if err := json.Unmarshal(body, &watermark); err != nil {
-		report.violate("watermark-corrupt", "%v", err)
-		return nil
-	}
-	report.WatermarkKeys = len(watermark)
-	for partition, cursor := range watermark {
-		wantPrefix := rawPrefix + partition + "/"
-		if !strings.HasPrefix(cursor, wantPrefix) {
-			report.violate("watermark-cursor-mismatch", "partition %q cursor %q not under %q", partition, cursor, wantPrefix)
+	owners := map[string]string{}
+	for _, obj := range objects {
+		if !strings.HasSuffix(obj.Key, ".json") {
 			continue
 		}
-		report.CoveredCursors++
+		body, err := store.GetObject(ctx, obj.Key)
+		if err != nil {
+			return fmt.Errorf("reading watermark %s: %w", obj.Key, err)
+		}
+		var watermark map[string]string
+		if err := json.Unmarshal(body, &watermark); err != nil {
+			report.violate("watermark-corrupt", "%s: %v", obj.Key, err)
+			continue
+		}
+		report.WatermarkKeys += len(watermark)
+		for partition, cursor := range watermark {
+			if prev, ok := owners[partition]; ok {
+				report.violate("watermark-split-brain", "partition %q claimed by %s and %s", partition, prev, obj.Key)
+			}
+			owners[partition] = obj.Key
+			wantPrefix := rawPrefix + partition + "/"
+			if !strings.HasPrefix(cursor, wantPrefix) {
+				report.violate("watermark-cursor-mismatch", "partition %q cursor %q not under %q", partition, cursor, wantPrefix)
+				continue
+			}
+			report.CoveredCursors++
+		}
 	}
 	return nil
 }

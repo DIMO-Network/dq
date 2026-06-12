@@ -43,12 +43,21 @@ func (k latestKey) compare(o latestKey) int {
 	)
 }
 
+// Sharded runs write disjoint bucket namespaces (latest/shard=N/bucket=M)
+// so two shards never read-merge-write the same object; the query layer
+// globs across shard dirs and its max/arg_max/sum aggregations merge them.
 func (r *Runner) latestBucketKey(bucket uint32) string {
-	return fmt.Sprintf("%slatest/bucket=%03d/latest.parquet", r.cfg.DecodedPrefix, bucket)
+	if r.cfg.ShardCount <= 1 {
+		return fmt.Sprintf("%slatest/bucket=%03d/latest.parquet", r.cfg.DecodedPrefix, bucket)
+	}
+	return fmt.Sprintf("%slatest/shard=%03d/bucket=%03d/latest.parquet", r.cfg.DecodedPrefix, r.cfg.ShardIndex, bucket)
 }
 
 func (r *Runner) summaryBucketKey(bucket uint32) string {
-	return fmt.Sprintf("%ssummary/bucket=%03d/summary.parquet", r.cfg.DecodedPrefix, bucket)
+	if r.cfg.ShardCount <= 1 {
+		return fmt.Sprintf("%ssummary/bucket=%03d/summary.parquet", r.cfg.DecodedPrefix, bucket)
+	}
+	return fmt.Sprintf("%ssummary/shard=%03d/bucket=%03d/summary.parquet", r.cfg.DecodedPrefix, r.cfg.ShardIndex, bucket)
 }
 
 // updateLatestBuckets read-merge-writes every latest bucket touched by the

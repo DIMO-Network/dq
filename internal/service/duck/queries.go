@@ -41,11 +41,16 @@ func NewQueries(svc *Service, bucket string) *Queries {
 	}
 }
 
-// SummaryBucketPath returns the summary parquet path for a subject:
-// <root>/<decodedPrefix>/summary/bucket=<HashBucket(subjectDID)>/summary.parquet.
-func SummaryBucketPath(bucket, decodedPrefix, subjectDID string) string {
+// SummaryBucketPaths returns the summary parquet patterns for a subject —
+// single-replica path plus the sharded namespace; sum/min/max aggregations
+// merge shard files natively.
+func SummaryBucketPaths(bucket, decodedPrefix, subjectDID string) []string {
 	pb := NewPathBuilder(bucket)
-	return pb.Join(decodedPrefix, "summary", fmt.Sprintf("bucket=%03d", HashBucket(subjectDID)), "summary.parquet")
+	b := fmt.Sprintf("bucket=%03d", HashBucket(subjectDID))
+	return []string{
+		pb.Join(decodedPrefix, "summary", b, "summary.parquet"),
+		pb.Join(decodedPrefix, "summary", "shard=*", b, "summary.parquet"),
+	}
 }
 
 // EventGlobs returns explicit per-day parquet globs for decoded events:
@@ -68,12 +73,12 @@ func AllEventsGlob(bucket, decodedPrefix string) string {
 	return pb.Join(decodedPrefix, "events", "date=*", "*.parquet")
 }
 
-func (q *Queries) latestPath(subject string) string {
-	return LatestBucketPath(q.bucket, q.decodedPrefix, subject)
+func (q *Queries) latestPaths(subject string) []string {
+	return LatestBucketPaths(q.bucket, q.decodedPrefix, subject)
 }
 
-func (q *Queries) summaryPath(subject string) string {
-	return SummaryBucketPath(q.bucket, q.decodedPrefix, subject)
+func (q *Queries) summaryPaths(subject string) []string {
+	return SummaryBucketPaths(q.bucket, q.decodedPrefix, subject)
 }
 
 func (q *Queries) signalGlobs(from, to time.Time) []string {

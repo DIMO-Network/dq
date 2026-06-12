@@ -102,10 +102,10 @@ func TestHashBucket(t *testing.T) {
 }
 
 func TestLatestBucketPath(t *testing.T) {
-	got := LatestBucketPath("my-bucket", "decoded/v1", testSubject1)
+	got := LatestBucketPaths("my-bucket", "decoded/v1", testSubject1)[0]
 	assert.Equal(t, "s3://my-bucket/decoded/v1/latest/bucket=219/latest.parquet", got)
 
-	local := LatestBucketPath("/data", "decoded/v1", testSubject2)
+	local := LatestBucketPaths("/data", "decoded/v1", testSubject2)[0]
 	assert.Equal(t, "/data/decoded/v1/latest/bucket=110/latest.parquet", local)
 }
 
@@ -128,7 +128,8 @@ func TestLatestBucketPath_ZeroPadded(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, subject, "expected to find a low-bucket subject")
-	path := LatestBucketPath("b", "decoded/v1", subject)
-	assert.Contains(t, path, fmt.Sprintf("bucket=%03d/", HashBucket(subject)))
-	assert.Regexp(t, `bucket=00\d/`, path)
+	for _, path := range LatestBucketPaths("b", "decoded/v1", subject) {
+		assert.Contains(t, path, fmt.Sprintf("bucket=%03d/", HashBucket(subject)))
+		assert.Regexp(t, `bucket=00\d/`, path)
+	}
 }
