@@ -25,6 +25,10 @@ type Queries struct {
 	svc           *Service
 	bucket        string
 	decodedPrefix string
+	// lake routes reads at the DuckLake catalog tables lake.signals /
+	// lake.events instead of bucket parquet globs. Latest/summary are then
+	// computed from the base table (no precomputed bucket files).
+	lake bool
 }
 
 // NewQueries creates a query layer over the given DuckDB service and parquet
@@ -39,6 +43,36 @@ func NewQueries(svc *Service, bucket string) *Queries {
 		bucket:        bucket,
 		decodedPrefix: cfg.DecodedPrefix,
 	}
+}
+
+// NewLakeQueries creates a query layer that reads the DuckLake catalog tables
+// (lake.signals / lake.events) attached on svc. The same SQL builders serve
+// both modes; only the FROM source and the latest/summary computation differ.
+func NewLakeQueries(svc *Service) *Queries {
+	return &Queries{svc: svc, lake: true}
+}
+
+// signalTable returns the FROM source for signal reads over [from, to]:
+// the DuckLake table in lake mode, else a read_parquet over decoded globs.
+// In bucket mode "" means no matching files (caller returns empty).
+func (q *Queries) signalTable(ctx context.Context, from, to time.Time) (string, error) {
+	if q.lake {
+		return "lake.signals", nil
+	}
+	return q.tableExpr(ctx, q.signalGlobs(from, to))
+}
+
+// eventTable is signalTable for the decoded events source. A zero from/to
+// means all-time (event summaries): the whole lake.events table, or the
+// all-dates glob in bucket mode.
+func (q *Queries) eventTable(ctx context.Context, from, to time.Time) (string, error) {
+	if q.lake {
+		return "lake.events", nil
+	}
+	if from.IsZero() && to.IsZero() {
+		return q.tableExpr(ctx, []string{AllEventsGlob(q.bucket, q.decodedPrefix)})
+	}
+	return q.tableExpr(ctx, q.eventGlobs(from, to))
 }
 
 // SummaryBucketPaths returns the summary parquet patterns for a subject —

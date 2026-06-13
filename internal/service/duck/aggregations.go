@@ -48,7 +48,7 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 		return nil, err
 	}
 
-	table, err := q.tableExpr(ctx, q.signalGlobs(aggArgs.FromTS, aggArgs.ToTS))
+	table, err := q.signalTable(ctx, aggArgs.FromTS, aggArgs.ToTS)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 		return []*ch.AggSignalForRange{}, nil
 	}
 
-	table, err := q.tableExpr(ctx, q.signalGlobs(globalFrom, globalTo))
+	table, err := q.signalTable(ctx, globalFrom, globalTo)
 	if err != nil {
 		return nil, err
 	}

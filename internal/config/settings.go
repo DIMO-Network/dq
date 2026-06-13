@@ -29,6 +29,13 @@ type Settings struct {
 	// QueryBackend selects the signal/event query backend: clickhouse (default),
 	// duckdb, or shadow (serve from clickhouse, mirror to duckdb and compare).
 	QueryBackend string `yaml:"QUERY_BACKEND"`
+	// DuckLakeCatalogDSN is the shared DuckLake catalog (Postgres DSN in
+	// prod, a catalog file path for single-node). Required when
+	// QUERY_BACKEND=ducklake or the DuckLake materializer is enabled.
+	DuckLakeCatalogDSN string `yaml:"DUCKLAKE_CATALOG_DSN"`
+	// DuckLakeDataPath is where DuckLake parquet data files live (s3:// or
+	// a local dir). Must match din's LAKE_DATA_PATH.
+	DuckLakeDataPath string `yaml:"DUCKLAKE_DATA_PATH"`
 	// DuckDB parse-on-read query engine (maps into duck.Config).
 	DuckDBMemoryLimit   string `yaml:"DUCKDB_MEMORY_LIMIT"`
 	DuckDBThreads       int    `yaml:"DUCKDB_THREADS"`
@@ -67,4 +74,7 @@ const (
 	// QueryBackendShadow serves from ClickHouse while mirroring queries to
 	// DuckDB in the background and comparing results.
 	QueryBackendShadow = "shadow"
+	// QueryBackendDuckLake serves signal/event queries from the DuckLake
+	// catalog tables (lake.signals / lake.events).
+	QueryBackendDuckLake = "ducklake"
 )

@@ -43,6 +43,9 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		Bucket:               bucket,
 		RawPrefix:            settings.RawPrefix,
 		DecodedPrefix:        settings.DecodedPrefix,
+		DuckLakeEnabled:      settings.QueryBackend == config.QueryBackendDuckLake,
+		CatalogDSN:           settings.DuckLakeCatalogDSN,
+		DataPath:             settings.DuckLakeDataPath,
 	}
 }
 
@@ -70,8 +73,14 @@ func newQueryBackend(settings *config.Settings, chService *ch.Service, logger ze
 	if err != nil {
 		return nil, nil, fmt.Errorf("couldn't create DuckDB service: %w", err)
 	}
-	queries := duck.NewQueries(duckSvc, "")
+	switch backend {
+	case config.QueryBackendDuckLake:
+		// Reads come from the DuckLake catalog tables; segment detection
+		// stays on ClickHouse.
+		return repositories.ComposeBackend(duck.NewLakeQueries(duckSvc), chService), closeDuck(duckSvc, logger), nil
+	}
 
+	queries := duck.NewQueries(duckSvc, "")
 	switch backend {
 	case config.QueryBackendDuckDB:
 		// Segment detection is not implemented on DuckDB; it stays on ClickHouse.
@@ -85,8 +94,8 @@ func newQueryBackend(settings *config.Settings, chService *ch.Service, logger ze
 		return shadow, cleanup, nil
 	default:
 		_ = duckSvc.Close()
-		return nil, nil, fmt.Errorf("unknown QUERY_BACKEND %q (expected %s, %s, or %s)",
-			settings.QueryBackend, config.QueryBackendClickHouse, config.QueryBackendDuckDB, config.QueryBackendShadow)
+		return nil, nil, fmt.Errorf("unknown QUERY_BACKEND %q (expected %s, %s, %s, or %s)",
+			settings.QueryBackend, config.QueryBackendClickHouse, config.QueryBackendDuckDB, config.QueryBackendShadow, config.QueryBackendDuckLake)
 	}
 }
 

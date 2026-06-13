@@ -15,7 +15,7 @@ import (
 // GetEvents returns events for a subject in [from, to), newest first,
 // mirroring ch.Service.GetEvents over the decoded event parquet files.
 func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.Time, filter *model.EventFilter) ([]*vss.Event, error) {
-	table, err := q.tableExpr(ctx, q.eventGlobs(from, to))
+	table, err := q.eventTable(ctx, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 // If eventNames is non-empty only those names are counted, mirroring
 // ch.Service.GetEventCounts.
 func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*ch.EventCount, error) {
-	table, err := q.tableExpr(ctx, q.eventGlobs(from, to))
+	table, err := q.eventTable(ctx, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 		}
 	}
 
-	table, err := q.tableExpr(ctx, q.eventGlobs(globalFrom, globalTo))
+	table, err := q.eventTable(ctx, globalFrom, globalTo)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 // for a subject over all time, mirroring ch.Service.GetEventSummaries. This
 // scans every event date partition for the subject.
 func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*ch.EventSummary, error) {
-	table, err := q.tableExpr(ctx, []string{AllEventsGlob(q.bucket, q.decodedPrefix)})
+	table, err := q.eventTable(ctx, time.Time{}, time.Time{})
 	if err != nil {
 		return nil, err
 	}
