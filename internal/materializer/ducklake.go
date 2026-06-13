@@ -65,8 +65,23 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.events AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(evTmp)),
 		"CREATE TABLE IF NOT EXISTS lake.ingest_progress (partition VARCHAR, cursor VARCHAR)",
 	}
+	// IF NOT EXISTS still raises a commit conflict when two materializers
+	// bootstrap a fresh catalog at once (both transactions start before
+	// either commits). Retry: by the next attempt the other transaction has
+	// committed and IF NOT EXISTS is a no-op.
 	for _, s := range stmts {
-		if _, err := m.db.ExecContext(ctx, s); err != nil {
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			if _, err = m.db.ExecContext(ctx, s); err == nil || !isCommitConflict(err) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
+			}
+		}
+		if err != nil {
 			return fmt.Errorf("ensuring lake schema: %w", err)
 		}
 	}
