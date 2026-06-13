@@ -193,6 +193,9 @@ type Runner struct {
 	cfg   Config
 	store ObjectStore
 	log   zerolog.Logger
+	// lake, when set, routes decoded output into a DuckLake catalog instead
+	// of the bucket-file layout (RunOnce branches to runOnceDuckLake).
+	lake *DuckLakeWriter
 }
 
 // New creates a Runner. Zero-valued config fields get defaults.
@@ -202,6 +205,14 @@ func New(cfg Config, store ObjectStore, log zerolog.Logger) *Runner {
 		store: store,
 		log:   log.With().Str("component", "materializer").Logger(),
 	}
+}
+
+// WithDuckLake returns r configured to write into the DuckLake catalog via
+// writer. The bucket write path and decoded-layer compaction are bypassed;
+// the catalog transaction is the commit protocol.
+func (r *Runner) WithDuckLake(writer *DuckLakeWriter) *Runner {
+	r.lake = writer
+	return r
 }
 
 // Run polls the raw layout until ctx is canceled. As long as a poll
@@ -223,7 +234,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		} else if processed > 0 {
 			continue // drain the backlog without waiting
 		}
-		r.maybeCompact(ctx, &lastCompact)
+		if r.lake == nil {
+			// DuckLake handles its own compaction (catalog maintenance);
+			// the bucket compactor only applies to the bucket layout.
+			r.maybeCompact(ctx, &lastCompact)
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -236,6 +251,9 @@ func (r *Runner) Run(ctx context.Context) error {
 // raw date partition with pending files. It returns the number of raw
 // files fully processed.
 func (r *Runner) RunOnce(ctx context.Context) (int, error) {
+	if r.lake != nil {
+		return r.runOnceDuckLake(ctx)
+	}
 	watermark, err := r.loadWatermark(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("loading watermark: %w", err)
@@ -261,6 +279,60 @@ func (r *Runner) RunOnce(ctx context.Context) (int, error) {
 		// Every pending batch for this type committed; anything newer
 		// arrived after the list and gets measured next pass.
 		lagSeconds.WithLabelValues(ceType).Set(0)
+	}
+	return processed, nil
+}
+
+// runOnceDuckLake is the DuckLake write path: cursors come from the catalog
+// (not watermark.json), each batch commits via a catalog transaction, and the
+// cursor is projected back to watermark.json for din's raw compactor. It
+// reuses pendingBatches verbatim — settle window and partition ownership
+// apply identically.
+func (r *Runner) runOnceDuckLake(ctx context.Context) (int, error) {
+	cursors, err := r.lake.LoadCursors(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("loading cursors: %w", err)
+	}
+
+	processed := 0
+	advanced := false
+	for _, ceType := range r.cfg.Types {
+		batches, err := r.pendingBatches(ctx, ceType, cursors)
+		if err != nil {
+			return processed, err
+		}
+		observeLag(ceType, batches)
+		for _, b := range batches {
+			if ctx.Err() != nil {
+				return processed, ctx.Err()
+			}
+			dec, err := r.decodeBatch(ctx, b)
+			if err != nil {
+				return processed, fmt.Errorf("decoding batch %s: %w", b.partition, err)
+			}
+			err = r.lake.WriteBatch(ctx, b, dec, cursors[b.partition])
+			if errors.Is(err, errCursorMoved) {
+				// Another writer owns this partition this round; skip.
+				continue
+			}
+			if err != nil {
+				return processed, fmt.Errorf("writing batch %s: %w", b.partition, err)
+			}
+			cursors[b.partition] = b.lastKey()
+			advanced = true
+			processed += len(b.keys)
+			batchesTotal.WithLabelValues(ceType).Inc()
+			rowsTotal.WithLabelValues("signals").Add(float64(dec.signalCount))
+			rowsTotal.WithLabelValues("events").Add(float64(dec.eventCount))
+			errorsTotal.Add(float64(dec.errorCount))
+		}
+		lagSeconds.WithLabelValues(ceType).Set(0)
+	}
+
+	if advanced {
+		if err := r.lake.ProjectWatermark(ctx, cursors); err != nil {
+			return processed, err
+		}
 	}
 	return processed, nil
 }

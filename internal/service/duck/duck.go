@@ -100,7 +100,26 @@ func bootstrapQueries(cfg Config) []string {
 			createS3SecretSQL(cfg),
 		)
 	}
+
+	if cfg.DuckLakeEnabled {
+		queries = append(queries, "INSTALL ducklake", "LOAD ducklake")
+		if cfg.CatalogIsPostgres() {
+			// The catalog lives in Postgres; the postgres extension backs it.
+			queries = append(queries, "INSTALL postgres", "LOAD postgres")
+		}
+		queries = append(queries, attachDuckLakeSQL(cfg))
+	}
 	return queries
+}
+
+// attachDuckLakeSQL attaches the DuckLake catalog as schema "lake".
+// IF NOT EXISTS makes it idempotent across pooled connections.
+func attachDuckLakeSQL(cfg Config) string {
+	if cfg.DataPath != "" {
+		return fmt.Sprintf("ATTACH IF NOT EXISTS 'ducklake:%s' AS lake (DATA_PATH %s)",
+			cfg.CatalogDSN, sqlString(cfg.DataPath))
+	}
+	return fmt.Sprintf("ATTACH IF NOT EXISTS 'ducklake:%s' AS lake", cfg.CatalogDSN)
 }
 
 // createS3SecretSQL builds the CREATE SECRET statement for S3 access.

@@ -49,6 +49,24 @@ type Config struct {
 	RawPrefix string `yaml:"RAW_PREFIX"`
 	// DecodedPrefix is the key prefix for decoded signals/events/latest. Empty means DefaultDecodedPrefix.
 	DecodedPrefix string `yaml:"DECODED_PREFIX"`
+
+	// DuckLakeEnabled attaches a DuckLake catalog as schema "lake" on every
+	// connection. The decoded layer then lives as DuckLake tables
+	// (lake.signals / lake.events) instead of bucket parquet files.
+	DuckLakeEnabled bool `yaml:"DUCKLAKE_ENABLED"`
+	// CatalogDSN is the DuckLake catalog. A "postgres:" / "postgresql:" DSN
+	// (prod, concurrent writers) loads the postgres extension; anything else
+	// is treated as a catalog file path (single-writer; tests, single-node).
+	CatalogDSN string `yaml:"DUCKLAKE_CATALOG_DSN"`
+	// DataPath is where DuckLake writes parquet data files: an s3:// prefix
+	// in prod, a local directory in tests.
+	DataPath string `yaml:"DUCKLAKE_DATA_PATH"`
+}
+
+// CatalogIsPostgres reports whether the DuckLake catalog DSN names a Postgres
+// database (vs a local catalog file).
+func (c Config) CatalogIsPostgres() bool {
+	return strings.HasPrefix(c.CatalogDSN, "postgres:") || strings.HasPrefix(c.CatalogDSN, "postgresql:")
 }
 
 // withDefaults returns a copy of the config with zero values replaced by defaults.
