@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	duckdb "github.com/marcboeker/go-duckdb/v2"
+	duckdb "github.com/duckdb/duckdb-go/v2"
 )
 
 // Service wraps a DuckDB-backed *sql.DB.

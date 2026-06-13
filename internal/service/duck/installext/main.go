@@ -12,12 +12,12 @@ import (
 	"log"
 	"strings"
 
-	_ "github.com/marcboeker/go-duckdb/v2"
+	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 func main() {
 	dir := flag.String("dir", "", "directory to install extensions into (extension_directory)")
-	extensions := flag.String("extensions", "httpfs,aws,spatial", "comma-separated list of extensions to install")
+	extensions := flag.String("extensions", "httpfs,aws,spatial,ducklake", "comma-separated list of extensions to install")
 	flag.Parse()
 
 	if *dir == "" {
