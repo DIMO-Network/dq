@@ -193,9 +193,10 @@ type Runner struct {
 	cfg   Config
 	store ObjectStore
 	log   zerolog.Logger
-	// lake, when set, routes decoded output into a DuckLake catalog instead
-	// of the bucket-file layout (RunOnce branches to runOnceDuckLake).
-	lake *DuckLakeWriter
+	// lake, when set, reads din's raw_events from the shared DuckLake
+	// catalog via snapshot diffs and writes decoded tables there, bypassing
+	// the bucket/hive path entirely (RunOnce delegates to it).
+	lake *DuckLakeMaterializer
 }
 
 // New creates a Runner. Zero-valued config fields get defaults.
@@ -207,11 +208,12 @@ func New(cfg Config, store ObjectStore, log zerolog.Logger) *Runner {
 	}
 }
 
-// WithDuckLake returns r configured to write into the DuckLake catalog via
-// writer. The bucket write path and decoded-layer compaction are bypassed;
-// the catalog transaction is the commit protocol.
-func (r *Runner) WithDuckLake(writer *DuckLakeWriter) *Runner {
-	r.lake = writer
+// WithDuckLake returns r configured to materialize from din's shared DuckLake
+// catalog (raw_events → signals/events) via m. The bucket/hive read path and
+// decoded-layer compaction are bypassed; the catalog transaction is the
+// commit protocol.
+func (r *Runner) WithDuckLake(m *DuckLakeMaterializer) *Runner {
+	r.lake = m
 	return r
 }
 
@@ -252,7 +254,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // files fully processed.
 func (r *Runner) RunOnce(ctx context.Context) (int, error) {
 	if r.lake != nil {
-		return r.runOnceDuckLake(ctx)
+		return r.lake.RunOnce(ctx, r)
 	}
 	watermark, err := r.loadWatermark(ctx)
 	if err != nil {
@@ -283,58 +285,64 @@ func (r *Runner) RunOnce(ctx context.Context) (int, error) {
 	return processed, nil
 }
 
-// runOnceDuckLake is the DuckLake write path: cursors come from the catalog
-// (not watermark.json), each batch commits via a catalog transaction, and the
-// cursor is projected back to watermark.json for din's raw compactor. It
-// reuses pendingBatches verbatim — settle window and partition ownership
-// apply identically.
-func (r *Runner) runOnceDuckLake(ctx context.Context) (int, error) {
-	cursors, err := r.lake.LoadCursors(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("loading cursors: %w", err)
-	}
-
-	processed := 0
-	advanced := false
-	for _, ceType := range r.cfg.Types {
-		batches, err := r.pendingBatches(ctx, ceType, cursors)
-		if err != nil {
-			return processed, err
+// decodeEvents converts an already-reconstructed slice of raw events (e.g. a
+// DuckLake snapshot delta over lake.raw_events) into a decodedBatch. Unlike
+// decodeBatch it carries no batch-wide ceType: each event routes by its own
+// Type (status→signals, events→events), and the vehicle gate applies per
+// status event. Dedup is on the header uniqueness key; conversion fans out
+// over Workers.
+func (r *Runner) decodeEvents(ctx context.Context, events []cloudevent.RawEvent) *decodedBatch {
+	dec := &decodedBatch{}
+	seen := make(map[string]struct{}, len(events))
+	jobs := make([]*cloudevent.RawEvent, 0, len(events))
+	for i := range events {
+		ev := &events[i]
+		if _, dup := seen[ev.Key()]; dup {
+			continue
 		}
-		observeLag(ceType, batches)
-		for _, b := range batches {
-			if ctx.Err() != nil {
-				return processed, ctx.Err()
-			}
-			dec, err := r.decodeBatch(ctx, b)
-			if err != nil {
-				return processed, fmt.Errorf("decoding batch %s: %w", b.partition, err)
-			}
-			err = r.lake.WriteBatch(ctx, b, dec, cursors[b.partition])
-			if errors.Is(err, errCursorMoved) {
-				// Another writer owns this partition this round; skip.
+		seen[ev.Key()] = struct{}{}
+		switch ev.Type {
+		case cloudevent.TypeStatus:
+			if !r.isVehicleSignalMessage(ev) {
 				continue
 			}
-			if err != nil {
-				return processed, fmt.Errorf("writing batch %s: %w", b.partition, err)
-			}
-			cursors[b.partition] = b.lastKey()
-			advanced = true
-			processed += len(b.keys)
-			batchesTotal.WithLabelValues(ceType).Inc()
-			rowsTotal.WithLabelValues("signals").Add(float64(dec.signalCount))
-			rowsTotal.WithLabelValues("events").Add(float64(dec.eventCount))
-			errorsTotal.Add(float64(dec.errorCount))
+		case cloudevent.TypeEvents:
+		default:
+			continue // not a decoded type
 		}
-		lagSeconds.WithLabelValues(ceType).Set(0)
+		jobs = append(jobs, ev)
 	}
 
-	if advanced {
-		if err := r.lake.ProjectWatermark(ctx, cursors); err != nil {
-			return processed, err
-		}
+	type convResult struct {
+		signals []SignalRow
+		events  []EventRow
+		failed  int
 	}
-	return processed, nil
+	results := make([]convResult, len(jobs))
+	conv, convCtx := errgroup.WithContext(ctx)
+	conv.SetLimit(r.cfg.Workers)
+	for i, raw := range jobs {
+		conv.Go(func() error {
+			switch raw.Type {
+			case cloudevent.TypeStatus:
+				rows, failed := r.convertSignals(convCtx, raw)
+				results[i] = convResult{signals: rows, failed: failed}
+			case cloudevent.TypeEvents:
+				rows, failed := r.convertEvents(convCtx, raw)
+				results[i] = convResult{events: rows, failed: failed}
+			}
+			return nil
+		})
+	}
+	_ = conv.Wait() // convert funcs never return error (failures are counted)
+	for i := range results {
+		dec.signals = append(dec.signals, results[i].signals...)
+		dec.signalCount += len(results[i].signals)
+		dec.events = append(dec.events, results[i].events...)
+		dec.eventCount += len(results[i].events)
+		dec.errorCount += results[i].failed
+	}
+	return dec
 }
 
 // rawBatch is one unit of work: up to BatchMaxFiles raw objects from a

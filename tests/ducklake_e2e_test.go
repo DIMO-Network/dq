@@ -1,16 +1,14 @@
-// ducklake_e2e_test.go proves the DuckLake decoded-store write path against a
-// file catalog (identical DuckLake SQL to a Postgres catalog; the Postgres
-// case is exercised by the PG_CATALOG_DSN-gated concurrency test). It mirrors
-// pipeline_e2e_test's seeding and asserts: rows land in lake.signals, the
-// catalog cursor advances, a re-run is exactly-once (idempotent), the
-// watermark.json projection is written for din, and the rows decode to the
-// hand-computed values.
+// ducklake_e2e_test.go proves the converged DuckLake materializer against a
+// file catalog (identical DuckLake SQL to Postgres; the Postgres + concurrency
+// case is the PG_CATALOG_DSN-gated test). It seeds lake.raw_events the way
+// din's sink does, then asserts the materializer reads the snapshot delta,
+// decodes, writes lake.signals, advances the snapshot cursor, and is
+// exactly-once on a re-run.
 package tests
 
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -22,9 +20,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newDuckLakeService opens a DuckDB service with a file-backed DuckLake
-// catalog rooted under dir.
-func newDuckLakeService(t *testing.T, dir string) *duck.Service {
+// newLakeService opens a DuckDB service with a file-backed DuckLake catalog,
+// then creates the raw_events table din owns.
+func newLakeService(t *testing.T, dir string) *duck.Service {
 	t.Helper()
 	svc, err := duck.NewService(duck.Config{
 		DuckLakeEnabled: true,
@@ -33,40 +31,48 @@ func newDuckLakeService(t *testing.T, dir string) *duck.Service {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = svc.Close() })
+	_, err = svc.DB().ExecContext(context.Background(), `CREATE TABLE IF NOT EXISTS lake.raw_events (
+		subject VARCHAR, "time" TIMESTAMP WITH TIME ZONE, type VARCHAR, id VARCHAR,
+		source VARCHAR, producer VARCHAR, data_content_type VARCHAR, data_version VARCHAR,
+		extras VARCHAR, data VARCHAR, data_base64 BLOB, data_index_key VARCHAR, voids_id VARCHAR)`)
+	require.NoError(t, err)
 	return svc
 }
 
-func duckLakeRunner(t *testing.T, store materializer.ObjectStore, db *sql.DB, root string) *materializer.Runner {
+// seedRawStatus inserts one dimo.status raw event (the din sink's row shape)
+// with a default-module signal payload, as its own snapshot.
+func seedRawStatus(t *testing.T, db *sql.DB, id, subject string, ts time.Time, signals ...map[string]any) {
 	t.Helper()
-	w, err := materializer.NewDuckLakeWriter(context.Background(), db, store, "decoded/v1/")
+	ev := deviceStatus(id, subject, ts, signals...)
+	// din's appender writes empty strings (not NULL) for header columns.
+	_, err := db.ExecContext(context.Background(),
+		`INSERT INTO lake.raw_events (subject, "time", type, id, source, producer, data_content_type, data_version, extras, data)
+		 VALUES (?, ?, ?, ?, ?, ?, '', ?, '{}', ?)`,
+		ev.Subject, ev.Time.UTC(), ev.Type, ev.ID, ev.Source, ev.Producer, ev.DataVersion, string(ev.Data))
 	require.NoError(t, err)
-	return materializer.New(materializer.Config{
-		ChainID:           137,
-		VehicleNFTAddress: vehicleNFT,
-		BatchMaxFiles:     1,
-	}, store, zerolog.Nop()).WithDuckLake(w)
 }
 
-func TestDuckLake_WritePathEndToEnd(t *testing.T) {
+func TestDuckLake_MaterializeFromRawEvents(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
-	store := newFSStore(t, root)
-	svc := newDuckLakeService(t, t.TempDir())
+	dir := t.TempDir()
+	svc := newLakeService(t, dir)
 	db := svc.DB()
 	subject := fmt.Sprintf("did:erc721:137:%s:7", vehicleNFT.Hex())
+	day := time.Now().UTC().AddDate(0, 0, -3).Truncate(24 * time.Hour)
 
-	// Three bundles across two past days; speeds 40/80/65 → MAX 80, count 3.
-	day1 := time.Now().UTC().AddDate(0, 0, -3).Truncate(24 * time.Hour)
-	day2 := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour)
-	writeRawBundle(t, store, day1, 1, deviceStatus("dl-1", subject, day1.Add(time.Hour), speedAt(day1.Add(time.Hour), 40)))
-	writeRawBundle(t, store, day1, 2, deviceStatus("dl-2", subject, day1.Add(2*time.Hour), speedAt(day1.Add(2*time.Hour), 80)))
-	writeRawBundle(t, store, day2, 3, deviceStatus("dl-3", subject, day2.Add(time.Hour), speedAt(day2.Add(time.Hour), 65)))
+	// din writes three status events as three snapshots.
+	seedRawStatus(t, db, "dl-1", subject, day.Add(time.Hour), speedAt(day.Add(time.Hour), 40))
+	seedRawStatus(t, db, "dl-2", subject, day.Add(2*time.Hour), speedAt(day.Add(2*time.Hour), 80))
+	seedRawStatus(t, db, "dl-3", subject, day.Add(3*time.Hour), speedAt(day.Add(3*time.Hour), 65))
 
-	runner := duckLakeRunner(t, store, db, root)
+	mat, err := materializer.NewDuckLakeMaterializer(ctx, db)
+	require.NoError(t, err)
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
+		WithDuckLake(mat)
+
 	processed := drainRunner(t, ctx, runner)
-	require.Equal(t, 3, processed, "all three bundles materialized")
+	require.Equal(t, 3, processed, "all three raw events consumed")
 
-	// Rows landed in the catalog table.
 	var rows int
 	var maxSpeed float64
 	require.NoError(t, db.QueryRowContext(ctx,
@@ -75,23 +81,18 @@ func TestDuckLake_WritePathEndToEnd(t *testing.T) {
 	assert.Equal(t, 3, rows)
 	assert.Equal(t, 80.0, maxSpeed)
 
-	// Cursor advanced for both partitions.
-	var cursorRows int
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM lake.ingest_progress").Scan(&cursorRows))
-	assert.Equal(t, 2, cursorRows, "one cursor per date partition")
-
-	// Watermark projection written for din's raw compactor.
-	body, err := store.GetObject(ctx, "decoded/v1/_state/watermark.json")
-	require.NoError(t, err)
-	var wm map[string]string
-	require.NoError(t, json.Unmarshal(body, &wm))
-	assert.Len(t, wm, 2, "projection covers both partitions")
-
-	// Exactly-once: a second drain inserts nothing more.
+	// Snapshot cursor advanced and exactly-once on re-run.
 	again := drainRunner(t, ctx, runner)
-	assert.Zero(t, again, "re-run processes no already-cursored files")
+	assert.Zero(t, again, "caught-up decoder consumes nothing")
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM lake.signals").Scan(&rows))
-	assert.Equal(t, 3, rows, "no double-insert on re-run")
+	assert.Equal(t, 3, rows, "no double-decode on re-run")
+
+	// A new raw event becomes a new snapshot; the next pass picks up only it.
+	seedRawStatus(t, db, "dl-4", subject, day.Add(4*time.Hour), speedAt(day.Add(4*time.Hour), 90))
+	delta := drainRunner(t, ctx, runner)
+	assert.Equal(t, 1, delta, "incremental snapshot diff picks up only the new event")
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM lake.signals").Scan(&rows))
+	assert.Equal(t, 4, rows)
 }
 
 func drainRunner(t *testing.T, ctx context.Context, r *materializer.Runner) int {
