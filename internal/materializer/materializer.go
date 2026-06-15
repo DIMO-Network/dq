@@ -237,8 +237,11 @@ func (r *Runner) Run(ctx context.Context) error {
 			continue // drain the backlog without waiting
 		}
 		if r.lake == nil {
-			// DuckLake handles its own compaction (catalog maintenance);
-			// the bucket compactor only applies to the bucket layout.
+			// Bucket layout only. In DuckLake mode the decoded tables
+			// (lake.signals/events) are merged + expired by din's
+			// catalog-wide maintenance (ducklake_merge_adjacent_files('lake')
+			// etc. cover every table in the attachment) — exactly one
+			// maintenance process per catalog, so dq runs none.
 			r.maybeCompact(ctx, &lastCompact)
 		}
 		select {

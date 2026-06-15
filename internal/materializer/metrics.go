@@ -33,6 +33,10 @@ var (
 		Name: "dq_materializer_compactions_total",
 		Help: "Decoded partitions merged by the decoded-layer compactor.",
 	})
+	cursorResetsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dq_materializer_cursor_resets_total",
+		Help: "DuckLake snapshot cursor resets after the consumer lagged past LAKE_SNAPSHOT_RETENTION (expired change feed). Each reset skips an un-decoded gap — alert on any increase.",
+	})
 )
 
 // ingestKeyTime extracts the ingest timestamp from a raw object name

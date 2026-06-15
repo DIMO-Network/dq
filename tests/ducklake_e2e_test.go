@@ -65,7 +65,7 @@ func TestDuckLake_MaterializeFromRawEvents(t *testing.T) {
 	seedRawStatus(t, db, "dl-2", subject, day.Add(2*time.Hour), speedAt(day.Add(2*time.Hour), 80))
 	seedRawStatus(t, db, "dl-3", subject, day.Add(3*time.Hour), speedAt(day.Add(3*time.Hour), 65))
 
-	mat, err := materializer.NewDuckLakeMaterializer(ctx, db)
+	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
 		WithDuckLake(mat)

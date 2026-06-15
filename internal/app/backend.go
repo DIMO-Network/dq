@@ -127,6 +127,12 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 		SyntheticNFTAddress:   common.HexToAddress(settings.SyntheticNFTAddress),
 	})
 
+	// DuckLake mode: decode din's raw_events through the shared catalog
+	// (no S3 store, no bucket layout). Selected by DUCKLAKE_CATALOG_DSN.
+	if settings.DuckLakeCatalogDSN != "" {
+		return startDuckLakeMaterializer(settings, pollInterval, logger)
+	}
+
 	// Local path → filesystem store (single-node); bucket name → S3.
 	var store materializer.ObjectStore
 	if isLocalBucket(settings.ParquetBucket) {
@@ -153,6 +159,42 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 		ShardCount:        settings.MaterializerShardCount,
 	}, store, logger)
 
+	return runMaterializerLoop(runner, logger), nil
+}
+
+// startDuckLakeMaterializer wires the materializer to read din's raw_events
+// from the shared DuckLake catalog and write the decoded tables there. It
+// owns its own DuckDB service (catalog attached) for the lifetime of the
+// loop; the query backend opens a separate one.
+func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Duration, logger zerolog.Logger) (func(), error) {
+	cfg := duckConfigFromSettings(settings)
+	cfg.DuckLakeEnabled = true
+	duckSvc, err := duck.NewService(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("creating DuckLake service: %w", err)
+	}
+	mat, err := materializer.NewDuckLakeMaterializer(context.Background(), duckSvc.DB(), logger)
+	if err != nil {
+		_ = duckSvc.Close()
+		return nil, fmt.Errorf("creating DuckLake materializer: %w", err)
+	}
+	runner := materializer.New(materializer.Config{
+		PollInterval:      pollInterval,
+		ChainID:           settings.DIMORegistryChainID,
+		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
+		Workers:           settings.MaterializerWorkers,
+	}, nil, logger).WithDuckLake(mat)
+
+	stop := runMaterializerLoop(runner, logger)
+	return func() {
+		stop()
+		_ = duckSvc.Close()
+	}, nil
+}
+
+// runMaterializerLoop runs runner.Run in a goroutine and returns a stop
+// function that cancels it and waits for exit.
+func runMaterializerLoop(runner *materializer.Runner, logger zerolog.Logger) func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -162,9 +204,8 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 		}
 	}()
 	logger.Info().Msg("materializer started")
-
 	return func() {
 		cancel()
 		<-done
-	}, nil
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
+	"github.com/rs/zerolog"
 )
 
 // DuckLakeMaterializer decodes din's raw layer entirely through the shared
@@ -26,7 +27,8 @@ import (
 // pre-PUT key race to guard against. din's lake maintenance bounds history by
 // LAKE_SNAPSHOT_RETENTION; the cursor must stay within that window.
 type DuckLakeMaterializer struct {
-	db *sql.DB
+	db  *sql.DB
+	log zerolog.Logger
 }
 
 // snapshotCursorPartition is the single ingest_progress key holding the last
@@ -40,8 +42,8 @@ const rawEventCols = `subject, "time", type, id, source, producer, ` +
 // NewDuckLakeMaterializer ensures the decoded tables + cursor row exist and
 // returns a materializer over db (which must have the shared catalog attached
 // as schema "lake", with din's raw_events present).
-func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB) (*DuckLakeMaterializer, error) {
-	m := &DuckLakeMaterializer{db: db}
+func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger) (*DuckLakeMaterializer, error) {
+	m := &DuckLakeMaterializer{db: db, log: log.With().Str("component", "ducklake-materializer").Logger()}
 	if err := m.ensureSchema(ctx); err != nil {
 		return nil, err
 	}
@@ -92,6 +94,34 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 // caller retries from the new cursor next pass.
 var errSnapshotMoved = errors.New("snapshot cursor advanced by another writer")
 
+// errExpiredCursor means the cursor points before the oldest retained
+// snapshot: din expired the change feed for the range while the consumer
+// lagged past LAKE_SNAPSHOT_RETENTION.
+var errExpiredCursor = errors.New("snapshot cursor expired")
+
+// isExpiredSnapshot best-effort classifies a ducklake_table_changes error as
+// "the requested snapshot range is no longer retained" vs a transient fault.
+func isExpiredSnapshot(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "snapshot") &&
+		(strings.Contains(s, "expired") || strings.Contains(s, "not found") ||
+			strings.Contains(s, "does not exist") || strings.Contains(s, "out of range"))
+}
+
+// resetCursor advances the cursor from->to without decoding, used only on
+// expired-feed recovery. The gap is unavoidably skipped.
+func (m *DuckLakeMaterializer) resetCursor(ctx context.Context, from, to int64) error {
+	if from == 0 {
+		_, err := m.db.ExecContext(ctx,
+			"INSERT INTO lake.ingest_progress VALUES (?, ?)", snapshotCursorPartition, fmt.Sprint(to))
+		return err
+	}
+	_, err := m.db.ExecContext(ctx,
+		"UPDATE lake.ingest_progress SET cursor = ? WHERE partition = ? AND cursor = ?",
+		fmt.Sprint(to), snapshotCursorPartition, fmt.Sprint(from))
+	return err
+}
+
 // RunOnce processes every raw_events row committed since the cursor in one
 // transaction and returns the number of raw events consumed. Zero means the
 // decoder is caught up.
@@ -109,8 +139,29 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 	}
 
 	events, err := m.readDelta(ctx, cur, head)
+	if errors.Is(err, errExpiredCursor) {
+		// The consumer lagged past LAKE_SNAPSHOT_RETENTION: din expired the
+		// snapshots covering (cur, oldestRetained], so the change feed for
+		// that range is gone. Skip to head and alert — wedging in a permanent
+		// error loop is worse. The gap is a misconfiguration (retention must
+		// exceed max consumer lag), made visible by the counter.
+		cursorResetsTotal.Inc()
+		m.log.Error().Int64("from", cur).Int64("to", head).
+			Msg("DuckLake change feed expired; resetting cursor to head (un-decoded gap skipped — increase LAKE_SNAPSHOT_RETENTION)")
+		if rerr := m.resetCursor(ctx, cur, head); rerr != nil {
+			return 0, rerr
+		}
+		return 0, nil
+	}
 	if err != nil {
 		return 0, err
+	}
+	if len(events) == 0 {
+		// The (cur, head] range held no raw_events inserts — head advanced
+		// only because of this decoder's own writes to signals/events. Don't
+		// burn a cursor-advance transaction; the next pass re-reads the same
+		// empty range cheaply and the cursor moves once real data arrives.
+		return 0, nil
 	}
 	decoded := dec.decodeEvents(ctx, events)
 
@@ -163,6 +214,9 @@ func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([
 		rawEventCols, from+1, to)
 	rows, err := m.db.QueryContext(ctx, q)
 	if err != nil {
+		if isExpiredSnapshot(err) {
+			return nil, fmt.Errorf("%w: %v", errExpiredCursor, err)
+		}
 		return nil, fmt.Errorf("reading raw_events delta: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
@@ -203,6 +257,11 @@ func scanRawEvent(rows *sql.Rows) (cloudevent.RawEvent, error) {
 	} else if data.Valid {
 		ev.Data = json.RawMessage(data.String)
 	}
+	// voids_id is selected (column parity with raw_events) but not applied:
+	// the decode path routes only status->signals and events->events;
+	// tombstones are skipped, and voiding is a read-side concern handled on
+	// the raw query path. Discard it here.
+	_ = voidsID
 	return ev, nil
 }
 
@@ -275,7 +334,12 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 }
 
 func isCommitConflict(err error) bool {
-	return strings.Contains(err.Error(), "conflict")
+	// DuckLake reports "Transaction conflict - ..." / "Failed to commit
+	// DuckLake transaction". Match those specifically so an unrelated error
+	// that merely contains "conflict" isn't swallowed as a retryable race.
+	s := err.Error()
+	return strings.Contains(s, "Transaction conflict") ||
+		strings.Contains(s, "Failed to commit DuckLake transaction")
 }
 
 // writeTempParquet writes rows via enc into a temp file DuckDB can read and

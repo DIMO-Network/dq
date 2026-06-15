@@ -30,7 +30,7 @@ func TestDuckLake_QueryBackend(t *testing.T) {
 	seedRawStatus(t, db, "q-1", subject, day.Add(time.Hour), speedAt(day.Add(time.Hour), 30))
 	seedRawStatus(t, db, "q-2", subject, day.Add(2*time.Hour), speedAt(day.Add(2*time.Hour), 70))
 
-	mat, err := materializer.NewDuckLakeMaterializer(ctx, db)
+	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
 		WithDuckLake(mat)

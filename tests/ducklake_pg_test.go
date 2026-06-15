@@ -85,7 +85,7 @@ func TestDuckLakePostgres_ConcurrentMaterializers(t *testing.T) {
 	// shape) drain concurrently, racing the same snapshot deltas.
 	run := func() {
 		svc := newPGLakeService(t, dsn, dataPath)
-		mat, err := materializer.NewDuckLakeMaterializer(ctx, svc.DB())
+		mat, err := materializer.NewDuckLakeMaterializer(ctx, svc.DB(), zerolog.Nop())
 		require.NoError(t, err)
 		runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
 			WithDuckLake(mat)
