@@ -64,9 +64,39 @@ type Config struct {
 }
 
 // CatalogIsPostgres reports whether the DuckLake catalog DSN names a Postgres
-// database (vs a local catalog file).
+// database (vs a local catalog file). The DSN is the RAW connection string
+// (no "postgres:" prefix) — same convention as din's LAKE_CATALOG_DSN, so an
+// operator sets one DSN format for both services attaching the catalog.
 func (c Config) CatalogIsPostgres() bool {
-	return strings.HasPrefix(c.CatalogDSN, "postgres:") || strings.HasPrefix(c.CatalogDSN, "postgresql:")
+	return strings.HasPrefix(c.CatalogDSN, "postgres://") || strings.HasPrefix(c.CatalogDSN, "postgresql://") ||
+		strings.Contains(c.CatalogDSN, "host=") || strings.Contains(c.CatalogDSN, "dbname=")
+}
+
+// catalogURI maps the DSN onto a ducklake ATTACH URI, matching din.catalogURI.
+func (c Config) catalogURI() string {
+	if c.CatalogIsPostgres() {
+		return "ducklake:postgres:" + c.CatalogDSN
+	}
+	return "ducklake:" + c.CatalogDSN
+}
+
+// MetaTarget is the ATTACH target for the side database holding consumer
+// progress (din's meta.din_consumer_progress): the catalog Postgres DSN
+// itself, or a DuckDB file beside a local catalog. Mirrors din lake.metaTarget
+// exactly so both attach the same database.
+func (c Config) MetaTarget() string {
+	if c.CatalogIsPostgres() {
+		return c.CatalogDSN
+	}
+	return c.CatalogDSN + ".progress.db"
+}
+
+// MetaAttachOpts is the ATTACH options clause for the meta database.
+func (c Config) MetaAttachOpts() string {
+	if c.CatalogIsPostgres() {
+		return " (TYPE postgres)"
+	}
+	return ""
 }
 
 // withDefaults returns a copy of the config with zero values replaced by defaults.

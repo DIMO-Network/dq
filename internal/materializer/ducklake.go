@@ -66,6 +66,9 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.signals AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(sigTmp)),
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.events AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(evTmp)),
 		"CREATE TABLE IF NOT EXISTS lake.ingest_progress (partition VARCHAR, cursor VARCHAR)",
+		// din owns this table (the snapshot-expiry floor); create it defensively
+		// so dq can report progress before din has booted against a fresh catalog.
+		`CREATE TABLE IF NOT EXISTS meta.din_consumer_progress (consumer VARCHAR, snapshot_id BIGINT, updated_at TIMESTAMP WITH TIME ZONE)`,
 	}
 	// IF NOT EXISTS still raises a commit conflict when two materializers
 	// bootstrap a fresh catalog at once (both transactions start before
@@ -171,7 +174,38 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 		}
 		return 0, err
 	}
+	// Report progress to din's snapshot-expiry floor. Best-effort: the batch
+	// is already durable, and a failed report only holds expiry back
+	// (din won't reclaim past the stale floor — conservative, not unsafe).
+	m.reportProgress(ctx, head)
 	return len(events), nil
+}
+
+// consumerName is the identity dq reports under in meta.din_consumer_progress.
+// din takes MIN(snapshot_id) over live consumers as the expiry floor; all dq
+// replicas share one logical cursor, so they all report under this name.
+const consumerName = "dq"
+
+// reportProgress upserts dq's processed snapshot id into din's consumer-floor
+// table so the maintainer never expires snapshots dq hasn't read.
+func (m *DuckLakeMaterializer) reportProgress(ctx context.Context, snapshotID int64) {
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		m.log.Warn().Err(err).Msg("consumer progress report: begin failed (expiry floor not advanced)")
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM meta.din_consumer_progress WHERE consumer = ?", consumerName); err != nil {
+		m.log.Warn().Err(err).Msg("consumer progress report: delete failed")
+		return
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO meta.din_consumer_progress VALUES (?, ?, now())", consumerName, snapshotID); err != nil {
+		m.log.Warn().Err(err).Msg("consumer progress report: insert failed")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		m.log.Warn().Err(err).Msg("consumer progress report: commit failed (expiry floor not advanced)")
+	}
 }
 
 // eventDecoder is the materializer's decode surface (implemented by *Runner).

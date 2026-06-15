@@ -108,6 +108,11 @@ func bootstrapQueries(cfg Config) []string {
 			queries = append(queries, "INSTALL postgres", "LOAD postgres")
 		}
 		queries = append(queries, attachDuckLakeSQL(cfg))
+		// Attach the catalog's side database as "meta" so the materializer can
+		// report consumer progress into din's meta.din_consumer_progress
+		// (the snapshot-expiry floor). Same target din attaches.
+		queries = append(queries, fmt.Sprintf("ATTACH IF NOT EXISTS %s AS meta%s",
+			sqlString(cfg.MetaTarget()), cfg.MetaAttachOpts()))
 	}
 	return queries
 }
@@ -116,10 +121,10 @@ func bootstrapQueries(cfg Config) []string {
 // IF NOT EXISTS makes it idempotent across pooled connections.
 func attachDuckLakeSQL(cfg Config) string {
 	if cfg.DataPath != "" {
-		return fmt.Sprintf("ATTACH IF NOT EXISTS 'ducklake:%s' AS lake (DATA_PATH %s)",
-			cfg.CatalogDSN, sqlString(cfg.DataPath))
+		return fmt.Sprintf("ATTACH IF NOT EXISTS %s AS lake (DATA_PATH %s)",
+			sqlString(cfg.catalogURI()), sqlString(cfg.DataPath))
 	}
-	return fmt.Sprintf("ATTACH IF NOT EXISTS 'ducklake:%s' AS lake", cfg.CatalogDSN)
+	return fmt.Sprintf("ATTACH IF NOT EXISTS %s AS lake", sqlString(cfg.catalogURI()))
 }
 
 // createS3SecretSQL builds the CREATE SECRET statement for S3 access.

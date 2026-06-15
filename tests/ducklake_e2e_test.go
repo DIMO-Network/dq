@@ -93,6 +93,15 @@ func TestDuckLake_MaterializeFromRawEvents(t *testing.T) {
 	assert.Equal(t, 1, delta, "incremental snapshot diff picks up only the new event")
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM lake.signals").Scan(&rows))
 	assert.Equal(t, 4, rows)
+
+	// dq reported its cursor into din's snapshot-expiry floor, and it equals
+	// the processed snapshot id (the lake.ingest_progress cursor).
+	var floor, cursor int64
+	require.NoError(t, db.QueryRowContext(ctx,
+		"SELECT snapshot_id FROM meta.din_consumer_progress WHERE consumer = 'dq'").Scan(&floor))
+	require.NoError(t, db.QueryRowContext(ctx,
+		"SELECT CAST(cursor AS BIGINT) FROM lake.ingest_progress WHERE partition = 'lake.raw_events#snapshot'").Scan(&cursor))
+	assert.Equal(t, cursor, floor, "consumer floor matches the processed snapshot cursor")
 }
 
 func drainRunner(t *testing.T, ctx context.Context, r *materializer.Runner) int {

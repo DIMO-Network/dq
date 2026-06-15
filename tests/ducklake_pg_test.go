@@ -3,7 +3,7 @@
 // case) racing the same raw_events delta. Skips unless PG_CATALOG_DSN is set,
 // e.g.:
 //
-//	PG_CATALOG_DSN='postgres:dbname=ducklake_test host=127.0.0.1 port=54329 user=postgres' \
+//	PG_CATALOG_DSN='dbname=ducklake_test host=127.0.0.1 port=54329 user=postgres' \
 //	  go test ./tests/ -run TestDuckLakePostgres -v
 //
 // File-catalog tests cover the logic everywhere; this covers cross-connection
