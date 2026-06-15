@@ -80,3 +80,12 @@ Not functional, but the rename effort stopped at the public surface:
 ### 7. Empty `Cleanup()`
 
 `internal/app/app.go:106` — `cleanup: func() {}`. Both source repos also left this effectively empty, so it's not a merger regression, just a pre-existing TODO carried over. ClickHouse / S3 connections won't be closed on shutdown.
+
+## Fine-grained CloudEvent grants — RESTORED
+
+Telemetry-api could honor a narrow `cloud_events` JWT claim (authorize specific event types / sources / ids rather than "read all"); fetch-api never had this, and the merged service inherited fetch-api's coarse-only check. The capability is now restored at the GraphQL/MCP layer in `internal/graph/auth_helpers.go`:
+
+- `requireSubjectOptsByDID` now authorizes a CloudEvent request via **either** the existing full-access permissions (`GetRawData`, or `GetLocationHistory` + `GetNonLocationHistory`) **or** a covering `cloud_events` grant, evaluated independently of the permissions enum. Subject-DID scoping still applies in both cases.
+- Enforcement is up-front and fail-closed (`cloudEventRequestAllowed` / `grantCovers`, ported from telemetry-api's `validCloudEventRequest`): a request is allowed only if its filter falls entirely within a single grant; unset filter dimensions default to the `*` wildcard. We validate rather than post-filter results, so a request that can't be fully served is rejected instead of partially serviced.
+- The single chokepoint covers all three resolvers (`cloudEvents`, `latestCloudEvent`, `availableCloudEventTypes`) and the MCP surface (same resolvers via `@mcpTool`). Tests in `internal/graph/cloud_events_auth_test.go`.
+- **Out of scope:** the internal gRPC `FetchService` remains an unauthenticated, network-isolated, trusted surface by design — grants are not enforced there. Grant `tags` are not checked (no `tags` field on `CloudEventFilter`; telemetry-api ignored them too).
