@@ -12,6 +12,8 @@ import (
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/dq/internal/service/ch"
 	"github.com/DIMO-Network/dq/internal/service/duck"
+	"github.com/DIMO-Network/dq/pkg/eventrepo"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/rs/zerolog"
 )
@@ -61,33 +63,35 @@ func isLocalBucket(bucket string) bool {
 }
 
 // newQueryBackend selects the Repository backend per QUERY_BACKEND. It
-// returns the backend, a cleanup function (always non-nil), and an error for
-// unknown backend values. The clickhouse backend (default) needs no DuckDB
-// resources at all.
-func newQueryBackend(settings *config.Settings, chService *ch.Service, logger zerolog.Logger) (repositories.CHService, func(), error) {
+// returns the backend, the DuckDB service (nil for clickhouse mode), a cleanup
+// function (always non-nil), and an error for unknown backend values. The
+// returned duckSvc (when non-nil) is owned by the cleanup — callers must not
+// close it themselves.
+func newQueryBackend(settings *config.Settings, chService *ch.Service, logger zerolog.Logger) (repositories.CHService, *duck.Service, func(), error) {
 	backend := settings.QueryBackend
 	if backend == "" {
 		backend = config.QueryBackendClickHouse
 	}
 	if backend == config.QueryBackendClickHouse {
-		return chService, func() {}, nil
+		return chService, nil, func() {}, nil
 	}
 
 	duckSvc, err := duck.NewService(duckConfigFromSettings(settings))
 	if err != nil {
-		return nil, nil, fmt.Errorf("couldn't create DuckDB service: %w", err)
+		return nil, nil, nil, fmt.Errorf("couldn't create DuckDB service: %w", err)
 	}
 	switch backend {
 	case config.QueryBackendDuckLake:
 		// Reads and segment detection both come from the DuckLake catalog.
-		return repositories.ComposeBackend(duck.NewLakeQueries(duckSvc), duck.NewLakeSegments(duckSvc)), closeDuck(duckSvc, logger), nil
+		// Return duckSvc so the caller can share it with newEventService.
+		return repositories.ComposeBackend(duck.NewLakeQueries(duckSvc), duck.NewLakeSegments(duckSvc)), duckSvc, closeDuck(duckSvc, logger), nil
 	}
 
 	queries := duck.NewQueries(duckSvc, "")
 	switch backend {
 	case config.QueryBackendDuckDB:
 		// Segment detection is not implemented on DuckDB; it stays on ClickHouse.
-		return repositories.ComposeBackend(queries, chService), closeDuck(duckSvc, logger), nil
+		return repositories.ComposeBackend(queries, chService), duckSvc, closeDuck(duckSvc, logger), nil
 	case config.QueryBackendShadow:
 		// secondarySegment shadows segment detection against the lake when the
 		// catalog DSN is configured (DuckLakeEnabled is set above for this case).
@@ -102,11 +106,52 @@ func newQueryBackend(settings *config.Settings, chService *ch.Service, logger ze
 			shadow.Wait()
 			closeDuck(duckSvc, logger)()
 		}
-		return shadow, cleanup, nil
+		return shadow, duckSvc, cleanup, nil
 	default:
 		_ = duckSvc.Close()
-		return nil, nil, fmt.Errorf("unknown QUERY_BACKEND %q (expected %s, %s, %s, or %s)",
+		return nil, nil, nil, fmt.Errorf("unknown QUERY_BACKEND %q (expected %s, %s, %s, or %s)",
 			settings.QueryBackend, config.QueryBackendClickHouse, config.QueryBackendDuckDB, config.QueryBackendShadow, config.QueryBackendDuckLake)
+	}
+}
+
+// newEventService selects the cloudevent fetch backend per QUERY_BACKEND.
+// ducklake → lake.raw_events (no ClickHouse client constructed).
+// shadow → ShadowEventService (CH primary + lake secondary).
+// everything else → ClickHouse cloud_event index.
+//
+// duckSvc must be non-nil when the backend is ducklake or shadow (the same
+// catalog-attached service returned by newQueryBackend). s3Client must be
+// non-nil for all backends.
+func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client *s3.Client) (eventrepo.EventService, error) {
+	presigner := s3.NewPresignClient(s3Client)
+	bucket := settings.ParquetBucket
+
+	switch settings.QueryBackend {
+	case config.QueryBackendDuckLake:
+		// No ClickHouse client is created in this branch.
+		return duck.NewLakeEventService(duckSvc, presigner, bucket), nil
+
+	case config.QueryBackendShadow:
+		// Build a CH event service as primary.
+		chConn, err := chClientFromSettings(&settings.ClickhouseFileCatalogue)
+		if err != nil {
+			return nil, fmt.Errorf("ClickHouse connection for shadow event repo: %w", err)
+		}
+		chEvtSvc := eventrepo.New(chConn, s3Client, presigner, bucket)
+		if duckSvc == nil {
+			// No catalog DSN configured — shadow fetch not possible; serve from CH.
+			return chEvtSvc, nil
+		}
+		lakeSvc := duck.NewLakeEventService(duckSvc, presigner, bucket)
+		return eventrepo.NewShadowEventService(chEvtSvc, lakeSvc), nil
+
+	default:
+		// clickhouse, duckdb, or unset: build a CH event service.
+		chConn, err := chClientFromSettings(&settings.ClickhouseFileCatalogue)
+		if err != nil {
+			return nil, fmt.Errorf("ClickHouse connection for event repo: %w", err)
+		}
+		return eventrepo.New(chConn, s3Client, presigner, bucket), nil
 	}
 }
 
