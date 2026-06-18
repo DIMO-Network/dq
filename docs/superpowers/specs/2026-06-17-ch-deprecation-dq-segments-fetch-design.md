@@ -199,3 +199,104 @@ implementation alongside the existing ClickHouse one.
 - rewards-api → lake (decommission gate).
 - vehicle-burn-processor → lake-delete.
 - din deploy + DIS cutover, then CH teardown.
+
+## Known limitations & cutover runbook (lake vs ClickHouse)
+
+The items below are accepted divergences between `QUERY_BACKEND=ducklake` and the current ClickHouse
+path. A human operator must review each before flipping `QUERY_BACKEND=ducklake` in production.
+
+---
+
+### 1. Lake fetch `Or`-clauses error out (`errOrClauseUnsupported`)
+
+**Behavior:** gRPC clients that send `StringFilterOption.Or` or `ArrayFilterOption.Or` fields in
+`AdvancedSearchOptions` receive a hard gRPC error (`codes.Unknown` wrapping
+`errOrClauseUnsupported`). ClickHouse translates `Or` to `OR`-joined SQL conditions and returns
+results normally.
+
+**Consumer path:** gRPC only (`FetchService.ListIndexesAdvanced`, `GetLatestIndexAdvanced`). GraphQL
+resolvers do not use `Or` filters.
+
+**Shadow-detectable:** Yes — the lake path returns an error that the shadow harness logs as
+`dq_fetch_shadow_error_total{path="list_indexes_advanced",reason="or_clause_unsupported"}`.
+
+**Action:** Implement `Or` clause translation in `filterFromAdvanced` (recursively build `OR`-joined
+`IN`/`NOT IN` SQL) before retiring fetch-api if any gRPC consumer sends `Or` filters.
+
+---
+
+### 2. gRPC `ListIndexes` / `ListCloudEvents` empty result returns `OK` + empty list (not `codes.NotFound`)
+
+**Behavior:** When no events match, ClickHouse `ListIndexesAdvanced` returns `sql.ErrNoRows` which
+the gRPC server maps to `codes.NotFound`. The lake `LakeEventService.ListIndexesAdvanced` returns
+`nil, nil` (empty slice, no error), so the gRPC layer sends `OK` with an empty list.
+
+**Consumer path:** gRPC clients that branch on `codes.NotFound` vs `OK`. GraphQL resolvers treat
+empty slices and not-found uniformly — unaffected.
+
+**Shadow-detectable:** Partially. Shadow compares result sets; a `NotFound` vs empty-OK difference
+shows up as a non-error response on the lake side with zero items when CH returned an error.
+
+**Action:** Accept the behavior change. gRPC clients should be updated to treat `OK` + empty list
+equivalently to `NotFound` (idiomatic gRPC). Coordinate with fetch-api consumers before cutover.
+
+---
+
+### 3. (HIGHEST PRIORITY) gRPC blob payloads return empty `data` for blob rows
+
+**Behavior:** `LakeEventService.GetCloudEventFromIndex` returns only the inline `data` column from
+`lake.raw_events`. For blob rows (large payloads stored in S3 under `cloudevent/blobs/`, referenced
+by `data_index_key`), the inline `data` column is NULL, so the returned `RawEvent.Data` is empty.
+ClickHouse `eventrepo.GetCloudEventFromIndex` fetches the full payload bytes from S3 (parquet or
+legacy JSON path) and returns them inline.
+
+**Consumer path:** gRPC `FetchService.GetCloudEvent` and `ListCloudEvents` for blob events.
+GraphQL resolvers use `PresignBlobURL` (keyed on `BlobKeyPrefix` → `data_index_key`) to generate a
+presigned URL — unaffected, the presign path works correctly.
+
+**Shadow-detectable:** No. Payload fetch methods (`GetCloudEventFromIndex`,
+`ListCloudEventsFromIndexes`) are primary-only in `ShadowEventService`; they are not mirrored to the
+lake in shadow mode, so divergence is invisible until the lake path is primary.
+
+**Action: This must be fixed before retiring fetch-api gRPC for any consumer that reads blob
+payloads.** Implement S3 blob fetch in `LakeEventService.GetCloudEventFromIndex`: when
+`ev.DataIndexKey` starts with `BlobKeyPrefix`, fetch the bytes from S3 (reuse the parquet or
+presigned-GET path, matching `eventrepo.getCloudEventFromParquet` / `getObjectFromS3`). This is the
+highest-priority residual gap blocking gRPC cutover.
+
+---
+
+### 4. Ignition segment >30-day-continuously-ON suppressed on lake vs emitted on CH
+
+**Behavior:** The lake segment detector uses a 30-day `LAG()` lookback window cap on
+`lake.signals`. A vehicle that has been continuously ignition-ON for more than 30 days will not have
+a visible prior ignition-OFF within the lookback window; the opening segment boundary is suppressed,
+and the segment does not appear in lake results. ClickHouse emits the segment because its ignition
+history is unbounded.
+
+**Consumer path:** Both GraphQL (`segments`, `dailyActivity`) and gRPC segment consumers.
+
+**Shadow-detectable:** Yes — segment comparison in shadow mode (`dq_shadow_mismatch_total` with
+`surface="segments"`) will surface the delta for any vehicle in this state.
+
+**Action:** Accept as a known edge case for initial cutover. Monitor shadow metrics. If active
+vehicles in production trigger the delta, extend the lookback window beyond 30 days or backfill an
+ignition-state checkpoint column.
+
+---
+
+### 5. `app.New` resource cleanup skipped on 3 fatal late-startup config errors (JWT / limiter / MCP)
+
+**Behavior:** When `app.New` returns early due to a fatal configuration error in the JWT validator,
+rate-limiter, or MCP handler setup, resources allocated earlier in startup (DB connections, DuckDB
+catalog) are not explicitly cleaned up before the process calls `log.Fatal`. The OS reclaims all
+resources on process exit; there is no resource leak in practice.
+
+**Consumer path:** Affects the startup-failure code path only — not a runtime divergence between
+lake and CH. Both backends share this `app.New` behavior.
+
+**Shadow-detectable:** N/A (startup-only).
+
+**Action:** Tidy-up only. Refactor `app.New` to use a cleanup function (e.g., `defer cleanup()` with
+early-return error propagation) so late-startup failures call `Close()` on already-opened resources.
+Not a blocker for `QUERY_BACKEND=ducklake` cutover.
