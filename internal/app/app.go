@@ -165,7 +165,10 @@ func noOp(ctx context.Context, obj interface{}, next graphql.Resolver) (res inte
 
 // CreateGRPCServer creates a new gRPC server wired to the event service.
 // In ducklake mode no ClickHouse client is constructed.
-func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.Server, error) {
+// The returned cleanup function releases the underlying duck.Service (DuckDB
+// connection + catalog attach) and must be called after the server has stopped
+// serving (e.g. after GracefulStop returns).
+func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.Server, func(), error) {
 	// Build a duck.Service for backends that need the catalog.
 	// chService is nil in ducklake mode; newQueryBackend handles that.
 	var chSvc *ch.Service
@@ -173,24 +176,20 @@ func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.
 		var err error
 		chSvc, err = ch.NewService(*settings)
 		if err != nil {
-			return nil, fmt.Errorf("creating ClickHouse service for gRPC: %w", err)
+			return nil, nil, fmt.Errorf("creating ClickHouse service for gRPC: %w", err)
 		}
 	}
 
 	_, duckSvc, cleanup, err := newQueryBackend(settings, chSvc, *logger)
 	if err != nil {
-		return nil, fmt.Errorf("creating query backend for gRPC: %w", err)
+		return nil, nil, fmt.Errorf("creating query backend for gRPC: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			cleanup()
-		}
-	}()
 
 	s3Client := s3ClientFromSettings(settings)
 	eventService, err := newEventService(settings, duckSvc, s3Client)
 	if err != nil {
-		return nil, fmt.Errorf("creating event service for gRPC: %w", err)
+		cleanup()
+		return nil, nil, fmt.Errorf("creating event service for gRPC: %w", err)
 	}
 
 	buckets := []string{settings.CloudEventBucket, settings.EphemeralBucket, settings.ParquetBucket}
@@ -205,7 +204,7 @@ func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.
 	)
 	fetchgrpc.RegisterFetchServiceServer(server, rpcServer)
 
-	return server, nil
+	return server, cleanup, nil
 }
 
 func newServer(es graphql.ExecutableSchema) *handler.Server {
