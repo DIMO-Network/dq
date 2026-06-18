@@ -262,8 +262,13 @@ func TestRefuelDetectorBasicRise(t *testing.T) {
 	d := NewRefuelDetector(src)
 	got, err := d.DetectSegments(context.Background(), "did:1", from, to, nil)
 	require.NoError(t, err)
-	// Should detect at least one refuel segment
-	require.NotEmpty(t, got)
+	// Expect exactly one refuel segment from trough (min(0)/from) to peak (min(7))
+	require.Len(t, got, 1)
+	require.Equal(t, from, got[0].Start.Timestamp)
+	require.NotNil(t, got[0].End)
+	require.Equal(t, min(7), got[0].End.Timestamp)
+	require.Equal(t, 420, got[0].Duration) // 7 minutes = 420 seconds
+	require.False(t, got[0].IsOngoing)
 }
 
 func TestRefuelDetectorNoRise(t *testing.T) {
@@ -363,7 +368,13 @@ func TestRechargeDetectorSocRiseWithStationaryOdo(t *testing.T) {
 	d := NewRechargeDetector(src)
 	got, err := d.DetectSegments(context.Background(), "did:1", from, to, nil)
 	require.NoError(t, err)
-	require.NotEmpty(t, got)
+	// Expect exactly one recharge segment: smoothed SoC (window=11) spans min(5)–min(15)
+	require.Len(t, got, 1)
+	require.Equal(t, min(5), got[0].Start.Timestamp)
+	require.NotNil(t, got[0].End)
+	require.Equal(t, min(15), got[0].End.Timestamp)
+	require.Equal(t, 600, got[0].Duration) // 10 minutes = 600 seconds
+	require.False(t, got[0].IsOngoing)
 }
 
 func TestRechargeDetectorSocRiseWithMovingOdoFiltered(t *testing.T) {
