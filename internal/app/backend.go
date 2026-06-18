@@ -138,7 +138,7 @@ func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client 
 			return nil, fmt.Errorf("ClickHouse connection for shadow event repo: %w", err)
 		}
 		chEvtSvc := eventrepo.New(chConn, s3Client, presigner, bucket)
-		if duckSvc == nil {
+		if settings.DuckLakeCatalogDSN == "" {
 			// No catalog DSN configured — shadow fetch not possible; serve from CH.
 			return chEvtSvc, nil
 		}
