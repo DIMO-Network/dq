@@ -2,8 +2,8 @@ package duck
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,9 +11,11 @@ import (
 	"github.com/DIMO-Network/cloudevent"
 )
 
-// ErrNotFound reports that a query matched no stored cloud event. Callers
-// (e.g. the eventrepo facade) use errors.Is to tell absence from I/O failure.
-var ErrNotFound = errors.New("cloud event not found")
+// ErrNotFound reports that a query matched no stored cloud event. It wraps
+// sql.ErrNoRows so that errors.Is(err, sql.ErrNoRows) is true — matching the
+// behaviour of the ClickHouse eventrepo.Service, which the gRPC layer uses to
+// map absence to codes.NotFound.
+var ErrNotFound = fmt.Errorf("cloud event not found: %w", sql.ErrNoRows)
 
 // DefaultRawScanWindowDays bounds date-unbounded raw queries. Older data is
 // reachable with explicit time bounds; LatestCloudEvent walks past it.

@@ -2,6 +2,7 @@ package duck
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // newLakeEventServiceForTest opens a DuckLake file catalog, creates the
@@ -440,4 +442,34 @@ func TestLakeEventService_GetCloudEventFromIndex_ErrNotFound(t *testing.T) {
 	_, err := lsvc.GetCloudEventFromIndex(ctx, ghost, "")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrNotFound))
+}
+
+// --- Fix 1 tests ---
+
+// TestErrNotFoundWrapsSQLErrNoRows verifies Fix 1: ErrNotFound wraps
+// sql.ErrNoRows so that the gRPC layer can map it to codes.NotFound.
+func TestErrNotFoundWrapsSQLErrNoRows(t *testing.T) {
+	require.ErrorIs(t, ErrNotFound, sql.ErrNoRows,
+		"ErrNotFound must wrap sql.ErrNoRows for gRPC NotFound mapping")
+}
+
+// TestGetLatestIndexAdvanced_ErrNotFound_WrapsErrNoRows verifies that an empty
+// subject triggers ErrNotFound that satisfies both errors.Is(err, ErrNotFound)
+// AND errors.Is(err, sql.ErrNoRows).
+func TestGetLatestIndexAdvanced_ErrNotFound_WrapsErrNoRows(t *testing.T) {
+	ctx := context.Background()
+	lsvc, _ := newLakeEventServiceForTest(t)
+
+	_, err := lsvc.GetLatestIndexAdvanced(ctx, &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{"did:nobody"}},
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNotFound, "empty subject must return ErrNotFound")
+	require.ErrorIs(t, err, sql.ErrNoRows,
+		"ErrNotFound must satisfy errors.Is(err, sql.ErrNoRows) for gRPC layer")
+}
+
+// timestampProto converts a time.Time to a *timestamppb.Timestamp for test helpers.
+func timestampProto(_ *testing.T, ts time.Time) *timestamppb.Timestamp {
+	return timestamppb.New(ts)
 }
