@@ -46,30 +46,32 @@ const (
 )
 
 // ShadowBackend serves every query from the primary backend while replaying
-// the signal/latest/summary/event queries against the secondary (DuckDB)
-// backend in the background and comparing results. Mismatches and secondary
+// the signal/latest/summary/event/segment queries against the secondary
+// backends in the background and comparing results. Mismatches and secondary
 // errors are logged and counted; they never affect the primary response.
-// Segment detection (not implemented on DuckDB) passes through primary only.
 type ShadowBackend struct {
-	primary   CHService
-	secondary Backend
-	log       zerolog.Logger
-	sem       chan struct{}
-	timeout   time.Duration
-	wg        sync.WaitGroup
+	primary          CHService
+	secondary        Backend
+	secondarySegment SegmentsBackend
+	log              zerolog.Logger
+	sem              chan struct{}
+	timeout          time.Duration
+	wg               sync.WaitGroup
 }
 
 var _ CHService = (*ShadowBackend)(nil)
 
 // NewShadowBackend creates a ShadowBackend with bounded shadow concurrency
-// and a per-call timeout for the secondary backend.
-func NewShadowBackend(primary CHService, secondary Backend, log zerolog.Logger) *ShadowBackend {
+// and a per-call timeout for the secondary backend. secondarySegment may be
+// nil, in which case GetSegments shadows are skipped (treated as match).
+func NewShadowBackend(primary CHService, secondary Backend, secondarySegment SegmentsBackend, log zerolog.Logger) *ShadowBackend {
 	return &ShadowBackend{
-		primary:   primary,
-		secondary: secondary,
-		log:       log.With().Str("component", "shadow").Logger(),
-		sem:       make(chan struct{}, defaultShadowMaxConcurrency),
-		timeout:   defaultShadowTimeout,
+		primary:          primary,
+		secondary:        secondary,
+		secondarySegment: secondarySegment,
+		log:              log.With().Str("component", "shadow").Logger(),
+		sem:              make(chan struct{}, defaultShadowMaxConcurrency),
+		timeout:          defaultShadowTimeout,
 	}
 }
 
@@ -228,10 +230,19 @@ func (s *ShadowBackend) GetEventSummaries(ctx context.Context, subject string) (
 	return res, err
 }
 
-// GetSegments passes through to the primary only; segment detection is not
-// implemented on the DuckDB backend.
+// GetSegments serves from the primary and shadows to secondarySegment when
+// one is configured. A nil secondarySegment skips the shadow (treated as
+// match).
 func (s *ShadowBackend) GetSegments(ctx context.Context, subject string, from, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig) ([]*model.Segment, error) {
-	return s.primary.GetSegments(ctx, subject, from, to, mechanism, config)
+	res, err := s.primary.GetSegments(ctx, subject, from, to, mechanism, config)
+	args := fmt.Sprintf("%s mechanism=%s", subjectRange(subject, from, to), mechanism)
+	s.shadow("GetSegments", args, res, err, func(ctx context.Context) (any, error) {
+		if s.secondarySegment == nil {
+			return res, nil // no secondary configured; treat as match
+		}
+		return s.secondarySegment.GetSegments(ctx, subject, from, to, mechanism, config)
+	})
+	return res, err
 }
 
 var (

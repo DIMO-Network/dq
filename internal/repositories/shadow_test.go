@@ -97,7 +97,9 @@ func newTestShadow(primary CHService, secondary Backend, logOut *bytes.Buffer) *
 	if logOut != nil {
 		logger = zerolog.New(logOut)
 	}
-	return NewShadowBackend(primary, secondary, logger)
+	// nil secondarySegment: segment shadow tests use a dedicated constructor
+	// or pass nil when they only care about the signal/event shadow surface.
+	return NewShadowBackend(primary, secondary, nil, logger)
 }
 
 func TestShadowMatchNoMismatch(t *testing.T) {
@@ -254,11 +256,47 @@ func TestShadowGetSegmentsPrimaryOnly(t *testing.T) {
 	t.Parallel()
 	segs := []*model.Segment{{}}
 	primary := &fakePrimary{segments: segs}
+	// nil secondarySegment: shadow skips comparison, returns primary result.
 	shadow := newTestShadow(primary, &fakeBackend{}, nil)
 
 	res, err := shadow.GetSegments(context.Background(), "did:test:1", time.Now().Add(-time.Hour), time.Now(), model.DetectionMechanismIdling, nil)
 	require.NoError(t, err)
 	assert.Equal(t, segs, res)
+}
+
+func TestShadowGetSegmentsWithSecondaryMatch(t *testing.T) {
+	t.Parallel()
+	segs := []*model.Segment{{Duration: 300}}
+	primary := &fakePrimary{segments: segs}
+	secondary := &fakePrimary{segments: segs} // identical result
+	logger := zerolog.Nop()
+	shadow := NewShadowBackend(primary, &fakeBackend{}, secondary, logger)
+
+	mismatchBefore := counterValue(t, shadowMismatchTotal, "GetSegments")
+	res, err := shadow.GetSegments(context.Background(), "did:test:1", time.Now().Add(-time.Hour), time.Now(), model.DetectionMechanismIdling, nil)
+	require.NoError(t, err)
+	assert.Equal(t, segs, res)
+	shadow.Wait()
+
+	assert.Equal(t, mismatchBefore, counterValue(t, shadowMismatchTotal, "GetSegments"), "identical segment results must not bump mismatch counter")
+}
+
+func TestShadowGetSegmentsWithSecondaryMismatch(t *testing.T) {
+	t.Parallel()
+	primary := &fakePrimary{segments: []*model.Segment{{Duration: 300}}}
+	secondary := &fakePrimary{segments: []*model.Segment{{Duration: 600}}} // different duration
+	var logOut bytes.Buffer
+	logger := zerolog.New(&logOut)
+	shadow := NewShadowBackend(primary, &fakeBackend{}, secondary, logger)
+
+	mismatchBefore := counterValue(t, shadowMismatchTotal, "GetSegments")
+	res, err := shadow.GetSegments(context.Background(), "did:test:1", time.Now().Add(-time.Hour), time.Now(), model.DetectionMechanismIdling, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 300, res[0].Duration, "primary result must be served untouched")
+	shadow.Wait()
+
+	assert.Equal(t, mismatchBefore+1, counterValue(t, shadowMismatchTotal, "GetSegments"), "differing durations must bump mismatch counter")
+	assert.Contains(t, logOut.String(), "shadow result mismatch")
 }
 
 func TestDiffValuesFloatEpsilon(t *testing.T) {
