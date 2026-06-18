@@ -43,7 +43,11 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		Bucket:               bucket,
 		RawPrefix:            settings.RawPrefix,
 		DecodedPrefix:        settings.DecodedPrefix,
-		DuckLakeEnabled:      settings.QueryBackend == config.QueryBackendDuckLake,
+		// Enable the DuckLake catalog when running ducklake mode or shadow mode
+		// with a catalog DSN configured — shadow needs it to compare segment
+		// detection results from the lake against the primary ClickHouse backend.
+		DuckLakeEnabled: settings.QueryBackend == config.QueryBackendDuckLake ||
+			(settings.QueryBackend == config.QueryBackendShadow && settings.DuckLakeCatalogDSN != ""),
 		CatalogDSN:           settings.DuckLakeCatalogDSN,
 		DataPath:             settings.DuckLakeDataPath,
 	}
@@ -75,9 +79,8 @@ func newQueryBackend(settings *config.Settings, chService *ch.Service, logger ze
 	}
 	switch backend {
 	case config.QueryBackendDuckLake:
-		// Reads come from the DuckLake catalog tables; segment detection
-		// stays on ClickHouse.
-		return repositories.ComposeBackend(duck.NewLakeQueries(duckSvc), chService), closeDuck(duckSvc, logger), nil
+		// Reads and segment detection both come from the DuckLake catalog.
+		return repositories.ComposeBackend(duck.NewLakeQueries(duckSvc), duck.NewLakeSegments(duckSvc)), closeDuck(duckSvc, logger), nil
 	}
 
 	queries := duck.NewQueries(duckSvc, "")
@@ -86,7 +89,15 @@ func newQueryBackend(settings *config.Settings, chService *ch.Service, logger ze
 		// Segment detection is not implemented on DuckDB; it stays on ClickHouse.
 		return repositories.ComposeBackend(queries, chService), closeDuck(duckSvc, logger), nil
 	case config.QueryBackendShadow:
-		shadow := repositories.NewShadowBackend(chService, queries, logger)
+		// secondarySegment shadows segment detection against the lake when the
+		// catalog DSN is configured (DuckLakeEnabled is set above for this case).
+		// When no catalog DSN is present, pass nil — the shadow skips segment
+		// comparison and treats every call as a match (nil-guard in ShadowBackend).
+		var secondarySegment repositories.SegmentsBackend
+		if settings.DuckLakeCatalogDSN != "" {
+			secondarySegment = duck.NewLakeSegments(duckSvc)
+		}
+		shadow := repositories.NewShadowBackend(chService, queries, secondarySegment, logger)
 		cleanup := func() {
 			shadow.Wait()
 			closeDuck(duckSvc, logger)()

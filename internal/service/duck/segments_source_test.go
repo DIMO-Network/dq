@@ -105,7 +105,7 @@ func TestLakeSignalSource_LevelSamples(t *testing.T) {
 	subject := testSubject1
 	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
 
-	insertSignal(t, svc, subject, "powertrainCombustionEngineRPM", "ce-1", base.Add(0), 1000)
+	insertSignal(t, svc, subject, "powertrainCombustionEngineRPM", "ce-1", base, 1000)
 	insertSignal(t, svc, subject, "powertrainCombustionEngineRPM", "ce-2", base.Add(5*time.Second), 1200)
 	insertSignal(t, svc, subject, "powertrainCombustionEngineRPM", "ce-3", base.Add(10*time.Second), 900)
 	// Duplicate timestamp — should be deduped.

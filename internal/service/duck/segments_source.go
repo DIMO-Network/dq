@@ -43,6 +43,9 @@ func (s *LakeSignalSource) WindowedSignalCounts(ctx context.Context, subject str
 	// Use // (integer division) to avoid DOUBLE promotion (same reason aggregations.go uses //).
 	bucketExpr := fmt.Sprintf("make_timestamp(((epoch_us(timestamp) - %d) // %d) * %d + %d)",
 		fromUS, winUS, winUS, fromUS)
+	// CAST(%d AS BIGINT): winUS is the window size in microseconds (int64); the
+	// CAST ties directly to the winUS format arg, preventing arg-count mismatches
+	// if the query is refactored.
 	q := fmt.Sprintf(`
 SELECT window_start,
        make_timestamp(epoch_us(window_start) + CAST(%d AS BIGINT)) AS window_end,
