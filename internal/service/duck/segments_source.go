@@ -27,9 +27,14 @@ func NewLakeSignalSource(svc *Service) *LakeSignalSource {
 // bucketed to windowSizeSeconds, keeping only windows meeting the count and
 // distinct-count thresholds, ordered by window start.
 //
-// Time bucketing uses epoch-microsecond floor arithmetic (identical to the
-// aggregations.go approach) so behaviour is consistent across the codebase and
-// there are no interval-type edge cases.
+// Buckets are epoch-aligned (origin = Unix epoch 1970-01-01T00:00:00Z), matching
+// ClickHouse's toStartOfInterval(timestamp, INTERVAL N second) exactly. Both
+// functions floor to the nearest multiple of the window size measured from the
+// epoch, so [00:00:00,00:01:00), [00:01:00,00:02:00), ... regardless of `from`.
+// A `from` that is not a multiple of the window size does NOT shift bucket
+// boundaries — only the filter range changes.
+//
+// Use // (integer division, not /) to avoid DOUBLE promotion in DuckDB.
 //
 // lake.signals has no unique constraint per (subject,name,timestamp): duplicate
 // rows can be present across materializer batches. The inner QUALIFY dedup
@@ -39,10 +44,11 @@ func (s *LakeSignalSource) WindowedSignalCounts(ctx context.Context, subject str
 	winUS := int64(win) * 1_000_000
 	fromUS := from.UTC().UnixMicro()
 	toUS := to.UTC().UnixMicro()
-	// Bucket expression: floor(ts, win) aligned to epoch (same as aggregations.go).
-	// Use // (integer division) to avoid DOUBLE promotion (same reason aggregations.go uses //).
-	bucketExpr := fmt.Sprintf("make_timestamp(((epoch_us(timestamp) - %d) // %d) * %d + %d)",
-		fromUS, winUS, winUS, fromUS)
+	// Epoch-aligned bucket: floor(epoch_us(ts), winUS).
+	// This matches CH toStartOfInterval which also uses epoch as origin.
+	// Do NOT subtract fromUS here — that was the parity bug (from-aligned != epoch-aligned).
+	bucketExpr := fmt.Sprintf("make_timestamp((epoch_us(timestamp) // CAST(%d AS BIGINT)) * CAST(%d AS BIGINT))",
+		winUS, winUS)
 	// CAST(%d AS BIGINT): winUS is the window size in microseconds (int64); the
 	// CAST ties directly to the winUS format arg, preventing arg-count mismatches
 	// if the query is refactored.
@@ -136,8 +142,15 @@ func (s *LakeSignalSource) IgnitionStateChanges(ctx context.Context, subject str
 	//
 	// Note: value_number for isIgnitionOn is 0.0 or 1.0 (numeric bool).
 	// A transition is a row where new_state != prev_state.
-	// coalesce(prev_state, -1) ensures the very first row in the window is
-	// always treated as a transition (prev_state IS NULL means no predecessor).
+	// coalesce(lag(...), -1): if a vehicle has been ON continuously for MORE than
+	// the 30-day lookback (no OFF event in the window), this LAG yields NULL for
+	// the very first row and coalesce maps it to -1, so that row is NOT emitted as
+	// a transition (prev_state=-1 != new_state=1 is true, but effectively the
+	// ongoing segment is suppressed). CH's pre-materialized signal_state_changes
+	// stores prev_state=0 for the ongoing segment even outside the lookback window,
+	// so CH DOES emit that row. This is a known, intentional divergence: it is an
+	// accepted consequence of the 30-day lookback cap design decision. Shadow mode
+	// will surface affected vehicles; no logic change is warranted here.
 	q := fmt.Sprintf(`
 WITH deduped AS (
   SELECT timestamp, value_number

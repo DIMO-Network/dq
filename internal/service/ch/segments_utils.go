@@ -10,9 +10,10 @@ import (
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
-// ActiveWindow represents a time window with sufficient signal activity.
-// Used by frequency and changepoint detectors.
-type ActiveWindow struct {
+// activeWindow represents a time window with sufficient signal activity.
+// Used by frequency and changepoint detectors (ch-internal only; converted to
+// segments.ActiveWindow before being returned to callers outside this package).
+type activeWindow struct {
 	WindowStart         time.Time
 	WindowEnd           time.Time
 	SignalCount         uint64
@@ -33,7 +34,7 @@ func getWindowedSignalCounts(
 	windowSizeSeconds int,
 	signalThreshold int,
 	distinctSignalThreshold int,
-) (_ []ActiveWindow, retErr error) {
+) (_ []activeWindow, retErr error) {
 	query := fmt.Sprintf(`
 SELECT
     toStartOfInterval(timestamp, INTERVAL ? second) AS window_start,
@@ -55,9 +56,9 @@ ORDER BY window_start`, dateTime64Micro(from), dateTime64Micro(to))
 	defer func() { retErr = errors.Join(retErr, rows.Close()) }()
 
 	expectedWindows := int(to.Sub(from).Seconds()) / windowSizeSeconds
-	windows := make([]ActiveWindow, 0, expectedWindows)
+	windows := make([]activeWindow, 0, expectedWindows)
 	for rows.Next() {
-		var w ActiveWindow
+		var w activeWindow
 		if err := rows.Scan(&w.WindowStart, &w.WindowEnd, &w.SignalCount, &w.DistinctSignalCount); err != nil {
 			return nil, fmt.Errorf("failed to scan windowed signal count row: %w", err)
 		}

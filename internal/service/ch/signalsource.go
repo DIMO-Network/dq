@@ -24,7 +24,7 @@ func (c chSignalSource) WindowedSignalCounts(ctx context.Context, subject string
 	}
 	out := make([]segments.ActiveWindow, len(ws))
 	for i, w := range ws {
-		out[i] = segments.ActiveWindow(w) // identical field layout
+		out[i] = segments.ActiveWindow(w) // activeWindow has identical field layout
 	}
 	return out, nil
 }

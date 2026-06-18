@@ -96,6 +96,78 @@ func TestLakeSignalSource_WindowedSignalCounts(t *testing.T) {
 	assert.EqualValues(t, 3, w2.DistinctSignalCount)
 }
 
+// TestLakeSignalSource_WindowedSignalCounts_EpochAligned is the regression guard
+// for the parity bug: window buckets must be epoch-aligned (like CH's
+// toStartOfInterval), NOT aligned to the `from` argument.
+//
+// Setup: from = HH:MM:30 (30s past a minute boundary), win = 60s.
+//   - Signal A at HH:MM:00  → must land in [HH:MM:00, HH:MM+1:00) — epoch-aligned
+//   - Signal B at HH:MM:59  → same bucket as A
+//   - Signal C at HH:MM:00  → same bucket as A (same name, dedup collapses with A)
+//   - Signal D at HH:MM+1:00 → lands in [HH:MM+1:00, HH:MM+2:00) — next bucket
+//   - Signal E at HH:MM+1:30 → same bucket as D
+//
+// With from-alignment (the OLD buggy behaviour) from=HH:MM:30 would give buckets
+// [HH:MM:30, HH:MM+1:30) and [HH:MM+1:30, ...), so A & B & D & E would all land
+// in the same first bucket and C (same ts as A, different ceID) would dedup away.
+// With epoch alignment we get two distinct buckets as described above.
+func TestLakeSignalSource_WindowedSignalCounts_EpochAligned(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeServiceForTest(t)
+	src := NewLakeSignalSource(svc)
+
+	subject := testSubject2
+	win := 60
+
+	// Use a base that is on a clean minute boundary for easy reasoning.
+	// The minute is 2026-04-01 12:34:00 UTC.
+	minuteBase := time.Date(2026, 4, 1, 12, 34, 0, 0, time.UTC)
+
+	// from is 30 seconds PAST the minute boundary — deliberately non-aligned.
+	from := minuteBase.Add(30 * time.Second)
+	// to covers two full minutes from from.
+	to := from.Add(2 * time.Minute)
+
+	// Bucket 1 (epoch-aligned): [12:34:00, 12:35:00)
+	//   Signal A at 12:34:00 — exactly on the epoch-aligned boundary, inside [from, to) is false!
+	//   Wait: from = 12:34:30, so 12:34:00 < from. We need signals >= from to be counted.
+	//   Use signals at 12:34:30 and 12:34:59 — both inside [from, to) AND in [12:34:00,12:35:00).
+	tA := minuteBase.Add(30 * time.Second) // 12:34:30 — == from, included
+	tB := minuteBase.Add(59 * time.Second) // 12:34:59 — still in [12:34:00,12:35:00)
+
+	// Bucket 2 (epoch-aligned): [12:35:00, 12:36:00)
+	tD := minuteBase.Add(60 * time.Second) // 12:35:00
+	tE := minuteBase.Add(90 * time.Second) // 12:35:30
+
+	// Insert 2 distinct signals into bucket 1 (threshold: sig=2, dist=2).
+	insertSignal(t, svc, subject, "speed", "ep-A", tA, 50)
+	insertSignal(t, svc, subject, "rpm", "ep-B", tB, 1000)
+
+	// Insert 2 distinct signals into bucket 2.
+	insertSignal(t, svc, subject, "speed", "ep-D", tD, 55)
+	insertSignal(t, svc, subject, "rpm", "ep-E", tE, 1100)
+
+	windows, err := src.WindowedSignalCounts(ctx, subject, from, to, win, 2, 2)
+	require.NoError(t, err)
+
+	require.Len(t, windows, 2, "expected exactly 2 epoch-aligned buckets")
+
+	// Bucket 1: epoch-aligned start = 12:34:00, end = 12:35:00.
+	// (NOT 12:34:30 which would be from-aligned — that was the bug.)
+	w0 := windows[0]
+	assert.Equal(t, minuteBase, w0.WindowStart, "bucket 1 start must be epoch-aligned (12:34:00), not from-aligned (12:34:30)")
+	assert.Equal(t, minuteBase.Add(time.Minute), w0.WindowEnd, "bucket 1 end must be 12:35:00")
+	assert.EqualValues(t, 2, w0.SignalCount)
+	assert.EqualValues(t, 2, w0.DistinctSignalCount)
+
+	// Bucket 2: epoch-aligned start = 12:35:00, end = 12:36:00.
+	w1 := windows[1]
+	assert.Equal(t, minuteBase.Add(time.Minute), w1.WindowStart, "bucket 2 start must be 12:35:00")
+	assert.Equal(t, minuteBase.Add(2*time.Minute), w1.WindowEnd, "bucket 2 end must be 12:36:00")
+	assert.EqualValues(t, 2, w1.SignalCount)
+	assert.EqualValues(t, 2, w1.DistinctSignalCount)
+}
+
 // TestLakeSignalSource_LevelSamples verifies timestamp-ordered samples and dedup.
 func TestLakeSignalSource_LevelSamples(t *testing.T) {
 	ctx := context.Background()
