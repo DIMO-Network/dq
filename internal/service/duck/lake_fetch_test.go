@@ -1,0 +1,443 @@
+package duck
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/DIMO-Network/cloudevent"
+	"github.com/DIMO-Network/dq/pkg/eventrepo"
+	"github.com/DIMO-Network/dq/pkg/grpc"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// newLakeEventServiceForTest opens a DuckLake file catalog, creates the
+// lake.raw_events table, and returns a LakeEventService ready for testing.
+// No ClickHouse is required.
+func newLakeEventServiceForTest(t *testing.T) (*LakeEventService, *Service) {
+	t.Helper()
+	svc := newLakeServiceForTest(t) // creates lake-attached Service
+
+	_, err := svc.db.ExecContext(context.Background(), `
+		CREATE TABLE IF NOT EXISTS lake.raw_events (
+			subject          VARCHAR,
+			time             TIMESTAMPTZ,
+			type             VARCHAR,
+			id               VARCHAR,
+			source           VARCHAR,
+			producer         VARCHAR,
+			data_content_type VARCHAR,
+			data_version     VARCHAR,
+			extras           VARCHAR,
+			data             VARCHAR,
+			data_base64      BLOB,
+			data_index_key   VARCHAR,
+			voids_id         VARCHAR
+		)`)
+	require.NoError(t, err)
+
+	return NewLakeEventService(svc, nil, ""), svc
+}
+
+// lakeRawSubj is the test subject DID used across lake-fetch tests.
+const lakeRawSubj = "did:erc721:137:0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF:101"
+
+// insertRawEvent inserts a row directly into lake.raw_events.
+func insertRawEvent(t *testing.T, svc *Service, ev cloudevent.StoredEvent) {
+	t.Helper()
+	var extrasJSON *string
+	if len(ev.Extras) > 0 || ev.Signature != "" || len(ev.Tags) > 0 {
+		// Store non-column fields (signature, tags) into extras before serialising,
+		// mirroring cloudevent.StoreNonColumnFields.
+		m := make(map[string]any, len(ev.Extras))
+		for k, v := range ev.Extras {
+			m[k] = v
+		}
+		if ev.Signature != "" {
+			m["signature"] = ev.Signature
+		}
+		if len(ev.Tags) > 0 {
+			m["tags"] = ev.Tags
+		}
+		b, err := json.Marshal(m)
+		require.NoError(t, err)
+		s := string(b)
+		extrasJSON = &s
+	}
+
+	var dataStr *string
+	if len(ev.Data) > 0 {
+		s := string(ev.Data)
+		dataStr = &s
+	}
+
+	var dataBase64 []byte
+	if ev.DataBase64 != "" {
+		dataBase64 = []byte(ev.DataBase64)
+	}
+
+	var dataIndexKey *string
+	if ev.DataIndexKey != "" {
+		dataIndexKey = &ev.DataIndexKey
+	}
+
+	var voidsID *string
+	if ev.VoidsID != "" {
+		voidsID = &ev.VoidsID
+	}
+
+	_, err := svc.db.ExecContext(context.Background(),
+		`INSERT INTO lake.raw_events
+			(subject, time, type, id, source, producer, data_content_type, data_version,
+			 extras, data, data_base64, data_index_key, voids_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ev.Subject, ev.Time.UTC(),
+		ev.Type, ev.ID, ev.Source, ev.Producer,
+		ev.DataContentType, ev.DataVersion,
+		extrasJSON, dataStr, dataBase64, dataIndexKey, voidsID)
+	require.NoError(t, err)
+}
+
+// mkStoredEvent builds a minimal StoredEvent for test insertion.
+func mkStoredEvent(id, ceType, subject string, ts time.Time) cloudevent.StoredEvent {
+	return cloudevent.StoredEvent{
+		RawEvent: cloudevent.RawEvent{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				SpecVersion: cloudevent.SpecVersion,
+				Type:        ceType,
+				Subject:     subject,
+				Source:      "src-test",
+				Producer:    subject,
+				ID:          id,
+				Time:        ts,
+			},
+			Data: json.RawMessage(`{"v":1}`),
+		},
+	}
+}
+
+// TestLakeEventService_ListIndexesAdvanced verifies newest-first ordering,
+// deduplication, and that voided events and tombstones are excluded.
+func TestLakeEventService_ListIndexesAdvanced(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// Two event types.
+	ev1 := mkStoredEvent("ev-status-1", "dimo.status", lakeRawSubj, now.Add(-3*time.Hour))
+	ev2 := mkStoredEvent("ev-status-2", "dimo.status", lakeRawSubj, now.Add(-2*time.Hour))
+	ev3 := mkStoredEvent("ev-fp-1", "dimo.fingerprint", lakeRawSubj, now.Add(-1*time.Hour))
+
+	// ev4 will be voided by tombstone ev5.
+	ev4 := mkStoredEvent("ev-to-void", "dimo.status", lakeRawSubj, now.Add(-90*time.Minute))
+	ev5 := cloudevent.StoredEvent{
+		RawEvent: cloudevent.RawEvent{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				SpecVersion: cloudevent.SpecVersion,
+				Type:        "dimo.status.tombstone",
+				Subject:     lakeRawSubj,
+				Source:      "src-test",
+				ID:          "tombstone-1",
+				Time:        now.Add(-80*time.Minute),
+			},
+		},
+		VoidsID: "ev-to-void",
+	}
+
+	for _, e := range []cloudevent.StoredEvent{ev1, ev2, ev3, ev4, ev5} {
+		insertRawEvent(t, svc, e)
+	}
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+	}
+
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+
+	// Expected: ev3 (newest), ev2, ev1 — ev4 voided, ev5 tombstone excluded.
+	require.Len(t, indexes, 3, "voided event and tombstone must be excluded")
+	assert.Equal(t, "ev-fp-1", indexes[0].ID, "newest first")
+	assert.Equal(t, "ev-status-2", indexes[1].ID)
+	assert.Equal(t, "ev-status-1", indexes[2].ID)
+
+	for _, idx := range indexes {
+		assert.NotEmpty(t, idx.Data.Key, "ObjectInfo.Key must be set")
+	}
+}
+
+// TestLakeEventService_DedupOnKey verifies that duplicate rows collapse on
+// the header key (subject+time+type+source+id).
+func TestLakeEventService_DedupOnKey(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	dup := mkStoredEvent("dup-1", "dimo.status", lakeRawSubj, now.Add(-time.Hour))
+	// Insert the same event twice (simulates at-least-once ingest).
+	insertRawEvent(t, svc, dup)
+	insertRawEvent(t, svc, dup)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 1, "duplicate rows collapse on header key")
+}
+
+// TestLakeEventService_GetLatestIndexAdvanced verifies newest-non-voided return
+// and ErrNotFound on empty.
+func TestLakeEventService_GetLatestIndexAdvanced(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	older := mkStoredEvent("ev-older", "dimo.status", lakeRawSubj, now.Add(-2*time.Hour))
+	newer := mkStoredEvent("ev-newer", "dimo.status", lakeRawSubj, now.Add(-time.Hour))
+	insertRawEvent(t, svc, older)
+	insertRawEvent(t, svc, newer)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+	}
+	idx, err := lsvc.GetLatestIndexAdvanced(ctx, opts)
+	require.NoError(t, err)
+	assert.Equal(t, "ev-newer", idx.ID, "latest must be newest non-voided event")
+
+	// Empty subject returns ErrNotFound.
+	emptyOpts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{"did:nobody"}},
+	}
+	_, err = lsvc.GetLatestIndexAdvanced(ctx, emptyOpts)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrNotFound), "expected ErrNotFound, got: %v", err)
+}
+
+// TestLakeEventService_GetCloudEventTypeSummariesAdvanced verifies per-type
+// aggregation, excluding voided events.
+func TestLakeEventService_GetCloudEventTypeSummariesAdvanced(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// 2 status events, 1 fingerprint. One status (ev-void) will be voided.
+	ev1 := mkStoredEvent("ev-s1", "dimo.status", lakeRawSubj, now.Add(-4*time.Hour))
+	ev2 := mkStoredEvent("ev-s2", "dimo.status", lakeRawSubj, now.Add(-3*time.Hour))
+	evVoid := mkStoredEvent("ev-void", "dimo.status", lakeRawSubj, now.Add(-2*time.Hour))
+	evFP := mkStoredEvent("ev-fp", "dimo.fingerprint", lakeRawSubj, now.Add(-time.Hour))
+	tomb := cloudevent.StoredEvent{
+		RawEvent: cloudevent.RawEvent{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				SpecVersion: cloudevent.SpecVersion,
+				Type:        "dimo.status.tombstone",
+				Subject:     lakeRawSubj,
+				Source:      "src-test",
+				ID:          "tomb-2",
+				Time:        now.Add(-90*time.Minute),
+			},
+		},
+		VoidsID: "ev-void",
+	}
+
+	for _, e := range []cloudevent.StoredEvent{ev1, ev2, evVoid, evFP, tomb} {
+		insertRawEvent(t, svc, e)
+	}
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+	}
+	summaries, err := lsvc.GetCloudEventTypeSummariesAdvanced(ctx, opts)
+	require.NoError(t, err)
+
+	// Only dimo.status (2, excluding voided) and dimo.fingerprint (1).
+	// tombstone type itself is also excluded (it's a tombstone with voids_id set).
+	require.Len(t, summaries, 2, "tombstone type excluded; voided event excluded from count")
+
+	fpIdx := -1
+	stIdx := -1
+	for i, s := range summaries {
+		switch s.Type {
+		case "dimo.fingerprint":
+			fpIdx = i
+		case "dimo.status":
+			stIdx = i
+		}
+	}
+	require.NotEqual(t, -1, stIdx, "dimo.status must appear")
+	require.NotEqual(t, -1, fpIdx, "dimo.fingerprint must appear")
+
+	assert.EqualValues(t, 2, summaries[stIdx].Count, "voided event excluded from count")
+	assert.EqualValues(t, 1, summaries[fpIdx].Count)
+	assert.False(t, summaries[stIdx].FirstSeen.IsZero())
+	assert.False(t, summaries[stIdx].LastSeen.IsZero())
+}
+
+// TestLakeEventService_DataVersionFilter verifies DataVersion narrowing.
+func TestLakeEventService_DataVersionFilter(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	ev1 := mkStoredEvent("ev-v1", "dimo.status", lakeRawSubj, now.Add(-2*time.Hour))
+	ev1.DataVersion = "1.0"
+	ev2 := mkStoredEvent("ev-v2", "dimo.status", lakeRawSubj, now.Add(-time.Hour))
+	ev2.DataVersion = "2.0"
+	insertRawEvent(t, svc, ev1)
+	insertRawEvent(t, svc, ev2)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject:     &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+		DataVersion: &grpc.StringFilterOption{In: []string{"1.0"}},
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 1)
+	assert.Equal(t, "ev-v1", indexes[0].ID)
+}
+
+// TestLakeEventService_TagsFilter verifies that tags stored in extras.tags
+// are correctly matched via list_has_any.
+func TestLakeEventService_TagsFilter(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	evTagged := mkStoredEvent("ev-tagged", "dimo.status", lakeRawSubj, now.Add(-2*time.Hour))
+	evTagged.Tags = []string{"trip", "safety"}
+	evUntagged := mkStoredEvent("ev-untagged", "dimo.status", lakeRawSubj, now.Add(-time.Hour))
+	insertRawEvent(t, svc, evTagged)
+	insertRawEvent(t, svc, evUntagged)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+		Tags:    &grpc.ArrayFilterOption{ContainsAny: []string{"safety"}},
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 1, "only tagged event matches")
+	assert.Equal(t, "ev-tagged", indexes[0].ID)
+}
+
+// TestLakeEventService_GetCloudEventFromIndex verifies inline-data payload
+// resolution.
+func TestLakeEventService_GetCloudEventFromIndex(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	ev := mkStoredEvent("ev-inline", "dimo.status", lakeRawSubj, now.Add(-time.Hour))
+	ev.Data = json.RawMessage(`{"speed":42}`)
+	insertRawEvent(t, svc, ev)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 1, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 1)
+
+	raw, err := lsvc.GetCloudEventFromIndex(ctx, &indexes[0], "")
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"speed":42}`, string(raw.Data))
+	assert.Equal(t, "ev-inline", raw.ID)
+}
+
+// TestLakeEventService_BlobIndexKey verifies that the ObjectInfo.Key is set
+// to the blob key (data_index_key) when the event references a large payload.
+func TestLakeEventService_BlobIndexKey(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	blobKey := eventrepo.BlobKeyPrefix + "test-subject/2026/06/blob1"
+	ev := mkStoredEvent("ev-blob", "dimo.attestation", lakeRawSubj, now.Add(-time.Hour))
+	ev.DataIndexKey = blobKey
+	ev.Data = nil // large payload, data is in S3
+	insertRawEvent(t, svc, ev)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 1, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 1)
+
+	// The ObjectInfo.Key must be the blob key so the resolver can presign it.
+	assert.Equal(t, blobKey, indexes[0].Data.Key,
+		"blob event: ObjectInfo.Key must be the data_index_key for presign routing")
+}
+
+// TestLakeEventService_VoidingExcludes verifies that a voided event and its
+// tombstone are both absent from all index/summary results.
+func TestLakeEventService_VoidingExcludes(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	good := mkStoredEvent("ev-good", "dimo.status", lakeRawSubj, now.Add(-2*time.Hour))
+	voided := mkStoredEvent("ev-voided", "dimo.status", lakeRawSubj, now.Add(-1*time.Hour))
+	tomb := cloudevent.StoredEvent{
+		RawEvent: cloudevent.RawEvent{
+			CloudEventHeader: cloudevent.CloudEventHeader{
+				SpecVersion: cloudevent.SpecVersion,
+				Type:        "dimo.tombstone",
+				Subject:     lakeRawSubj,
+				Source:      "src-test",
+				ID:          "tomb-void",
+				Time:        now.Add(-30*time.Minute),
+			},
+		},
+		VoidsID: "ev-voided",
+	}
+
+	for _, e := range []cloudevent.StoredEvent{good, voided, tomb} {
+		insertRawEvent(t, svc, e)
+	}
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+	}
+
+	// ListIndexesAdvanced: only good event visible.
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+	ids := make([]string, len(indexes))
+	for i, idx := range indexes {
+		ids[i] = idx.ID
+	}
+	assert.Equal(t, []string{"ev-good"}, ids, "voided + tombstone excluded from list")
+
+	// GetLatestIndexAdvanced: returns the good event, not the (newer) voided one.
+	latest, err := lsvc.GetLatestIndexAdvanced(ctx, opts)
+	require.NoError(t, err)
+	assert.Equal(t, "ev-good", latest.ID)
+
+	// Type summaries: count excludes voided.
+	summaries, err := lsvc.GetCloudEventTypeSummariesAdvanced(ctx, opts)
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	assert.Equal(t, "dimo.status", summaries[0].Type)
+	assert.EqualValues(t, 1, summaries[0].Count)
+}
+
+// TestLakeEventService_GetCloudEventFromIndex_ErrNotFound checks that
+// fetching by a non-existent ID returns ErrNotFound.
+func TestLakeEventService_GetCloudEventFromIndex_ErrNotFound(t *testing.T) {
+	ctx := context.Background()
+	lsvc, _ := newLakeEventServiceForTest(t)
+
+	ghost := &cloudevent.CloudEvent[eventrepo.ObjectInfo]{
+		CloudEventHeader: cloudevent.CloudEventHeader{
+			Subject: lakeRawSubj,
+			ID:      "does-not-exist",
+		},
+		Data: eventrepo.ObjectInfo{Key: "lake://" + lakeRawSubj + "/does-not-exist"},
+	}
+	_, err := lsvc.GetCloudEventFromIndex(ctx, ghost, "")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrNotFound))
+}
