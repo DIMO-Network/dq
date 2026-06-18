@@ -9,7 +9,12 @@ import (
 )
 
 // LakeSegments serves segment detection from lake.signals. It satisfies
-// repositories.SegmentsBackend.
+// repositories.SegmentsBackend; the compile-time assertion is placed at the
+// assignment site in internal/app/backend.go (via repositories.ComposeBackend
+// and duck.NewLakeSegments) rather than here, because adding a
+// var _ repositories.SegmentsBackend = ... line would create a
+// duck→repositories import cycle (repositories already imports
+// internal/service/duck).
 type LakeSegments struct {
 	src *LakeSignalSource
 }
