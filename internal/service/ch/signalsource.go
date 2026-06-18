@@ -10,6 +10,8 @@ import (
 	"github.com/DIMO-Network/dq/internal/segments"
 )
 
+var _ segments.SignalSource = chSignalSource{}
+
 // chSignalSource implements segments.SignalSource over ClickHouse.
 type chSignalSource struct {
 	conn clickhouse.Conn
