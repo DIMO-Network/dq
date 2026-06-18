@@ -265,7 +265,8 @@ func TestShadowGetSegmentsPrimaryOnly(t *testing.T) {
 }
 
 func TestShadowGetSegmentsWithSecondaryMatch(t *testing.T) {
-	t.Parallel()
+	// Not parallel: reads a global Prometheus counter; parallel runs would race
+	// with TestShadowGetSegmentsWithSecondaryMismatch which bumps the same counter.
 	segs := []*model.Segment{{Duration: 300}}
 	primary := &fakePrimary{segments: segs}
 	secondary := &fakePrimary{segments: segs} // identical result
@@ -282,7 +283,7 @@ func TestShadowGetSegmentsWithSecondaryMatch(t *testing.T) {
 }
 
 func TestShadowGetSegmentsWithSecondaryMismatch(t *testing.T) {
-	t.Parallel()
+	// Not parallel: see TestShadowGetSegmentsWithSecondaryMatch comment.
 	primary := &fakePrimary{segments: []*model.Segment{{Duration: 300}}}
 	secondary := &fakePrimary{segments: []*model.Segment{{Duration: 600}}} // different duration
 	var logOut bytes.Buffer
