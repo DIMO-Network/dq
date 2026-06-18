@@ -18,6 +18,31 @@ import (
 
 const rawTestSubject = "did:erc721:137:0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF:42"
 
+func TestWhereClauseTagsAndDataVersion(t *testing.T) {
+	where, args := whereClause(RawFilter{
+		Subject:      "did:1",
+		DataVersions: []string{"v1"},
+		Tags:         []string{"a", "b"},
+	})
+	require.Contains(t, where, "data_version IN")
+	require.Contains(t, where, "list_has_any") // tags JSON array overlap
+	require.Contains(t, args, "did:1")
+	require.Contains(t, args, "v1")
+	require.Contains(t, args, "a")
+	require.Contains(t, args, "b")
+}
+
+func TestWhereClauseQ_PrefixQualifiesColumns(t *testing.T) {
+	where, args := whereClauseQ(RawFilter{
+		Subject: "did:subj",
+		Types:   []string{"dimo.status"},
+	}, "e.")
+	require.Contains(t, where, "e.subject = ?")
+	require.Contains(t, where, "e.type IN")
+	require.Contains(t, args, "did:subj")
+	require.Contains(t, args, "dimo.status")
+}
+
 func rawStored(id, ceType, subject string, ts time.Time, data string) cloudevent.StoredEvent {
 	ev := cloudevent.StoredEvent{RawEvent: cloudevent.RawEvent{
 		CloudEventHeader: cloudevent.CloudEventHeader{

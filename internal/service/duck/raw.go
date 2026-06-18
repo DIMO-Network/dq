@@ -26,13 +26,16 @@ const latestWalkMaxDays = 400
 // RawFilter narrows a raw cloudevent scan. Zero values mean "no filter".
 // The eventrepo facade translates grpc.SearchOptions into this.
 type RawFilter struct {
-	Subject   string
-	Types     []string
-	Sources   []string
-	Producers []string
-	IDs       []string
-	After     time.Time
-	Before    time.Time
+	Subject      string
+	Types        []string
+	Sources      []string
+	Producers    []string
+	IDs          []string
+	DataVersions []string
+	Tags         []string // matches when raw_events.extras.tags overlaps any
+	After        time.Time
+	Before       time.Time
+	ExcludeVoided bool // hide events voided by a tombstone (voids_id anti-join)
 }
 
 // Raw queries raw cloudevent bundles (raw/type=T/date=D hive layout)
@@ -182,32 +185,55 @@ func (r *Raw) existingGlobs(ctx context.Context, types []string, from, to time.T
 	return files, rows.Err()
 }
 
+// whereClause builds a WHERE fragment for filter with unqualified column names.
+// It delegates to whereClauseQ with an empty prefix.
 func whereClause(filter RawFilter) (string, []any) {
+	return whereClauseQ(filter, "")
+}
+
+// whereClauseQ builds a WHERE fragment qualifying each column name with prefix
+// (e.g. "e." → "e.subject", "e.type", …). Use "" for unqualified columns.
+// ExcludeVoided is NOT applied here — it requires a correlated subquery that
+// depends on the FROM table, so it is handled by the lake query builder.
+func whereClauseQ(filter RawFilter, prefix string) (string, []any) {
 	conds := []string{"1=1"}
 	var args []any
-	addIn := func(col string, vals []string) {
+	col := func(name string) string { return prefix + name }
+	addIn := func(name string, vals []string) {
 		if len(vals) == 0 {
 			return
 		}
-		conds = append(conds, fmt.Sprintf("%s IN (%s)", col, placeholders(len(vals))))
+		conds = append(conds, fmt.Sprintf("%s IN (%s)", col(name), placeholders(len(vals))))
 		for _, v := range vals {
 			args = append(args, v)
 		}
 	}
 	if filter.Subject != "" {
-		conds = append(conds, "subject = ?")
+		conds = append(conds, col("subject")+" = ?")
 		args = append(args, filter.Subject)
 	}
 	addIn("type", filter.Types)
 	addIn("source", filter.Sources)
 	addIn("producer", filter.Producers)
 	addIn("id", filter.IDs)
+	addIn("data_version", filter.DataVersions)
+	if len(filter.Tags) > 0 {
+		// extras is a JSON text column; tags live at $.tags as a string array.
+		// try_cast parses the JSON array element as VARCHAR[] for list_has_any.
+		ph := placeholders(len(filter.Tags))
+		conds = append(conds, fmt.Sprintf(
+			"list_has_any(COALESCE(try_cast(json_extract(%sextras, '$.tags') AS VARCHAR[]), []), [%s])",
+			prefix, ph))
+		for _, t := range filter.Tags {
+			args = append(args, t)
+		}
+	}
 	if !filter.After.IsZero() {
-		conds = append(conds, "time >= ?")
+		conds = append(conds, col("time")+" >= ?")
 		args = append(args, filter.After.UTC())
 	}
 	if !filter.Before.IsZero() {
-		conds = append(conds, "time < ?")
+		conds = append(conds, col("time")+" < ?")
 		args = append(args, filter.Before.UTC())
 	}
 	return strings.Join(conds, " AND "), args
