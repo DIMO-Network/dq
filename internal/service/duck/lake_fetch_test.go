@@ -473,3 +473,30 @@ func TestGetLatestIndexAdvanced_ErrNotFound_WrapsErrNoRows(t *testing.T) {
 func timestampProto(_ *testing.T, ts time.Time) *timestamppb.Timestamp {
 	return timestamppb.New(ts)
 }
+
+// --- Fix 2 tests ---
+
+// TestAfterBoundaryIsStrict verifies Fix 2: an event whose timestamp equals
+// filter.After is excluded (strict >), matching ClickHouse semantics.
+func TestAfterBoundaryIsStrict(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// ev-exact: timestamp == After boundary → must NOT appear.
+	// ev-after: timestamp is 1ms after boundary → must appear.
+	boundary := now.Add(-time.Hour)
+	evExact := mkStoredEvent("ev-at-boundary", "dimo.status", lakeRawSubj, boundary)
+	evAfter := mkStoredEvent("ev-after-boundary", "dimo.status", lakeRawSubj, boundary.Add(time.Millisecond))
+	insertRawEvent(t, svc, evExact)
+	insertRawEvent(t, svc, evAfter)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+		After:   timestampProto(t, boundary),
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 1, "event at boundary must be excluded (strict >)")
+	assert.Equal(t, "ev-after-boundary", indexes[0].ID)
+}

@@ -231,7 +231,10 @@ func whereClauseQ(filter RawFilter, prefix string) (string, []any) {
 		}
 	}
 	if !filter.After.IsZero() {
-		conds = append(conds, col("time")+" >= ?")
+		// Strict greater-than matches ClickHouse eventrepo (timestamp > ?) for
+		// After boundary parity. NOTE: the legacy hive Raw path shares this
+		// function; it is being retired, so CH parity takes precedence.
+		conds = append(conds, col("time")+" > ?")
 		args = append(args, filter.After.UTC())
 	}
 	if !filter.Before.IsZero() {
