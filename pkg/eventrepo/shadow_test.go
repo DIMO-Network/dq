@@ -185,8 +185,10 @@ func TestShadowEventService_MismatchIncrementsCounter(t *testing.T) {
 
 	shadow.Wait()
 
-	// The mismatch counter should have been incremented.
-	// We verify indirectly: secondary was called and results differ.
+	// Secondary was called and results differed. The Prometheus counter
+	// assertion (dq_fetch_shadow_mismatch_total +1) is in the white-box
+	// companion TestShadowMismatchCounter_IncrementOnMismatch which has
+	// direct access to fetchShadowMismatchTotal.
 	assert.Equal(t, 1, secondary.listCalls, "secondary called for shadow comparison")
 }
 
