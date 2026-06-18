@@ -43,9 +43,11 @@ func NewLakeEventService(svc *Service, presigner eventrepo.Presigner, bucket str
 
 var _ eventrepo.EventService = (*LakeEventService)(nil)
 
-// queryLakeRaw returns at most limit events matching filter, newest first,
-// deduped on the header key. When filter.ExcludeVoided is set, tombstones
-// (voids_id != '') and events referenced by a tombstone are excluded.
+// queryLakeRaw returns at most limit events matching filter, deduped on the
+// header key. When filter.ExcludeVoided is set, tombstones (voids_id != '')
+// and events referenced by a tombstone are excluded. ORDER BY direction
+// matches ClickHouse eventrepo: DESC (newest-first) by default, ASC
+// (oldest-first) when filter.TimestampAsc is true.
 func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, limit int) ([]cloudevent.StoredEvent, error) {
 	where, args := whereClauseQ(filter, "e.")
 	voiding := ""
@@ -57,9 +59,13 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 				" AND NOT EXISTS (SELECT 1 FROM %s t WHERE t.subject = e.subject AND t.voids_id = e.id)",
 			lakeRawEvents)
 	}
+	order := "DESC"
+	if filter.TimestampAsc {
+		order = "ASC"
+	}
 	q := fmt.Sprintf(
-		"SELECT %s FROM %s e WHERE %s%s ORDER BY e.time DESC LIMIT %d",
-		lakeRawColumns, lakeRawEvents, where, voiding, limit*2)
+		"SELECT %s FROM %s e WHERE %s%s ORDER BY e.time %s LIMIT %d",
+		lakeRawColumns, lakeRawEvents, where, voiding, order, limit*2)
 
 	rows, err := l.svc.DB().QueryContext(ctx, q, args...)
 	if err != nil {
@@ -106,16 +112,27 @@ func (l *LakeEventService) ListIndexesAdvanced(ctx context.Context, limit int, o
 }
 
 // GetLatestIndexAdvanced returns the single newest index entry matching opts,
-// or ErrNotFound when no events exist.
+// or ErrNotFound when no events exist. TimestampAsc is forced to false (DESC)
+// so that "latest" always means newest, mirroring ClickHouse's
+// GetLatestIndexAdvanced which explicitly sets TimestampAsc=false before
+// delegating to ListIndexesAdvanced.
 func (l *LakeEventService) GetLatestIndexAdvanced(ctx context.Context, opts *grpc.AdvancedSearchOptions) (cloudevent.CloudEvent[eventrepo.ObjectInfo], error) {
-	list, err := l.ListIndexesAdvanced(ctx, 1, opts)
+	// Force DESC regardless of any caller-supplied TimestampAsc so we always
+	// retrieve the most-recent event, not the oldest.
+	f, err := filterFromAdvanced(opts)
 	if err != nil {
 		return cloudevent.CloudEvent[eventrepo.ObjectInfo]{}, err
 	}
-	if len(list) == 0 {
+	f.TimestampAsc = false // always newest-first for "get latest"
+
+	evs, err := l.queryLakeRaw(ctx, f, 1)
+	if err != nil {
+		return cloudevent.CloudEvent[eventrepo.ObjectInfo]{}, err
+	}
+	if len(evs) == 0 {
 		return cloudevent.CloudEvent[eventrepo.ObjectInfo]{}, ErrNotFound
 	}
-	return list[0], nil
+	return toIndex(evs[0]), nil
 }
 
 // ListIndexes is the SearchOptions variant; it converts to AdvancedSearchOptions
@@ -294,6 +311,9 @@ func filterFromAdvanced(opts *grpc.AdvancedSearchOptions) (RawFilter, error) {
 	if opts.GetBefore() != nil {
 		f.Before = opts.GetBefore().AsTime()
 	}
+	// Mirror ClickHouse eventrepo.ListIndexesAdvanced: ASC only when explicitly
+	// true; unset (nil) or false → DESC (newest first).
+	f.TimestampAsc = opts.GetTimestampAsc().GetValue()
 	return f, nil
 }
 

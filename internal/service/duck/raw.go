@@ -64,6 +64,11 @@ type RawFilter struct {
 	After  time.Time
 	Before time.Time
 	ExcludeVoided bool // hide events voided by a tombstone (voids_id anti-join)
+
+	// TimestampAsc controls ORDER BY direction. When true, results are returned
+	// oldest-first (ASC); false or unset means newest-first (DESC). Mirrors
+	// ClickHouse eventrepo.ListIndexesAdvanced's GetTimestampAsc decision.
+	TimestampAsc bool
 }
 
 // Raw queries raw cloudevent bundles (raw/type=T/date=D hive layout)

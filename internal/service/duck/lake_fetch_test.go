@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // newLakeEventServiceForTest opens a DuckLake file catalog, creates the
@@ -657,4 +658,70 @@ func TestOrClauseReturnsError(t *testing.T) {
 	_, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
 	require.Error(t, err, "Or clause must return an error, not silently over-return")
 	require.ErrorIs(t, err, errOrClauseUnsupported)
+}
+
+// TestTimestampAsc_ListIndexesAdvanced verifies that TimestampAsc=true returns
+// events oldest-first and TimestampAsc=false (or unset) returns newest-first,
+// matching ClickHouse eventrepo.ListIndexesAdvanced semantics exactly.
+func TestTimestampAsc_ListIndexesAdvanced(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	subj := "did:erc721:137:0xASC:1"
+	ev1 := mkStoredEvent("ev-oldest", "dimo.status", subj, now.Add(-3*time.Hour))
+	ev2 := mkStoredEvent("ev-middle", "dimo.status", subj, now.Add(-2*time.Hour))
+	ev3 := mkStoredEvent("ev-newest", "dimo.status", subj, now.Add(-1*time.Hour))
+	for _, e := range []cloudevent.StoredEvent{ev1, ev2, ev3} {
+		insertRawEvent(t, svc, e)
+	}
+
+	// DESC (default / TimestampAsc unset) → newest first, matching CH.
+	descOpts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{subj}},
+	}
+	descIdxs, err := lsvc.ListIndexesAdvanced(ctx, 10, descOpts)
+	require.NoError(t, err)
+	require.Len(t, descIdxs, 3)
+	assert.Equal(t, "ev-newest", descIdxs[0].ID, "DESC: first result must be newest")
+	assert.Equal(t, "ev-middle", descIdxs[1].ID)
+	assert.Equal(t, "ev-oldest", descIdxs[2].ID, "DESC: last result must be oldest")
+
+	// ASC (TimestampAsc=true) → oldest first, matching CH.
+	ascOpts := &grpc.AdvancedSearchOptions{
+		Subject:      &grpc.StringFilterOption{In: []string{subj}},
+		TimestampAsc: wrapperspb.Bool(true),
+	}
+	ascIdxs, err := lsvc.ListIndexesAdvanced(ctx, 10, ascOpts)
+	require.NoError(t, err)
+	require.Len(t, ascIdxs, 3)
+	assert.Equal(t, "ev-oldest", ascIdxs[0].ID, "ASC: first result must be oldest")
+	assert.Equal(t, "ev-middle", ascIdxs[1].ID)
+	assert.Equal(t, "ev-newest", ascIdxs[2].ID, "ASC: last result must be newest")
+}
+
+// TestTimestampAsc_GetLatestIndexAdvanced verifies that GetLatestIndexAdvanced
+// always returns the newest event even when the caller passes TimestampAsc=true,
+// matching ClickHouse's GetLatestIndexAdvanced which forces DESC before calling
+// ListIndexesAdvanced.
+func TestTimestampAsc_GetLatestIndexAdvanced(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	subj := "did:erc721:137:0xLATEST:1"
+	older := mkStoredEvent("ev-older", "dimo.status", subj, now.Add(-2*time.Hour))
+	newer := mkStoredEvent("ev-newer", "dimo.status", subj, now.Add(-1*time.Hour))
+	insertRawEvent(t, svc, older)
+	insertRawEvent(t, svc, newer)
+
+	// With TimestampAsc=true, GetLatestIndexAdvanced must still return newest.
+	opts := &grpc.AdvancedSearchOptions{
+		Subject:      &grpc.StringFilterOption{In: []string{subj}},
+		TimestampAsc: wrapperspb.Bool(true),
+	}
+	idx, err := lsvc.GetLatestIndexAdvanced(ctx, opts)
+	require.NoError(t, err)
+	assert.Equal(t, "ev-newer", idx.ID,
+		"GetLatestIndexAdvanced must return newest event even when TimestampAsc=true")
 }
