@@ -20,7 +20,7 @@ const fetchers = 25
 // parquet refs (handled efficiently via eventrepo with reader caching) and
 // legacy JSON refs (fetched concurrently with multi-bucket fallback).
 // Both paths run concurrently.
-func ListCloudEventsFromIndexes(ctx context.Context, evtSvc *eventrepo.Service, indexKeys []cloudevent.CloudEvent[eventrepo.ObjectInfo], buckets []string) ([]cloudevent.RawEvent, error) {
+func ListCloudEventsFromIndexes(ctx context.Context, evtSvc eventrepo.EventService, indexKeys []cloudevent.CloudEvent[eventrepo.ObjectInfo], buckets []string) ([]cloudevent.RawEvent, error) {
 	if len(indexKeys) == 0 {
 		return nil, nil
 	}
@@ -103,7 +103,7 @@ func ListCloudEventsFromIndexes(ctx context.Context, evtSvc *eventrepo.Service, 
 
 // GetCloudEventFromIndex gets an object from the index service by trying each
 // bucket in order, returning the first successful result.
-func GetCloudEventFromIndex(ctx context.Context, evtSvc *eventrepo.Service, indexKeys *cloudevent.CloudEvent[eventrepo.ObjectInfo], buckets []string) (cloudevent.RawEvent, error) {
+func GetCloudEventFromIndex(ctx context.Context, evtSvc eventrepo.EventService, indexKeys *cloudevent.CloudEvent[eventrepo.ObjectInfo], buckets []string) (cloudevent.RawEvent, error) {
 	if len(buckets) == 0 {
 		return cloudevent.RawEvent{}, fmt.Errorf("no buckets configured")
 	}

@@ -17,13 +17,13 @@ import (
 
 // Server is used to implement grpc.FetchServiceServer.
 type Server struct {
-	eventService *eventrepo.Service
+	eventService eventrepo.EventService
 	grpc.UnimplementedFetchServiceServer
 	buckets []string
 }
 
 // NewServer creates a new Server instance.
-func NewServer(buckets []string, eventService *eventrepo.Service) *Server {
+func NewServer(buckets []string, eventService eventrepo.EventService) *Server {
 	return &Server{
 		eventService: eventService,
 		buckets:      buckets,
