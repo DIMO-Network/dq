@@ -500,3 +500,161 @@ func TestAfterBoundaryIsStrict(t *testing.T) {
 	require.Len(t, indexes, 1, "event at boundary must be excluded (strict >)")
 	assert.Equal(t, "ev-after-boundary", indexes[0].ID)
 }
+
+// --- Fix 3 tests ---
+
+// TestMultiSubjectIN verifies that multiple subjects in Subject.In are all
+// returned (multi-value IN, not just In[0]).
+func TestMultiSubjectIN(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	subj1 := "did:erc721:137:0xAAA:1"
+	subj2 := "did:erc721:137:0xBBB:2"
+	subj3 := "did:erc721:137:0xCCC:3"
+
+	insertRawEvent(t, svc, mkStoredEvent("ev-s1", "dimo.status", subj1, now.Add(-3*time.Hour)))
+	insertRawEvent(t, svc, mkStoredEvent("ev-s2", "dimo.status", subj2, now.Add(-2*time.Hour)))
+	insertRawEvent(t, svc, mkStoredEvent("ev-s3", "dimo.status", subj3, now.Add(-time.Hour)))
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{subj1, subj2}},
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 2, "multi-subject IN must return all matching subjects")
+	ids := []string{indexes[0].ID, indexes[1].ID}
+	assert.ElementsMatch(t, []string{"ev-s1", "ev-s2"}, ids)
+}
+
+// TestStringNotIn verifies that NotIn on a string field (Type used as example)
+// correctly excludes matching events.
+func TestStringNotIn(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	subj := "did:erc721:137:0xNOTIN:1"
+	insertRawEvent(t, svc, mkStoredEvent("ev-status", "dimo.status", subj, now.Add(-2*time.Hour)))
+	insertRawEvent(t, svc, mkStoredEvent("ev-fp", "dimo.fingerprint", subj, now.Add(-time.Hour)))
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{subj}},
+		Type:    &grpc.StringFilterOption{NotIn: []string{"dimo.status"}},
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 1, "NotIn must exclude dimo.status")
+	assert.Equal(t, "ev-fp", indexes[0].ID)
+}
+
+// TestTagsContainsAll verifies that ContainsAll requires all tags to be present.
+func TestTagsContainsAll(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	subj := "did:erc721:137:0xTAGS:1"
+	evBoth := mkStoredEvent("ev-both", "dimo.status", subj, now.Add(-3*time.Hour))
+	evBoth.Tags = []string{"trip", "safety"}
+	evOne := mkStoredEvent("ev-one", "dimo.status", subj, now.Add(-2*time.Hour))
+	evOne.Tags = []string{"trip"}
+	evNone := mkStoredEvent("ev-none", "dimo.status", subj, now.Add(-time.Hour))
+	insertRawEvent(t, svc, evBoth)
+	insertRawEvent(t, svc, evOne)
+	insertRawEvent(t, svc, evNone)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{subj}},
+		Tags:    &grpc.ArrayFilterOption{ContainsAll: []string{"trip", "safety"}},
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 1, "ContainsAll must require both tags")
+	assert.Equal(t, "ev-both", indexes[0].ID)
+}
+
+// TestTagsNotContainsAny verifies that NotContainsAny excludes events that
+// have any of the specified tags.
+func TestTagsNotContainsAny(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	subj := "did:erc721:137:0xNCA:1"
+	evTagged := mkStoredEvent("ev-tagged", "dimo.status", subj, now.Add(-2*time.Hour))
+	evTagged.Tags = []string{"dangerous"}
+	evClean := mkStoredEvent("ev-clean", "dimo.status", subj, now.Add(-time.Hour))
+	insertRawEvent(t, svc, evTagged)
+	insertRawEvent(t, svc, evClean)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{subj}},
+		Tags:    &grpc.ArrayFilterOption{NotContainsAny: []string{"dangerous"}},
+	}
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.NoError(t, err)
+	require.Len(t, indexes, 1, "NotContainsAny must exclude tagged event")
+	assert.Equal(t, "ev-clean", indexes[0].ID)
+}
+
+// TestExtrasFilter verifies IN / NOT IN filtering on the raw extras column.
+func TestExtrasFilter(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	subj := "did:erc721:137:0xEXT:1"
+	evA := mkStoredEvent("ev-extras-a", "dimo.status", subj, now.Add(-2*time.Hour))
+	evA.Extras = map[string]any{"region": "us-east"}
+	evB := mkStoredEvent("ev-extras-b", "dimo.status", subj, now.Add(-time.Hour))
+	evB.Extras = map[string]any{"region": "eu-west"}
+	insertRawEvent(t, svc, evA)
+	insertRawEvent(t, svc, evB)
+
+	// Compute the expected extras JSON strings so we can filter by exact value.
+	extrasA, err := json.Marshal(evA.Extras)
+	require.NoError(t, err)
+	extrasB, err := json.Marshal(evB.Extras)
+	require.NoError(t, err)
+
+	// IN filter: only us-east event.
+	inOpts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{subj}},
+		Extras:  &grpc.StringFilterOption{In: []string{string(extrasA)}},
+	}
+	inIndexes, err := lsvc.ListIndexesAdvanced(ctx, 10, inOpts)
+	require.NoError(t, err)
+	require.Len(t, inIndexes, 1, "Extras IN must match only the us-east event")
+	assert.Equal(t, "ev-extras-a", inIndexes[0].ID)
+
+	// NOT IN filter: exclude eu-west, only us-east remains.
+	notInOpts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{subj}},
+		Extras:  &grpc.StringFilterOption{NotIn: []string{string(extrasB)}},
+	}
+	notInIndexes, err := lsvc.ListIndexesAdvanced(ctx, 10, notInOpts)
+	require.NoError(t, err)
+	require.Len(t, notInIndexes, 1, "Extras NOT IN must exclude eu-west event")
+	assert.Equal(t, "ev-extras-a", notInIndexes[0].ID)
+}
+
+// TestOrClauseReturnsError verifies that an Or clause in an advanced filter
+// returns errOrClauseUnsupported rather than silently over-returning.
+func TestOrClauseReturnsError(t *testing.T) {
+	ctx := context.Background()
+	lsvc, _ := newLakeEventServiceForTest(t)
+
+	opts := &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{
+			In: []string{lakeRawSubj},
+			Or: []*grpc.StringFilterOption{
+				{In: []string{"did:other"}},
+			},
+		},
+	}
+	_, err := lsvc.ListIndexesAdvanced(ctx, 10, opts)
+	require.Error(t, err, "Or clause must return an error, not silently over-return")
+	require.ErrorIs(t, err, errOrClauseUnsupported)
+}

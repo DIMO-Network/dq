@@ -2,6 +2,7 @@ package duck
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
+
+// errOrClauseUnsupported is returned when an advanced filter contains an Or
+// clause that the lake path cannot translate to SQL. Returning an error rather
+// than silently over-returning preserves correctness until Or is fully
+// implemented.
+var errOrClauseUnsupported = errors.New("lake fetch: Or clauses in advanced filter are not yet supported")
 
 const lakeRawEvents = "lake.raw_events"
 
@@ -83,7 +90,11 @@ func (l *LakeEventService) ListIndexesAdvanced(ctx context.Context, limit int, o
 	if limit <= 0 {
 		limit = 1
 	}
-	evs, err := l.queryLakeRaw(ctx, filterFromAdvanced(opts), limit)
+	f, err := filterFromAdvanced(opts)
+	if err != nil {
+		return nil, err
+	}
+	evs, err := l.queryLakeRaw(ctx, f, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +132,10 @@ func (l *LakeEventService) GetLatestIndex(ctx context.Context, opts *grpc.Search
 // GetCloudEventTypeSummariesAdvanced returns per-type counts and time ranges
 // matching opts. Voided events are excluded (ExcludeVoided always true here).
 func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Context, opts *grpc.AdvancedSearchOptions) ([]eventrepo.CloudEventTypeSummary, error) {
-	f := filterFromAdvanced(opts)
+	f, err := filterFromAdvanced(opts)
+	if err != nil {
+		return nil, err
+	}
 	// Build base WHERE with unqualified columns for the aggregate query.
 	where, args := whereClauseQ(f, "")
 	// Exclude tombstones and voided events in the aggregate.
@@ -212,51 +226,75 @@ func (l *LakeEventService) PresignBlobURL(ctx context.Context, key string) (stri
 // filterFromAdvanced translates gRPC AdvancedSearchOptions to a RawFilter,
 // mirroring eventrepo.AdvancedSearchOptionsToQueryMod field-for-field.
 // ExcludeVoided is always set to true (fetch path hides tombstones).
-func filterFromAdvanced(opts *grpc.AdvancedSearchOptions) RawFilter {
+//
+// Or clauses (StringFilterOption.Or / ArrayFilterOption.Or) are not yet
+// supported. When present, errOrClauseUnsupported is returned so callers get a
+// clear failure rather than silently over-returning (which would break
+// shadow-mode correctness checks).
+func filterFromAdvanced(opts *grpc.AdvancedSearchOptions) (RawFilter, error) {
 	f := RawFilter{ExcludeVoided: true}
 	if opts == nil {
-		return f
+		return f, nil
 	}
-	if opts.GetSubject() != nil {
-		// RawFilter.Subject is a single equality filter; GetIn()[0] covers the
-		// common case (single subject). Multi-subject IN queries are uncommon;
-		// we use the first value as a best-effort approximation until RawFilter
-		// is extended with a Subjects []string field.
-		f.Subject = firstOf(opts.GetSubject().GetIn())
+
+	// Subject — multi-value IN supported; Or returns error.
+	if s := opts.GetSubject(); s != nil {
+		if len(s.GetOr()) > 0 {
+			return RawFilter{}, errOrClauseUnsupported
+		}
+		f.Subjects = s.GetIn()
 	}
-	if opts.GetType() != nil {
-		f.Types = opts.GetType().GetIn()
+
+	// String fields: In + NotIn; Or → error.
+	applyString := func(opt *grpc.StringFilterOption, in, notIn *[]string) error {
+		if opt == nil {
+			return nil
+		}
+		if len(opt.GetOr()) > 0 {
+			return errOrClauseUnsupported
+		}
+		*in = opt.GetIn()
+		*notIn = opt.GetNotIn()
+		return nil
 	}
-	if opts.GetSource() != nil {
-		f.Sources = opts.GetSource().GetIn()
+
+	if err := applyString(opts.GetType(), &f.Types, &f.TypesNotIn); err != nil {
+		return RawFilter{}, err
 	}
-	if opts.GetProducer() != nil {
-		f.Producers = opts.GetProducer().GetIn()
+	if err := applyString(opts.GetSource(), &f.Sources, &f.SourcesNotIn); err != nil {
+		return RawFilter{}, err
 	}
-	if opts.GetId() != nil {
-		f.IDs = opts.GetId().GetIn()
+	if err := applyString(opts.GetProducer(), &f.Producers, &f.ProducersNotIn); err != nil {
+		return RawFilter{}, err
 	}
-	if opts.GetDataVersion() != nil {
-		f.DataVersions = opts.GetDataVersion().GetIn()
+	if err := applyString(opts.GetId(), &f.IDs, &f.IDsNotIn); err != nil {
+		return RawFilter{}, err
 	}
-	if opts.GetTags() != nil {
-		f.Tags = opts.GetTags().GetContainsAny()
+	if err := applyString(opts.GetDataVersion(), &f.DataVersions, &f.DataVersionsNotIn); err != nil {
+		return RawFilter{}, err
 	}
+	if err := applyString(opts.GetExtras(), &f.Extras, &f.ExtrasNotIn); err != nil {
+		return RawFilter{}, err
+	}
+
+	// Tags: all four array operators; Or → error.
+	if t := opts.GetTags(); t != nil {
+		if len(t.GetOr()) > 0 {
+			return RawFilter{}, errOrClauseUnsupported
+		}
+		f.Tags = t.GetContainsAny()
+		f.TagsAll = t.GetContainsAll()
+		f.TagsNotContainAny = t.GetNotContainsAny()
+		f.TagsNotContainAll = t.GetNotContainsAll()
+	}
+
 	if opts.GetAfter() != nil {
 		f.After = opts.GetAfter().AsTime()
 	}
 	if opts.GetBefore() != nil {
 		f.Before = opts.GetBefore().AsTime()
 	}
-	return f
-}
-
-// firstOf returns the first element of a slice, or "" if empty.
-func firstOf(s []string) string {
-	if len(s) == 0 {
-		return ""
-	}
-	return s[0]
+	return f, nil
 }
 
 // toAdvanced converts basic SearchOptions to AdvancedSearchOptions,
