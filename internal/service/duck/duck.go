@@ -27,7 +27,7 @@ func NewService(cfg Config) (*Service, error) {
 	connector, err := duckdb.NewConnector("", func(execer driver.ExecerContext) error {
 		for _, query := range bootstrap {
 			if _, err := execer.ExecContext(context.Background(), query, nil); err != nil {
-				return fmt.Errorf("failed to run bootstrap query %q: %w", query, err)
+				return fmt.Errorf("failed to run bootstrap query %q: %w", redactQuery(query), err)
 			}
 		}
 		return nil
@@ -171,4 +171,18 @@ func createS3SecretSQL(cfg Config) string {
 // sqlString quotes a value as a single-quoted SQL string literal.
 func sqlString(v string) string {
 	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
+}
+
+// redactQuery hides credential-bearing bootstrap statements from error messages
+// and logs: CREATE SECRET inlines S3 keys and ATTACH carries the Postgres
+// DSN/password. Truncates at the first paren/quote so the statement kind stays
+// visible for debugging while the secret is dropped. Mirrors din's lake.redact
+// (CHD-31).
+func redactQuery(q string) string {
+	if strings.Contains(q, "SECRET") || strings.Contains(q, "ATTACH") {
+		if i := strings.IndexAny(q, "('"); i > 0 {
+			return q[:i] + "(…)"
+		}
+	}
+	return q
 }
