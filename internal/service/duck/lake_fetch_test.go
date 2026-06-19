@@ -1,21 +1,44 @@
 package duck
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/DIMO-Network/dq/pkg/grpc"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
+
+// fakeBlobGetter is a minimal eventrepo.ObjectGetter for blob-fetch tests: it
+// serves byte payloads from an in-memory map keyed by S3 object key.
+type fakeBlobGetter struct {
+	objects map[string][]byte
+}
+
+func (f *fakeBlobGetter) GetObject(_ context.Context, in *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	b, ok := f.objects[*in.Key]
+	if !ok {
+		return nil, fmt.Errorf("no such key: %s", *in.Key)
+	}
+	n := int64(len(b))
+	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(b)), ContentLength: &n}, nil
+}
+
+func (f *fakeBlobGetter) PutObject(_ context.Context, _ *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	return &s3.PutObjectOutput{}, nil
+}
 
 // newLakeEventServiceForTest opens a DuckLake file catalog, creates the
 // lake.raw_events table, and returns a LakeEventService ready for testing.
@@ -42,7 +65,7 @@ func newLakeEventServiceForTest(t *testing.T) (*LakeEventService, *Service) {
 		)`)
 	require.NoError(t, err)
 
-	return NewLakeEventService(svc, nil, ""), svc
+	return NewLakeEventService(svc, nil, nil, ""), svc
 }
 
 // lakeRawSubj is the test subject DID used across lake-fetch tests.
@@ -724,4 +747,87 @@ func TestTimestampAsc_GetLatestIndexAdvanced(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ev-newer", idx.ID,
 		"GetLatestIndexAdvanced must return newest event even when TimestampAsc=true")
+}
+
+// TestLakeEventService_GetCloudEventFromIndex_BlobFetchesFromS3 verifies the
+// gRPC blob gap fix: a blob-backed event (data_index_key set, inline data
+// empty) must have its raw payload bytes fetched from S3 into RawEvent.Data,
+// because the gRPC proto carries only Data (grpc.CloudEventToProto drops
+// DataBase64) and din stores the raw decoded payload at the blob key.
+func TestLakeEventService_GetCloudEventFromIndex_BlobFetchesFromS3(t *testing.T) {
+	ctx := context.Background()
+	_, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	blobKey := eventrepo.BlobKeyPrefix + lakeRawSubj + "/2026/06/blob-1"
+	blobBytes := []byte(`{"image":"big-binary-payload","frames":12345}`)
+	getter := &fakeBlobGetter{objects: map[string][]byte{blobKey: blobBytes}}
+	lsvc := NewLakeEventService(svc, getter, nil, "test-bucket")
+
+	ev := mkStoredEvent("ev-blob-fetch", "dimo.attestation", lakeRawSubj, now.Add(-time.Hour))
+	ev.DataIndexKey = blobKey
+	ev.Data = nil // large payload: bytes live in S3, not inline
+	insertRawEvent(t, svc, ev)
+
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 1, &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+	})
+	require.NoError(t, err)
+	require.Len(t, indexes, 1)
+	require.Equal(t, blobKey, indexes[0].Data.Key, "blob index key must route to the blob object")
+
+	raw, err := lsvc.GetCloudEventFromIndex(ctx, &indexes[0], "")
+	require.NoError(t, err)
+	require.Equal(t, blobBytes, []byte(raw.Data),
+		"blob payload must be downloaded from S3 into Data (proto carries Data only)")
+}
+
+// TestLakeEventService_GetCloudEventFromIndex_BlobNoGetter verifies that a blob
+// event with no object store configured fails loudly rather than silently
+// returning an empty payload (the original bug).
+func TestLakeEventService_GetCloudEventFromIndex_BlobNoGetter(t *testing.T) {
+	ctx := context.Background()
+	_, svc := newLakeEventServiceForTest(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	blobKey := eventrepo.BlobKeyPrefix + lakeRawSubj + "/2026/06/blob-2"
+	lsvc := NewLakeEventService(svc, nil, nil, "") // no getter
+
+	ev := mkStoredEvent("ev-blob-nogetter", "dimo.attestation", lakeRawSubj, now.Add(-time.Hour))
+	ev.DataIndexKey = blobKey
+	ev.Data = nil
+	insertRawEvent(t, svc, ev)
+
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 1, &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
+	})
+	require.NoError(t, err)
+	require.Len(t, indexes, 1)
+
+	_, err = lsvc.GetCloudEventFromIndex(ctx, &indexes[0], "")
+	require.Error(t, err, "blob event with no object store must error, not return empty data")
+}
+
+// TestLakeEventService_ListIndexesAdvanced_CapsLimit verifies that an
+// over-large caller limit is clamped to maxLakeQueryLimit (1000), matching
+// ClickHouse eventrepo. Without the cap, a single gRPC caller could force an
+// unbounded scan + Go-side dedup (memory/latency DoS).
+func TestLakeEventService_ListIndexesAdvanced_CapsLimit(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+	subj := "did:erc721:137:0xCAP:1"
+
+	// Insert 1100 distinct events (> the 1000 cap) in one statement.
+	_, err := svc.db.ExecContext(ctx, `
+		INSERT INTO lake.raw_events
+			(subject, time, type, id, source, producer, data_content_type, data_version, extras, data, data_base64, data_index_key, voids_id)
+		SELECT ?, now() - (i * INTERVAL 1 SECOND), 'dimo.status', 'ev-' || i, 'src-test', ?, '', '', NULL, '{"v":1}', NULL, NULL, NULL
+		FROM generate_series(1, 1100) AS t(i)`, subj, subj)
+	require.NoError(t, err)
+
+	indexes, err := lsvc.ListIndexesAdvanced(ctx, 100000, &grpc.AdvancedSearchOptions{
+		Subject: &grpc.StringFilterOption{In: []string{subj}},
+	})
+	require.NoError(t, err)
+	require.Len(t, indexes, 1000, "limit must be capped at maxLakeQueryLimit (1000) to match ClickHouse")
 }

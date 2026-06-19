@@ -50,10 +50,10 @@ func newLakeFetchService(t *testing.T) (*duck.LakeEventService, *duck.Service) {
 		extras VARCHAR, data VARCHAR, data_base64 BLOB, data_index_key VARCHAR, voids_id VARCHAR)`)
 	require.NoError(t, err)
 
-	// NewLakeEventService takes (svc, presigner, bucket). presigner and bucket
-	// may be nil/empty when no blob payloads are involved — same as the app
-	// wiring in ducklake mode when no S3 presigning is needed.
-	return duck.NewLakeEventService(svc, nil, ""), svc
+	// NewLakeEventService takes (svc, getter, presigner, bucket). getter,
+	// presigner and bucket may be nil/empty when no blob payloads are involved —
+	// same as the app wiring in ducklake mode when no S3 access is needed.
+	return duck.NewLakeEventService(svc, nil, nil, ""), svc
 }
 
 // seedFetchRawEvent inserts one raw event into lake.raw_events with the given

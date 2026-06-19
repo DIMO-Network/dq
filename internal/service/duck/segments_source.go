@@ -142,6 +142,10 @@ func (s *LakeSignalSource) IgnitionStateChanges(ctx context.Context, subject str
 	//
 	// Note: value_number for isIgnitionOn is 0.0 or 1.0 (numeric bool).
 	// A transition is a row where new_state != prev_state.
+	// `value_number IS NOT NULL` in the deduped CTE drops missing readings: a NULL
+	// would be silently excluded from transitions (NULL != x is NULL, not true)
+	// AND would poison the next row's LAG (prev_state coalesces to -1), wrongly
+	// emitting an unchanged reading as a spurious transition.
 	// coalesce(lag(...), -1): if a vehicle has been ON continuously for MORE than
 	// the 30-day lookback (no OFF event in the window), this LAG yields NULL for
 	// the very first row and coalesce maps it to -1, so that row is NOT emitted as
@@ -156,6 +160,7 @@ WITH deduped AS (
   SELECT timestamp, value_number
   FROM lake.signals
   WHERE subject = ? AND name = 'isIgnitionOn'
+    AND value_number IS NOT NULL
     AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
   QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1
 ),

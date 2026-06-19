@@ -50,8 +50,8 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		// detection results from the lake against the primary ClickHouse backend.
 		DuckLakeEnabled: settings.QueryBackend == config.QueryBackendDuckLake ||
 			(settings.QueryBackend == config.QueryBackendShadow && settings.DuckLakeCatalogDSN != ""),
-		CatalogDSN:           settings.DuckLakeCatalogDSN,
-		DataPath:             settings.DuckLakeDataPath,
+		CatalogDSN: settings.DuckLakeCatalogDSN,
+		DataPath:   settings.DuckLakeDataPath,
 	}
 }
 
@@ -129,7 +129,7 @@ func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client 
 	switch settings.QueryBackend {
 	case config.QueryBackendDuckLake:
 		// No ClickHouse client is created in this branch.
-		return duck.NewLakeEventService(duckSvc, presigner, bucket), nil
+		return duck.NewLakeEventService(duckSvc, s3Client, presigner, bucket), nil
 
 	case config.QueryBackendShadow:
 		// Build a CH event service as primary.
@@ -142,7 +142,7 @@ func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client 
 			// No catalog DSN configured — shadow fetch not possible; serve from CH.
 			return chEvtSvc, nil
 		}
-		lakeSvc := duck.NewLakeEventService(duckSvc, presigner, bucket)
+		lakeSvc := duck.NewLakeEventService(duckSvc, s3Client, presigner, bucket)
 		return eventrepo.NewShadowEventService(chEvtSvc, lakeSvc), nil
 
 	default:
@@ -234,6 +234,10 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 		_ = duckSvc.Close()
 		return nil, fmt.Errorf("creating DuckLake materializer: %w", err)
 	}
+	// Resolve externalized blob payloads from the same bucket the fetch path
+	// presigns/downloads (settings.ParquetBucket): din writes payloads larger
+	// than the inline threshold to a blob and leaves only the key on the row.
+	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.ParquetBucket)
 	runner := materializer.New(materializer.Config{
 		PollInterval:      pollInterval,
 		ChainID:           settings.DIMORegistryChainID,

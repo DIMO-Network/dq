@@ -57,7 +57,9 @@ func NewLakeQueries(svc *Service) *Queries {
 // In bucket mode "" means no matching files (caller returns empty).
 func (q *Queries) signalTable(ctx context.Context, from, to time.Time) (string, error) {
 	if q.lake {
-		return "lake.signals", nil
+		// Aggregations read through the deduped source (CHD-2); the caller
+		// aliases it ("AS s"), so it must be a bare parenthesized subquery.
+		return lakeSignalsDeduped, nil
 	}
 	return q.tableExpr(ctx, q.signalGlobs(from, to))
 }

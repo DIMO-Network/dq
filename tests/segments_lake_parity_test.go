@@ -38,6 +38,7 @@ func newLakeSignalsService(t *testing.T) *duck.Service {
 	_, err = svc.DB().ExecContext(context.Background(), `
 		CREATE TABLE IF NOT EXISTS lake.signals (
 			subject VARCHAR,
+			subject_bucket INTEGER,
 			name VARCHAR,
 			timestamp TIMESTAMPTZ,
 			source VARCHAR,
@@ -58,9 +59,9 @@ func newLakeSignalsService(t *testing.T) *duck.Service {
 func insertLakeSignal(t *testing.T, svc *duck.Service, subject, name, ceID string, ts time.Time, valNum float64) {
 	t.Helper()
 	_, err := svc.DB().ExecContext(context.Background(),
-		`INSERT INTO lake.signals (subject, name, timestamp, source, producer, cloud_event_id, value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading)
-		 VALUES (?, ?, ?, 'src', 'prod', ?, ?, '', 0.0, 0.0, 0.0, 0.0)`,
-		subject, name, ts.UTC(), ceID, valNum)
+		`INSERT INTO lake.signals (subject, subject_bucket, name, timestamp, source, producer, cloud_event_id, value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading)
+		 VALUES (?, ?, ?, ?, 'src', 'prod', ?, ?, '', 0.0, 0.0, 0.0, 0.0)`,
+		subject, duck.HashBucket(subject), name, ts.UTC(), ceID, valNum)
 	require.NoError(t, err)
 }
 

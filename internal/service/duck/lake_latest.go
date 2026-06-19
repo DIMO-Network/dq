@@ -9,8 +9,19 @@ import (
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
-// lakeSignals is the DuckLake decoded-signal table.
-const lakeSignals = "lake.signals"
+// lakeSignalsDeduped is the canonical DuckLake decoded-signal source:
+// lake.signals with at-rest duplicate (subject,name,timestamp) rows collapsed
+// to one row (lowest cloud_event_id). At-least-once ingest (device retry, sink
+// redelivery, dq cross-batch) can store the same reading more than once with a
+// different cloud_event_id; reading the bare table over-counts
+// avg/count/sum/median/latest/summary (CHD-2 / R1-C1). After collapsing, every
+// (subject,name,timestamp) is unique, so arg_max(value, timestamp) for latest
+// has no tie-break ambiguity either (R1-C2). Matches the segments path
+// (segments_source.go) and ClickHouse FINAL merge semantics. The PARTITION BY
+// columns are partition/sort keys (CHD-1), so subject/timestamp predicates
+// still prune below the window.
+const lakeSignalsDeduped = `(SELECT * FROM lake.signals ` +
+	`QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1)`
 
 // lakeNonZeroLoc is the on-the-fly (0,0)-exclusion over base location
 // columns, replacing the bucket layout's precomputed loc_*_nonzero columns.
@@ -25,9 +36,9 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 		return nil, nil
 	}
 	srcCond, srcArgs := signalSourceCond("source", latestArgs.Filter)
-	srcSQL := ""
+	srcSQL := " AND " + subjectBucketPredicate("", subject) // partition pruning (CHD-1)
 	if srcCond != "" {
-		srcSQL = " AND " + srcCond
+		srcSQL += " AND " + srcCond
 	}
 
 	var stmts []string
@@ -40,7 +51,7 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 				coalesce(arg_max(value_string, timestamp), '') AS value_string,
 				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
 			FROM %s WHERE subject = ? AND name IN (%s)%s GROUP BY name`,
-			lakeSignals, placeholders(len(names)), srcSQL))
+			lakeSignalsDeduped, placeholders(len(names)), srcSQL))
 		args = append(args, subject)
 		for _, n := range names {
 			args = append(args, n)
@@ -58,7 +69,7 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 				coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
 				coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading
 			FROM %[3]s WHERE subject = ? AND name IN (%[4]s)%[5]s GROUP BY name`,
-			lakeNonZeroLoc, epochLiteral, lakeSignals, placeholders(len(names)), srcSQL))
+			lakeNonZeroLoc, epochLiteral, lakeSignalsDeduped, placeholders(len(names)), srcSQL))
 		args = append(args, subject)
 		for _, n := range names {
 			args = append(args, n)
@@ -76,9 +87,9 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 // getAllLatestSignalsLake is getLatestSignalsLake for every stored name.
 func (q *Queries) getAllLatestSignalsLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error) {
 	srcCond, srcArgs := signalSourceCond("source", filter)
-	srcSQL := ""
+	srcSQL := " AND " + subjectBucketPredicate("", subject) // partition pruning (CHD-1)
 	if srcCond != "" {
-		srcSQL = " AND " + srcCond
+		srcSQL += " AND " + srcCond
 	}
 	mainStmt := fmt.Sprintf(
 		`SELECT name, max(timestamp) AS ts,
@@ -89,7 +100,7 @@ func (q *Queries) getAllLatestSignalsLake(ctx context.Context, subject string, f
 			coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
 			coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading
 		FROM %[2]s WHERE subject = ?%[3]s GROUP BY name`,
-		lakeNonZeroLoc, lakeSignals, srcSQL)
+		lakeNonZeroLoc, lakeSignalsDeduped, srcSQL)
 	args := append([]any{subject}, srcArgs...)
 
 	lastSeenStmt, lastSeenArgs := lakeLastSeenQuery(subject, srcSQL, srcArgs)
@@ -107,18 +118,18 @@ func lakeLastSeenQuery(subject, srcSQL string, srcArgs []any) (string, []any) {
 			0.0 AS value_number, '' AS value_string,
 			0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
 		FROM %[3]s WHERE subject = ?%[4]s`,
-		sqlString(model.LastSeenField), epochLiteral, lakeSignals, srcSQL)
+		sqlString(model.LastSeenField), epochLiteral, lakeSignalsDeduped, srcSQL)
 	return stmt, append([]any{subject}, srcArgs...)
 }
 
 // getAvailableSignalsLake lists distinct signal names from lake.signals.
 func (q *Queries) getAvailableSignalsLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
 	srcCond, srcArgs := signalSourceCond("source", filter)
-	srcSQL := ""
+	srcSQL := " AND " + subjectBucketPredicate("", subject) // partition pruning (CHD-1)
 	if srcCond != "" {
-		srcSQL = " AND " + srcCond
+		srcSQL += " AND " + srcCond
 	}
-	stmt := fmt.Sprintf("SELECT DISTINCT name FROM %s WHERE subject = ?%s ORDER BY name", lakeSignals, srcSQL)
+	stmt := fmt.Sprintf("SELECT DISTINCT name FROM %s WHERE subject = ?%s ORDER BY name", lakeSignalsDeduped, srcSQL)
 	args := append([]any{subject}, srcArgs...)
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
@@ -140,14 +151,14 @@ func (q *Queries) getAvailableSignalsLake(ctx context.Context, subject string, f
 // from lake.signals (the bucket path sums precomputed summary rows).
 func (q *Queries) getSignalSummariesLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
 	srcCond, srcArgs := signalSourceCond("source", filter)
-	srcSQL := ""
+	srcSQL := " AND " + subjectBucketPredicate("", subject) // partition pruning (CHD-1)
 	if srcCond != "" {
-		srcSQL = " AND " + srcCond
+		srcSQL += " AND " + srcCond
 	}
 	stmt := fmt.Sprintf(
 		`SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp), max(timestamp)
 		FROM %s WHERE subject = ?%s GROUP BY name ORDER BY name`,
-		lakeSignals, srcSQL)
+		lakeSignalsDeduped, srcSQL)
 	args := append([]any{subject}, srcArgs...)
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
 	if err != nil {

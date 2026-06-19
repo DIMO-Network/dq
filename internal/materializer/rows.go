@@ -21,35 +21,42 @@ const subjectBloomFilterBitsPerValue = 10
 // (decoded/v1/signals/date=YYYY-MM-DD/...). vss.Signal's
 // Data.ValueLocation is flattened into the four loc_* columns.
 type SignalRow struct {
-	Subject      string    `parquet:"subject"`
-	Name         string    `parquet:"name"`
-	Timestamp    time.Time `parquet:"timestamp,timestamp(microsecond)"`
-	Source       string    `parquet:"source"`
-	Producer     string    `parquet:"producer"`
-	CloudEventID string    `parquet:"cloud_event_id"`
-	ValueNumber  float64   `parquet:"value_number"`
-	ValueString  string    `parquet:"value_string"`
-	LocLat       float64   `parquet:"loc_lat"`
-	LocLon       float64   `parquet:"loc_lon"`
-	LocHDOP      float64   `parquet:"loc_hdop"`
-	LocHeading   float64   `parquet:"loc_heading"`
+	Subject string `parquet:"subject"`
+	// SubjectBucket is HashBucket(Subject): the decoded tables are PARTITIONED
+	// BY (subject_bucket, day(timestamp)) so per-vehicle reads prune to one
+	// bucket instead of scanning the fleet (CHD-1). Stamped at decode time so
+	// it always agrees with the read-side duck.HashBucket.
+	SubjectBucket int32     `parquet:"subject_bucket"`
+	Name          string    `parquet:"name"`
+	Timestamp     time.Time `parquet:"timestamp,timestamp(microsecond)"`
+	Source        string    `parquet:"source"`
+	Producer      string    `parquet:"producer"`
+	CloudEventID  string    `parquet:"cloud_event_id"`
+	ValueNumber   float64   `parquet:"value_number"`
+	ValueString   string    `parquet:"value_string"`
+	LocLat        float64   `parquet:"loc_lat"`
+	LocLon        float64   `parquet:"loc_lon"`
+	LocHDOP       float64   `parquet:"loc_hdop"`
+	LocHeading    float64   `parquet:"loc_heading"`
 }
 
 // EventRow is the decoded event parquet schema
 // (decoded/v1/events/date=YYYY-MM-DD/...) carrying all 11
 // vss.EventToSlice columns.
 type EventRow struct {
-	Subject      string    `parquet:"subject"`
-	Source       string    `parquet:"source"`
-	Producer     string    `parquet:"producer"`
-	CloudEventID string    `parquet:"cloud_event_id"`
-	Type         string    `parquet:"type"`
-	DataVersion  string    `parquet:"data_version"`
-	Name         string    `parquet:"name"`
-	Timestamp    time.Time `parquet:"timestamp,timestamp(microsecond)"`
-	DurationNs   uint64    `parquet:"duration_ns"`
-	Metadata     string    `parquet:"metadata"`
-	Tags         []string  `parquet:"tags,list"`
+	Subject string `parquet:"subject"`
+	// SubjectBucket mirrors SignalRow.SubjectBucket for lake.events partitioning.
+	SubjectBucket int32     `parquet:"subject_bucket"`
+	Source        string    `parquet:"source"`
+	Producer      string    `parquet:"producer"`
+	CloudEventID  string    `parquet:"cloud_event_id"`
+	Type          string    `parquet:"type"`
+	DataVersion   string    `parquet:"data_version"`
+	Name          string    `parquet:"name"`
+	Timestamp     time.Time `parquet:"timestamp,timestamp(microsecond)"`
+	DurationNs    uint64    `parquet:"duration_ns"`
+	Metadata      string    `parquet:"metadata"`
+	Tags          []string  `parquet:"tags,list"`
 }
 
 // LatestRow is one row per (subject, source, name) in

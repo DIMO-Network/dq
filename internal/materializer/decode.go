@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
+	"github.com/DIMO-Network/dq/internal/service/duck"
 	mgconvert "github.com/DIMO-Network/model-garage/pkg/convert"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
@@ -86,18 +87,19 @@ func signalRowFromVSS(rawEvent *cloudevent.RawEvent, sig *vss.Signal) SignalRow 
 		cloudEventID = rawEvent.ID
 	}
 	return SignalRow{
-		Subject:      rawEvent.Subject,
-		Name:         sig.Data.Name,
-		Timestamp:    sig.Data.Timestamp.UTC().Truncate(time.Microsecond),
-		Source:       rawEvent.Source,
-		Producer:     rawEvent.Producer,
-		CloudEventID: cloudEventID,
-		ValueNumber:  sig.Data.ValueNumber,
-		ValueString:  sig.Data.ValueString,
-		LocLat:       sig.Data.ValueLocation.Latitude,
-		LocLon:       sig.Data.ValueLocation.Longitude,
-		LocHDOP:      sig.Data.ValueLocation.HDOP,
-		LocHeading:   sig.Data.ValueLocation.Heading,
+		Subject:       rawEvent.Subject,
+		SubjectBucket: int32(duck.HashBucket(rawEvent.Subject)),
+		Name:          sig.Data.Name,
+		Timestamp:     sig.Data.Timestamp.UTC().Truncate(time.Microsecond),
+		Source:        rawEvent.Source,
+		Producer:      rawEvent.Producer,
+		CloudEventID:  cloudEventID,
+		ValueNumber:   sig.Data.ValueNumber,
+		ValueString:   sig.Data.ValueString,
+		LocLat:        sig.Data.ValueLocation.Latitude,
+		LocLon:        sig.Data.ValueLocation.Longitude,
+		LocHDOP:       sig.Data.ValueLocation.HDOP,
+		LocHeading:    sig.Data.ValueLocation.Heading,
 	}
 }
 
@@ -113,17 +115,18 @@ func eventRowFromVSS(rawEvent *cloudevent.RawEvent, ev *vss.Event) EventRow {
 		tags = []string{}
 	}
 	return EventRow{
-		Subject:      rawEvent.Subject,
-		Source:       rawEvent.Source,
-		Producer:     rawEvent.Producer,
-		CloudEventID: cloudEventID,
-		Type:         cmp.Or(ev.Type, cloudevent.TypeEvent),
-		DataVersion:  cmp.Or(ev.DataVersion, rawEvent.DataVersion),
-		Name:         ev.Data.Name,
-		Timestamp:    ev.Data.Timestamp.UTC().Truncate(time.Microsecond),
-		DurationNs:   ev.Data.DurationNs,
-		Metadata:     ev.Data.Metadata,
-		Tags:         tags,
+		Subject:       rawEvent.Subject,
+		SubjectBucket: int32(duck.HashBucket(rawEvent.Subject)),
+		Source:        rawEvent.Source,
+		Producer:      rawEvent.Producer,
+		CloudEventID:  cloudEventID,
+		Type:          cmp.Or(ev.Type, cloudevent.TypeEvent),
+		DataVersion:   cmp.Or(ev.DataVersion, rawEvent.DataVersion),
+		Name:          ev.Data.Name,
+		Timestamp:     ev.Data.Timestamp.UTC().Truncate(time.Microsecond),
+		DurationNs:    ev.Data.DurationNs,
+		Metadata:      ev.Data.Metadata,
+		Tags:          tags,
 	}
 }
 

@@ -26,6 +26,7 @@ func newLakeServiceForTest(t *testing.T) *Service {
 	_, err = svc.db.ExecContext(context.Background(), `
 		CREATE TABLE IF NOT EXISTS lake.signals (
 			subject VARCHAR,
+			subject_bucket INTEGER,
 			name VARCHAR,
 			timestamp TIMESTAMPTZ,
 			source VARCHAR,
@@ -46,9 +47,9 @@ func newLakeServiceForTest(t *testing.T) *Service {
 func insertSignal(t *testing.T, svc *Service, subject, name, ceID string, ts time.Time, valNum float64) {
 	t.Helper()
 	_, err := svc.db.ExecContext(context.Background(),
-		`INSERT INTO lake.signals (subject, name, timestamp, source, producer, cloud_event_id, value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading)
-		 VALUES (?, ?, ?, 'src', 'prod', ?, ?, '', 0.0, 0.0, 0.0, 0.0)`,
-		subject, name, ts.UTC(), ceID, valNum)
+		`INSERT INTO lake.signals (subject, subject_bucket, name, timestamp, source, producer, cloud_event_id, value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading)
+		 VALUES (?, ?, ?, ?, 'src', 'prod', ?, ?, '', 0.0, 0.0, 0.0, 0.0)`,
+		subject, HashBucket(subject), name, ts.UTC(), ceID, valNum)
 	require.NoError(t, err)
 }
 
@@ -304,4 +305,40 @@ func TestLakeSignalSource_IgnitionStateChanges_OldSeedIgnored(t *testing.T) {
 	// The old row is outside the lookback window; only the in-range transition.
 	require.Len(t, changes, 1)
 	assert.Equal(t, from.Add(10*time.Minute), changes[0].TS)
+}
+
+// TestLakeSignalSource_IgnitionStateChanges_NullValueDoesNotPoison verifies
+// that a NULL value_number row (a missing ignition reading) neither emits a
+// spurious transition itself nor poisons the following row's LAG. Without the
+// `value_number IS NOT NULL` filter, the NULL row makes the next real row's
+// prev_state coalesce to -1, wrongly emitting an unchanged ON reading as a
+// transition (a spurious trip boundary).
+func TestLakeSignalSource_IgnitionStateChanges_NullValueDoesNotPoison(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeServiceForTest(t)
+	src := NewLakeSignalSource(svc)
+
+	subject := testSubject1
+	from := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
+
+	t1 := from.Add(10 * time.Minute) // ON (first reading → genuine transition)
+	t2 := from.Add(20 * time.Minute) // NULL reading
+	t3 := from.Add(30 * time.Minute) // still ON → NOT a transition
+
+	insertSignal(t, svc, subject, "isIgnitionOn", "ce-1", t1, 1.0)
+	// NULL ignition reading at t2 (missing value).
+	_, err := svc.db.ExecContext(ctx,
+		`INSERT INTO lake.signals (subject, subject_bucket, name, timestamp, source, producer, cloud_event_id, value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading)
+		 VALUES (?, ?, 'isIgnitionOn', ?, 'src', 'prod', 'ce-null', NULL, '', 0.0, 0.0, 0.0, 0.0)`,
+		subject, HashBucket(subject), t2.UTC())
+	require.NoError(t, err)
+	insertSignal(t, svc, subject, "isIgnitionOn", "ce-3", t3, 1.0)
+
+	changes, err := src.IgnitionStateChanges(ctx, subject, from, to)
+	require.NoError(t, err)
+
+	require.Len(t, changes, 1, "NULL value_number must not emit or poison a spurious transition at t3")
+	assert.Equal(t, t1, changes[0].TS)
+	assert.Equal(t, 1.0, changes[0].NewState)
 }

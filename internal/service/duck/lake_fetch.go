@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
@@ -21,6 +22,13 @@ var errOrClauseUnsupported = errors.New("lake fetch: Or clauses in advanced filt
 
 const lakeRawEvents = "lake.raw_events"
 
+// maxLakeQueryLimit caps the number of rows a single lake fetch query may
+// return, matching ClickHouse eventrepo.maxQueryLimit. Without it an oversized
+// caller-supplied limit (the gRPC layer passes it through unguarded) forces an
+// unbounded scan plus a Go-side dedup map — a memory/latency DoS ClickHouse is
+// immune to.
+const maxLakeQueryLimit = 1000
+
 // lakeRawColumns matches rawColumns and scanStoredEvent's scan order.
 const lakeRawColumns = "subject, time, type, id, source, producer, data_content_type, data_version, extras, data, data_base64, data_index_key, voids_id"
 
@@ -29,16 +37,18 @@ const lakeRawColumns = "subject, time, type, id, source, producer, data_content_
 // payload resolution reads inline data (or presigns a blob).
 type LakeEventService struct {
 	svc       *Service
+	getter    eventrepo.ObjectGetter // fetches blob payload bytes from S3 (gRPC path)
 	presigner eventrepo.Presigner
-	bucket    string // parquet bucket for presigning
+	bucket    string // parquet/blob bucket for presigning and blob download
 }
 
 // NewLakeEventService constructs a LakeEventService backed by svc (which must
-// have the DuckLake catalog attached as schema "lake"). presigner and bucket
-// are used to presign blob payloads stored in S3; both may be nil/empty when
-// large-payload blobs are not expected.
-func NewLakeEventService(svc *Service, presigner eventrepo.Presigner, bucket string) *LakeEventService {
-	return &LakeEventService{svc: svc, presigner: presigner, bucket: bucket}
+// have the DuckLake catalog attached as schema "lake"). getter downloads blob
+// payloads for the gRPC fetch path; presigner and bucket are used to presign
+// blob payloads stored in S3 for the GraphQL path. getter/presigner may be
+// nil and bucket empty when large-payload blobs are not expected.
+func NewLakeEventService(svc *Service, getter eventrepo.ObjectGetter, presigner eventrepo.Presigner, bucket string) *LakeEventService {
+	return &LakeEventService{svc: svc, getter: getter, presigner: presigner, bucket: bucket}
 }
 
 var _ eventrepo.EventService = (*LakeEventService)(nil)
@@ -95,6 +105,9 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 func (l *LakeEventService) ListIndexesAdvanced(ctx context.Context, limit int, opts *grpc.AdvancedSearchOptions) ([]cloudevent.CloudEvent[eventrepo.ObjectInfo], error) {
 	if limit <= 0 {
 		limit = 1
+	}
+	if limit > maxLakeQueryLimit {
+		limit = maxLakeQueryLimit
 	}
 	f, err := filterFromAdvanced(opts)
 	if err != nil {
@@ -189,9 +202,11 @@ func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Contex
 }
 
 // GetCloudEventFromIndex re-reads the event row by (subject, id) and returns
-// the inline data payload. Blob events (data_index_key set) are also returned
-// inline when the row carries data; for pure blob references the caller should
-// use PresignBlobURL.
+// its payload. Inline events return their stored data directly; blob events
+// (data_index_key under BlobKeyPrefix, no inline data) have their raw bytes
+// downloaded from S3 so the gRPC fetch path returns a non-empty payload. The
+// GraphQL path presigns blobs via PresignBlobURL instead and never reaches the
+// download here.
 func (l *LakeEventService) GetCloudEventFromIndex(ctx context.Context, index *cloudevent.CloudEvent[eventrepo.ObjectInfo], _ string) (cloudevent.RawEvent, error) {
 	evs, err := l.queryLakeRaw(ctx, RawFilter{
 		Subject:       index.Subject,
@@ -204,7 +219,31 @@ func (l *LakeEventService) GetCloudEventFromIndex(ctx context.Context, index *cl
 	if len(evs) == 0 {
 		return cloudevent.RawEvent{}, ErrNotFound
 	}
-	return toRawEvent(evs[0]), nil
+	return l.resolvePayload(ctx, evs[0])
+}
+
+// resolvePayload returns ev's payload, downloading the blob bytes from S3 when
+// the event externalized its payload (data_index_key under BlobKeyPrefix with
+// no inline data). din stores the raw decoded payload at the blob key, so the
+// downloaded bytes go straight into Data — the gRPC proto (CloudEventToProto)
+// carries only Data, so this is the field that reaches blob consumers.
+func (l *LakeEventService) resolvePayload(ctx context.Context, ev cloudevent.StoredEvent) (cloudevent.RawEvent, error) {
+	raw := toRawEvent(ev)
+	if len(raw.Data) > 0 || raw.DataBase64 != "" {
+		return raw, nil // inline payload present
+	}
+	if !strings.HasPrefix(ev.DataIndexKey, eventrepo.BlobKeyPrefix) {
+		return raw, nil // no blob reference: genuinely empty payload
+	}
+	if l.getter == nil {
+		return cloudevent.RawEvent{}, fmt.Errorf("blob payload %s requires an object store but none is configured", ev.DataIndexKey)
+	}
+	data, err := eventrepo.DownloadObject(ctx, l.getter, l.bucket, ev.DataIndexKey)
+	if err != nil {
+		return cloudevent.RawEvent{}, fmt.Errorf("fetch blob payload %s: %w", ev.DataIndexKey, err)
+	}
+	raw.Data = data
+	return raw, nil
 }
 
 // ListCloudEventsFromIndexes fetches the payload for each index entry.

@@ -41,6 +41,14 @@ func downloadS3Object(ctx context.Context, client ObjectGetter, bucket, key stri
 	return data, nil
 }
 
+// DownloadObject fetches an entire S3 object into memory, rejecting objects
+// larger than the maximum single-object size (maxObjectSize). It is the
+// blob-payload resolution primitive shared by the ClickHouse fetch path
+// (getObjectFromS3) and the DuckLake LakeEventService.
+func DownloadObject(ctx context.Context, client ObjectGetter, bucket, key string) ([]byte, error) {
+	return downloadS3Object(ctx, client, bucket, key, maxObjectSize)
+}
+
 // S3ReaderAt implements io.ReaderAt by downloading the entire S3 object into
 // memory on creation. This avoids multiple round-trips (HeadObject + range
 // GETs) which is optimal for the expected file sizes (< 100 KB).

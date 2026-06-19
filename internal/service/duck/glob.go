@@ -94,6 +94,18 @@ func HashBucket(subject string) int {
 	return int(h.Sum32() % NumLatestBuckets)
 }
 
+// subjectBucketPredicate returns the inlined partition-pruning predicate for a
+// subject: "<prefix>subject_bucket = N" where N = HashBucket(subject). The
+// decoded lake tables are PARTITIONED BY (subject_bucket, day(timestamp))
+// (CHD-1), so pairing this with the subject filter lets DuckLake skip every
+// partition but the subject's. The value is a small int stamped at decode time
+// by the same HashBucket, so it is inlined (like the timestamp literals) rather
+// than bound — no injection risk. Lake mode only; bucket-mode decoded files may
+// predate the column.
+func subjectBucketPredicate(prefix, subject string) string {
+	return fmt.Sprintf("%ssubject_bucket = %d", prefix, HashBucket(subject))
+}
+
 // ReadParquetSQL renders a read_parquet table function over the given globs:
 // read_parquet(['g1', 'g2'], hive_partitioning=true, union_by_name=true).
 // Hive partition columns (type, date, bucket) become queryable columns and

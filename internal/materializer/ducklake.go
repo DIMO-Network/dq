@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
+	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/rs/zerolog"
 )
 
@@ -29,6 +30,12 @@ import (
 type DuckLakeMaterializer struct {
 	db  *sql.DB
 	log zerolog.Logger
+	// blobs resolves externalized payloads: din writes payloads larger than
+	// the inline threshold to S3 and leaves only a data_index_key (under
+	// BlobKeyPrefix) on the raw_events row. Without it those rows decode to
+	// nothing. nil disables blob resolution (blobs not expected, e.g. tests).
+	blobs      eventrepo.ObjectGetter
+	blobBucket string
 }
 
 // snapshotCursorPartition is the single ingest_progress key holding the last
@@ -50,6 +57,16 @@ func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger
 	return m, nil
 }
 
+// WithBlobStore configures blob-payload resolution: when a raw_events row has
+// no inline data but a data_index_key under BlobKeyPrefix, the materializer
+// downloads the payload from bucket via getter before decoding. Mirrors the
+// fetch path's LakeEventService.resolvePayload. Returns m for chaining.
+func (m *DuckLakeMaterializer) WithBlobStore(getter eventrepo.ObjectGetter, bucket string) *DuckLakeMaterializer {
+	m.blobs = getter
+	m.blobBucket = bucket
+	return m
+}
+
 func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 	sigTmp, err := writeTempParquet(writeSignalParquet, []SignalRow{})
 	if err != nil {
@@ -63,8 +80,19 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 	defer func() { _ = os.Remove(evTmp) }()
 
 	stmts := []string{
+		// CREATE then ALTER the partition/sort layout, mirroring din's
+		// raw_events (lake/ddl.go). Partitioning is catalog metadata applied to
+		// data DuckLake writes from here on; the decoded tables don't exist in
+		// prod yet (materializer disabled), so they are partitioned from the
+		// first write and no re-materialization of old rows is needed. ALTER
+		// SET is idempotent, so re-running on every boot is a no-op. "timestamp"
+		// is quoted because it is a DuckDB keyword.
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.signals AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(sigTmp)),
+		`ALTER TABLE lake.signals SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
+		`ALTER TABLE lake.signals SET SORTED BY (subject, "timestamp")`,
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.events AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(evTmp)),
+		`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
+		`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
 		"CREATE TABLE IF NOT EXISTS lake.ingest_progress (partition VARCHAR, cursor VARCHAR)",
 		// din owns this table (the snapshot-expiry floor); create it defensively
 		// so dq can report progress before din has booted against a fresh catalog.
@@ -257,8 +285,11 @@ func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([
 
 	var out []cloudevent.RawEvent
 	for rows.Next() {
-		ev, err := scanRawEvent(rows)
+		ev, blobKey, err := scanRawEvent(rows)
 		if err != nil {
+			return nil, err
+		}
+		if err := m.resolveBlob(ctx, &ev, blobKey); err != nil {
 			return nil, err
 		}
 		out = append(out, ev)
@@ -266,23 +297,47 @@ func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([
 	return out, rows.Err()
 }
 
+// resolveBlob populates ev.Data from S3 when ev carries no inline payload but a
+// data_index_key under BlobKeyPrefix. din externalizes payloads larger than the
+// inline threshold to a blob and leaves only the key on the raw_events row, so
+// without this every such payload decodes to nothing (CHD-8). Mirrors the fetch
+// path's LakeEventService.resolvePayload: din stores the raw decoded bytes at
+// the key and the decode path reads ev.Data.
+func (m *DuckLakeMaterializer) resolveBlob(ctx context.Context, ev *cloudevent.RawEvent, dataIndexKey string) error {
+	if len(ev.Data) > 0 || ev.DataBase64 != "" {
+		return nil // inline payload present
+	}
+	if !strings.HasPrefix(dataIndexKey, eventrepo.BlobKeyPrefix) {
+		return nil // no blob reference: genuinely empty payload
+	}
+	if m.blobs == nil {
+		return fmt.Errorf("raw_events row %s references blob payload %s but no object store is configured", ev.ID, dataIndexKey)
+	}
+	data, err := eventrepo.DownloadObject(ctx, m.blobs, m.blobBucket, dataIndexKey)
+	if err != nil {
+		return fmt.Errorf("fetching blob payload %s: %w", dataIndexKey, err)
+	}
+	ev.Data = data
+	return nil
+}
+
 // scanRawEvent rebuilds a RawEvent from a raw_events row, restoring the
 // non-column header fields from extras exactly like the parquet decoder.
-func scanRawEvent(rows *sql.Rows) (cloudevent.RawEvent, error) {
+func scanRawEvent(rows *sql.Rows) (cloudevent.RawEvent, string, error) {
 	var ev cloudevent.RawEvent
 	var ts time.Time
 	var extras, data, dataIndexKey, voidsID sql.NullString
 	var dataBase64 []byte
 	if err := rows.Scan(&ev.Subject, &ts, &ev.Type, &ev.ID, &ev.Source, &ev.Producer,
 		&ev.DataContentType, &ev.DataVersion, &extras, &data, &dataBase64, &dataIndexKey, &voidsID); err != nil {
-		return ev, fmt.Errorf("scanning raw_events row: %w", err)
+		return ev, "", fmt.Errorf("scanning raw_events row: %w", err)
 	}
 	ev.SpecVersion = cloudevent.SpecVersion
 	ev.Time = ts.UTC()
 	if extras.Valid && extras.String != "" && extras.String != "{}" {
 		ev.Extras = map[string]any{}
 		if err := json.Unmarshal([]byte(extras.String), &ev.Extras); err != nil {
-			return ev, fmt.Errorf("decoding extras for %s: %w", ev.ID, err)
+			return ev, "", fmt.Errorf("decoding extras for %s: %w", ev.ID, err)
 		}
 		cloudevent.RestoreNonColumnFields(&ev.CloudEventHeader)
 	}
@@ -294,9 +349,10 @@ func scanRawEvent(rows *sql.Rows) (cloudevent.RawEvent, error) {
 	// voids_id is selected (column parity with raw_events) but not applied:
 	// the decode path routes only status->signals and events->events;
 	// tombstones are skipped, and voiding is a read-side concern handled on
-	// the raw query path. Discard it here.
+	// the raw query path. Discard it here. data_index_key is returned so the
+	// caller can resolve an externalized blob payload before decode.
 	_ = voidsID
-	return ev, nil
+	return ev, dataIndexKey.String, nil
 }
 
 // commit writes the decoded rows and advances the snapshot cursor in one
@@ -326,7 +382,7 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 			return err
 		}
 		cleanup = append(cleanup, tmp)
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO lake.signals SELECT * FROM read_parquet(%s)", sqlLit(tmp))); err != nil {
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp)); err != nil {
 			return fmt.Errorf("insert signals: %w", err)
 		}
 	}
@@ -336,7 +392,7 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 			return err
 		}
 		cleanup = append(cleanup, tmp)
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO lake.events SELECT * FROM read_parquet(%s)", sqlLit(tmp))); err != nil {
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp)); err != nil {
 			return fmt.Errorf("insert events: %w", err)
 		}
 	}
@@ -402,4 +458,24 @@ func writeTempParquet[T any](enc func([]T) ([]byte, error), rows []T) (string, e
 // sqlLit single-quotes a string literal for inlined DuckDB SQL (paths only).
 func sqlLit(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// antiJoinInsert builds the idempotent INSERT for a decoded table: it skips any
+// source row whose cloudevent identity (cloud_event_id, name, timestamp) is
+// already present at rest, pruned by subject_bucket (CHD-7). The pipeline is
+// at-least-once at every seam, so the same cloudevent can be redelivered in a
+// later snapshot; without this guard it would be decoded and stored twice,
+// inflating every aggregate that reads the table. Intra-batch duplicates are
+// already collapsed in decodeEvents (ev.Key()); this guards the cross-batch
+// case. subject_bucket is a deterministic function of the (cloudevent-derived)
+// subject, so adding it to the predicate is always satisfied for a true
+// duplicate and lets DuckLake probe only the subject's partition.
+func antiJoinInsert(table, parquetPath string) string {
+	return fmt.Sprintf(
+		"INSERT INTO %[1]s SELECT * FROM read_parquet(%[2]s) AS src "+
+			"WHERE NOT EXISTS (SELECT 1 FROM %[1]s AS t "+
+			"WHERE t.subject_bucket = src.subject_bucket "+
+			"AND t.cloud_event_id = src.cloud_event_id "+
+			"AND t.name = src.name AND t.timestamp = src.timestamp)",
+		table, sqlLit(parquetPath))
 }
