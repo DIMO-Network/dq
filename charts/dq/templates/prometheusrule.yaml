@@ -48,6 +48,11 @@ spec:
           annotations:
             summary: shadow backend disagreement
             description: DuckDB and ClickHouse returned different results for the same query.
+        # End-to-end decode backlog as a single number (CHD-14): how many
+        # DuckLake snapshots the decoder is behind the committed head. Pair with
+        # din's head-age metric for the full pipeline lag.
+        - record: dq:pipeline_snapshot_backlog
+          expr: max(dq_materializer_head_snapshot_id) - max(dq_materializer_cursor_snapshot_id)
         - alert: DQShadowDropped
           expr: increase(dq_shadow_dropped_total[1h]) > 0 or increase(dq_fetch_shadow_dropped_total[1h]) > 0
           for: 10m
