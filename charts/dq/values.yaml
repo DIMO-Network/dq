@@ -40,6 +40,15 @@ env:
   DECODED_PREFIX: decoded/v1/
   MATERIALIZER_ENABLED: 'false'
   MATERIALIZER_POLL_INTERVAL: 15s
+  # DuckDB runtime sizing (CHD-20). memory_limit must be ~75% of the pod memory
+  # limit — DuckDB otherwise sizes to 80% of NODE RAM, blind to the cgroup, and
+  # OOM-kills before spilling. threads must match the CPU limit (default 64
+  # throttled to 1 CPU). temp_directory gives a spill volume so large scans
+  # spill to disk instead of OOMing. These base values suit the small dev pod;
+  # values-prod raises them with the pod size.
+  DUCKDB_MEMORY_LIMIT: 256MiB
+  DUCKDB_THREADS: 1
+  DUCKDB_TEMP_DIRECTORY: /tmp/duckdb
   S3_AWS_REGION: us-east-2
   DIMO_REGISTRY_CHAIN_ID: 80002
   VEHICLE_NFT_ADDRESS: '0x45fbCD3ef7361d156e8b16F5538AE36DEdf61Da8'
@@ -93,6 +102,9 @@ resources:
   requests:
     cpu: 5m
     memory: 32Mi
+# Size of the emptyDir backing DUCKDB_TEMP_DIRECTORY (DuckDB spill). Only
+# mounted when env.DUCKDB_TEMP_DIRECTORY is set. Raise in values-prod.
+duckdbTempSizeLimit: 5Gi
 autoscaling:
   enabled: false
   minReplicas: 1

@@ -94,6 +94,15 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 		`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
 		`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
 		"CREATE TABLE IF NOT EXISTS lake.ingest_progress (partition VARCHAR, cursor VARCHAR)",
+		// Seed the cursor row once so every advance is a compare-and-swap UPDATE
+		// against a single row (CHD-9). Without a pre-seeded row the first writer
+		// does a guard-less INSERT, and two concurrent first-writers both insert
+		// and then both decode the same snapshot range. NOT EXISTS keeps
+		// re-bootstrap (restart, second replica) idempotent; the conflict-retry
+		// loop below serializes the rare concurrent first seed.
+		fmt.Sprintf("INSERT INTO lake.ingest_progress (partition, cursor) "+
+			"SELECT %s, '0' WHERE NOT EXISTS (SELECT 1 FROM lake.ingest_progress WHERE partition = %s)",
+			sqlLit(snapshotCursorPartition), sqlLit(snapshotCursorPartition)),
 		// din owns this table (the snapshot-expiry floor); create it defensively
 		// so dq can report progress before din has booted against a fresh catalog.
 		`CREATE TABLE IF NOT EXISTS meta.din_consumer_progress (consumer VARCHAR, snapshot_id BIGINT, updated_at TIMESTAMP WITH TIME ZONE)`,
@@ -142,11 +151,9 @@ func isExpiredSnapshot(err error) bool {
 // resetCursor advances the cursor from->to without decoding, used only on
 // expired-feed recovery. The gap is unavoidably skipped.
 func (m *DuckLakeMaterializer) resetCursor(ctx context.Context, from, to int64) error {
-	if from == 0 {
-		_, err := m.db.ExecContext(ctx,
-			"INSERT INTO lake.ingest_progress VALUES (?, ?)", snapshotCursorPartition, fmt.Sprint(to))
-		return err
-	}
+	// CAS against the seeded row (from=0 matches the seeded '0'). If another
+	// writer already advanced past `from`, the UPDATE matches nothing and the
+	// reset is a no-op — that writer owns the recovery.
 	_, err := m.db.ExecContext(ctx,
 		"UPDATE lake.ingest_progress SET cursor = ? WHERE partition = ? AND cursor = ?",
 		fmt.Sprint(to), snapshotCursorPartition, fmt.Sprint(from))
@@ -165,7 +172,10 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 	if err != nil {
 		return 0, err
 	}
+	cursorSnapshotID.Set(float64(cur))
+	headSnapshotID.Set(float64(head))
 	if head <= cur {
+		observeLakeLag(nil) // caught up: no decode lag
 		return 0, nil
 	}
 
@@ -177,7 +187,8 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 		// error loop is worse. The gap is a misconfiguration (retention must
 		// exceed max consumer lag), made visible by the counter.
 		cursorResetsTotal.Inc()
-		m.log.Error().Int64("from", cur).Int64("to", head).
+		cursorResetGap.Set(float64(head - cur))
+		m.log.Error().Int64("from", cur).Int64("to", head).Int64("skipped_snapshots", head-cur).
 			Msg("DuckLake change feed expired; resetting cursor to head (un-decoded gap skipped — increase LAKE_SNAPSHOT_RETENTION)")
 		if rerr := m.resetCursor(ctx, cur, head); rerr != nil {
 			return 0, rerr
@@ -192,8 +203,10 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 		// only because of this decoder's own writes to signals/events. Don't
 		// burn a cursor-advance transaction; the next pass re-reads the same
 		// empty range cheaply and the cursor moves once real data arrives.
+		observeLakeLag(nil) // no pending raw events: no decode lag
 		return 0, nil
 	}
+	observeLakeLag(events) // decode lag = age of the oldest pending event
 	decoded := dec.decodeEvents(ctx, events)
 
 	if err := m.commit(ctx, decoded, cur, head); err != nil {
@@ -202,6 +215,13 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 		}
 		return 0, err
 	}
+	// A batch committed: feed the freshness/throughput alerts the bucket path
+	// already drove (dead in ducklake mode before CHD-12).
+	batchesTotal.WithLabelValues(lakeMetricType).Inc()
+	rowsTotal.WithLabelValues("signals").Add(float64(decoded.signalCount))
+	rowsTotal.WithLabelValues("events").Add(float64(decoded.eventCount))
+	errorsTotal.Add(float64(decoded.errorCount))
+	cursorSnapshotID.Set(float64(head))
 	// Report progress to din's snapshot-expiry floor. Best-effort: the batch
 	// is already durable, and a failed report only holds expiry back
 	// (din won't reclaim past the stale floor — conservative, not unsafe).
@@ -397,21 +417,18 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		}
 	}
 
-	if from == 0 {
-		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO lake.ingest_progress VALUES (?, ?)", snapshotCursorPartition, fmt.Sprint(to)); err != nil {
-			return fmt.Errorf("insert cursor: %w", err)
-		}
-	} else {
-		res, err := tx.ExecContext(ctx,
-			"UPDATE lake.ingest_progress SET cursor = ? WHERE partition = ? AND cursor = ?",
-			fmt.Sprint(to), snapshotCursorPartition, fmt.Sprint(from))
-		if err != nil {
-			return fmt.Errorf("advance cursor: %w", err)
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return errSnapshotMoved
-		}
+	// Advance the cursor as a compare-and-swap against the seeded row (from=0
+	// matches the seeded '0'). RowsAffected==0 means another writer advanced it
+	// first — back off and retry from the new cursor next pass. The seeded row
+	// means there is never a guard-less INSERT branch for two writers to race.
+	res, err := tx.ExecContext(ctx,
+		"UPDATE lake.ingest_progress SET cursor = ? WHERE partition = ? AND cursor = ?",
+		fmt.Sprint(to), snapshotCursorPartition, fmt.Sprint(from))
+	if err != nil {
+		return fmt.Errorf("advance cursor: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errSnapshotMoved
 	}
 
 	if err := tx.Commit(); err != nil {

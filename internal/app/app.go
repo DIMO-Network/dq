@@ -36,6 +36,9 @@ type App struct {
 	Handler    http.Handler
 	MCPHandler http.Handler
 	cleanup    func()
+	// readyCheck probes backend health for the /ready endpoint; nil = always
+	// ready (e.g. pure ClickHouse mode).
+	readyCheck func(context.Context) error
 }
 
 // New creates a new application.
@@ -140,9 +143,15 @@ func New(settings config.Settings) (*App, error) {
 		return nil, fmt.Errorf("couldn't create MCP handler: %w", err)
 	}
 
+	var readyCheck func(context.Context) error
+	if duckSvc != nil {
+		readyCheck = duckReadiness(duckSvc, settings.QueryBackend)
+	}
+
 	return &App{
 		Handler:    authChain(gqlSrv),
 		MCPHandler: authChain(mcpHandler),
+		readyCheck: readyCheck,
 		cleanup: func() {
 			if stopMaterializer != nil {
 				stopMaterializer()

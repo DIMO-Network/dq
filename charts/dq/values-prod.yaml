@@ -9,6 +9,11 @@ cronJob:
 env:
   PORT: 8080
   MON_PORT: 8888
+  # DuckLake query-fleet DuckDB sizing (CHD-20): memory_limit ~75% of the 8Gi
+  # pod, threads = CPU limit. Harmless in ClickHouse mode (unused); sized for
+  # the QUERY_BACKEND=ducklake cutover.
+  DUCKDB_MEMORY_LIMIT: 6GiB
+  DUCKDB_THREADS: 4
 ingress:
   enabled: true
   className: nginx
@@ -25,18 +30,26 @@ ingress:
         - path: /
           pathType: ImplementationSpecific
   tls: []
+# DuckLake query fleet (CHD-20). DuckDB scans are CPU+memory heavy and spill to
+# DUCKDB_TEMP_DIRECTORY; 1 CPU / 1Gi OOM-killed before spilling. Sized for the
+# ducklake target — see DUCKDB_MEMORY_LIMIT above (≈75% of the memory limit).
 resources:
   limits:
-    cpu: 1
-    memory: 1024Mi
+    cpu: 4
+    memory: 8Gi
   requests:
-    cpu: 100m
-    memory: 256Mi
+    cpu: 1
+    memory: 2Gi
+duckdbTempSizeLimit: 20Gi
+# HPA on CPU and memory for the query fleet (MATERIALIZER_ENABLED=false). The
+# materializer runs as a separate replicaCount=1, autoscaling-off release
+# (enforced by the deployment guard).
 autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 100
-  targetCPUUtilizationPercentage: 80
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 75
 nodeSelector: {}
 tolerations: []
 affinity: {}

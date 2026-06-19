@@ -27,6 +27,19 @@ spec:
           annotations:
             summary: materializer has pending work but committed no batches in 30m
             description: watermark is not advancing — decode pipeline is stuck.
+        - alert: DQMaterializerCursorReset
+          expr: increase(dq_materializer_cursor_resets_total[1h]) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: DuckLake materializer skipped an un-decoded snapshot range
+            description: >-
+              The decode cursor lagged past LAKE_SNAPSHOT_RETENTION and was reset
+              to head, permanently skipping un-decoded raw events
+              ({{ "{{ $value }}" }} resets; span in
+              dq_materializer_last_cursor_reset_gap_snapshots). Backfill the
+              skipped range, then raise retention or decode throughput.
         - alert: DQShadowMismatch
           expr: increase(dq_shadow_mismatch_total[1h]) > 0
           for: 5m

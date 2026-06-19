@@ -1,3 +1,16 @@
+{{- /*
+The embedded materializer is a single-writer component (CHD-9). Running it on
+more than one pod means two decoders advance the snapshot cursor and double-decode
+(the catalog CAS makes that safe but wasteful, and the bootstrap race is only
+fully closed at one writer). Refuse to render a multi-replica materializer: run
+decode as its own replicaCount=1, autoscaling-off release, and scale the
+query-only fleet separately with MATERIALIZER_ENABLED=false.
+*/ -}}
+{{- if eq (toString (.Values.env.MATERIALIZER_ENABLED | default "false")) "true" }}
+{{-   if or (gt (int .Values.replicaCount) 1) .Values.autoscaling.enabled }}
+{{-     fail "dq: MATERIALIZER_ENABLED=true requires replicaCount=1 and autoscaling.enabled=false (single-writer). Run the materializer as a dedicated 1-replica release and the query fleet as a separate release with MATERIALIZER_ENABLED=false." }}
+{{-   end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -63,11 +76,30 @@ spec:
               path: /
               port: mon-http
           readinessProbe:
+            # Real backend check (CHD-13): /ready probes the query catalog on
+            # the serving port, so a cold/catalog-down pod is pulled from the
+            # Service instead of returning the static mon-http 200.
             httpGet:
-              path: /
-              port: mon-http
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.env.DUCKDB_TEMP_DIRECTORY }}
+          volumeMounts:
+            - name: duckdb-temp
+              mountPath: {{ .Values.env.DUCKDB_TEMP_DIRECTORY | quote }}
+          {{- end }}
+      {{- if .Values.env.DUCKDB_TEMP_DIRECTORY }}
+      volumes:
+        # DuckDB spill target (CHD-20). emptyDir on node ephemeral storage so
+        # large scans spill to disk instead of OOMing the pod.
+        - name: duckdb-temp
+          emptyDir:
+            sizeLimit: {{ .Values.duckdbTempSizeLimit | default "5Gi" }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

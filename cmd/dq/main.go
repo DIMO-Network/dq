@@ -12,11 +12,11 @@ import (
 	"syscall"
 
 	"github.com/99designs/gqlgen/graphql/playground"
+	"github.com/DIMO-Network/dq/internal/app"
+	"github.com/DIMO-Network/dq/internal/config"
 	"github.com/DIMO-Network/server-garage/pkg/monserver"
 	"github.com/DIMO-Network/server-garage/pkg/runner"
 	"github.com/DIMO-Network/shared/pkg/settings"
-	"github.com/DIMO-Network/dq/internal/app"
-	"github.com/DIMO-Network/dq/internal/config"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 )
@@ -79,6 +79,9 @@ func main() {
 	mux.Handle("/", app.LoggerMiddleware(app.PanicRecoveryMiddleware(playground.Handler("GraphQL playground", "/query"))))
 	mux.Handle("/query", application.Handler)
 	mux.Handle("/mcp", application.MCPHandler)
+	// Real readiness: probes the query backend (catalog reachable + extensions
+	// loaded) so a cold pod reports NotReady instead of serving errors (CHD-13).
+	mux.HandleFunc("/ready", app.ReadyHandler(application.Ready))
 
 	logger.Info().Msgf("Server started on port: %d", cfg.Port)
 	runner.RunHandler(runnerCtx, runnerGroup, mux, ":"+strconv.Itoa(cfg.Port))
