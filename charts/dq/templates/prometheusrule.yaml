@@ -48,3 +48,15 @@ spec:
           annotations:
             summary: shadow backend disagreement
             description: DuckDB and ClickHouse returned different results for the same query.
+        - alert: DQShadowDropped
+          expr: increase(dq_shadow_dropped_total[1h]) > 0 or increase(dq_fetch_shadow_dropped_total[1h]) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: shadow comparisons dropped under backpressure
+            description: >-
+              The shadow validator skipped comparisons because its concurrency
+              limit saturated, so a clean dq_shadow_mismatch_total does NOT mean
+              the lake matched everything (CHD-15). Do not trust the cutover gate
+              until drops are zero — raise shadow concurrency or reduce load.

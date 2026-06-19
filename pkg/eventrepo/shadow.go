@@ -25,7 +25,17 @@ var (
 	fetchShadowErrorTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dq_fetch_shadow_error_total",
-			Help: "Number of fetch shadow (lake) index queries that errored, panicked, or were dropped due to backpressure.",
+			Help: "Number of fetch shadow (lake) index queries that errored or panicked.",
+		},
+		[]string{"method"},
+	)
+	// fetchShadowDroppedTotal is separate from errors so a saturated fetch
+	// shadow is distinguishable from a failing one (CHD-15) — a high drop ratio
+	// means comparisons were skipped, not that the lake matched.
+	fetchShadowDroppedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dq_fetch_shadow_dropped_total",
+			Help: "Number of fetch shadow (lake) index queries skipped because the concurrency limit was saturated (not compared).",
 		},
 		[]string{"method"},
 	)
@@ -81,7 +91,7 @@ func (s *ShadowEventService) shadow(method string, primaryRes any, primaryErr er
 	select {
 	case s.sem <- struct{}{}:
 	default:
-		fetchShadowErrorTotal.WithLabelValues(method).Inc()
+		fetchShadowDroppedTotal.WithLabelValues(method).Inc()
 		s.log.Warn().Str("method", method).Msg("fetch shadow call dropped: concurrency limit reached")
 		return
 	}

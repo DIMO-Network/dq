@@ -29,7 +29,17 @@ var (
 	shadowErrorTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dq_shadow_error_total",
-			Help: "Number of shadow (DuckDB) queries that errored, panicked, or were dropped due to backpressure.",
+			Help: "Number of shadow (DuckDB) queries that errored or panicked.",
+		},
+		[]string{"method"},
+	)
+	// shadowDroppedTotal is separate from errors so a saturated shadow can be
+	// distinguished from a failing one: a high drop ratio means "clean" only
+	// means "didn't look", and the cutover gate must not trust it (CHD-15).
+	shadowDroppedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dq_shadow_dropped_total",
+			Help: "Number of shadow (DuckDB) queries skipped because the concurrency limit was saturated (not compared).",
 		},
 		[]string{"method"},
 	)
@@ -93,7 +103,7 @@ func (s *ShadowBackend) shadow(method, argsSummary string, primaryRes any, prima
 	select {
 	case s.sem <- struct{}{}:
 	default:
-		shadowErrorTotal.WithLabelValues(method).Inc()
+		shadowDroppedTotal.WithLabelValues(method).Inc()
 		s.log.Warn().Str("method", method).Msg("shadow call dropped: concurrency limit reached")
 		return
 	}
