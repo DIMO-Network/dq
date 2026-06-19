@@ -97,6 +97,9 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 // max(timestamp) while the location value comes from the nonzero columns.
 func (q *Queries) GetAllLatestSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error) {
 	if q.lake {
+		if noSourceFilter(filter) {
+			return q.getAllLatestSignalsRollup(ctx, subject) // O(distinct-names) rollup (CHD-3)
+		}
 		return q.getAllLatestSignalsLake(ctx, subject, filter)
 	}
 	table, err := q.tableExpr(ctx, q.latestPaths(subject))
@@ -151,6 +154,9 @@ func lastSeenQuery(table, subject, srcSQL string, srcArgs []any) (string, []any)
 // from the summary bucket, sorted ascending. Returns nil when none.
 func (q *Queries) GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
 	if q.lake {
+		if noSourceFilter(filter) {
+			return q.getAvailableSignalsRollup(ctx, subject) // rollup (CHD-3)
+		}
 		return q.getAvailableSignalsLake(ctx, subject, filter)
 	}
 	table, err := q.tableExpr(ctx, q.summaryPaths(subject))
@@ -195,6 +201,9 @@ func (q *Queries) GetAvailableSignals(ctx context.Context, subject string, filte
 // sources, mirroring ch.Service.GetSignalSummaries.
 func (q *Queries) GetSignalSummaries(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
 	if q.lake {
+		if noSourceFilter(filter) {
+			return q.getSignalSummariesRollup(ctx, subject) // rollup (CHD-3)
+		}
 		return q.getSignalSummariesLake(ctx, subject, filter)
 	}
 	table, err := q.tableExpr(ctx, q.summaryPaths(subject))

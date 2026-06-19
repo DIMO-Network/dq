@@ -93,6 +93,19 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.events AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(evTmp)),
 		`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
 		`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
+		// signals_latest is the per-(subject,name) latest+summary rollup (CHD-3):
+		// it makes latest/summary/availableSignals O(distinct-names) instead of a
+		// full-history GROUP BY per request. Maintained per batch (refreshRollup)
+		// by recomputing affected subjects from the deduped base table, so it is
+		// a materialized view of getAllLatestSignalsLake (no source filter) —
+		// parity is by construction. Partitioned by subject_bucket like the base.
+		`CREATE TABLE IF NOT EXISTS lake.signals_latest (
+			subject VARCHAR, subject_bucket INTEGER, name VARCHAR,
+			"timestamp" TIMESTAMP WITH TIME ZONE,
+			value_number DOUBLE, value_string VARCHAR,
+			loc_lat DOUBLE, loc_lon DOUBLE, loc_hdop DOUBLE, loc_heading DOUBLE,
+			count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
+		`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
 		"CREATE TABLE IF NOT EXISTS lake.ingest_progress (partition VARCHAR, cursor VARCHAR)",
 		// Seed the cursor row once so every advance is a compare-and-swap UPDATE
 		// against a single row (CHD-9). Without a pre-seeded row the first writer
@@ -417,6 +430,14 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		}
 	}
 
+	// Refresh the latest/summary rollup for the subjects this batch touched, in
+	// the same transaction so it advances atomically with the base rows (CHD-3).
+	if len(dec.signals) > 0 {
+		if err := m.refreshRollup(ctx, tx, dec.signals); err != nil {
+			return err
+		}
+	}
+
 	// Advance the cursor as a compare-and-swap against the seeded row (from=0
 	// matches the seeded '0'). RowsAffected==0 means another writer advanced it
 	// first — back off and retry from the new cursor next pass. The seeded row
@@ -475,6 +496,69 @@ func writeTempParquet[T any](enc func([]T) ([]byte, error), rows []T) (string, e
 // sqlLit single-quotes a string literal for inlined DuckDB SQL (paths only).
 func sqlLit(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// refreshRollup recomputes lake.signals_latest for every subject the batch
+// touched, inside the commit transaction (CHD-3). It deletes the affected
+// subjects' rollup rows and re-inserts a fresh per-(subject,name) latest+summary
+// computed from the deduped base table, so the rollup is always a materialized
+// view of getAllLatestSignalsLake (no source filter). Bounded to the batch's
+// subjects, which prune by subject_bucket.
+func (m *DuckLakeMaterializer) refreshRollup(ctx context.Context, tx *sql.Tx, signals []SignalRow) error {
+	subjects := distinctSubjects(signals)
+	if len(subjects) == 0 {
+		return nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(subjects)), ",")
+	args := make([]any, len(subjects))
+	for i, s := range subjects {
+		args[i] = s
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest WHERE subject IN ("+ph+")", args...); err != nil {
+		return fmt.Errorf("rollup delete: %w", err)
+	}
+	// The subject list is bound once for the inner base-table scan.
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest "+rollupSelectSQL(ph), args...); err != nil {
+		return fmt.Errorf("rollup insert: %w", err)
+	}
+	return nil
+}
+
+// distinctSubjects returns the unique subjects in a decoded signal batch.
+func distinctSubjects(signals []SignalRow) []string {
+	seen := make(map[string]struct{}, len(signals))
+	var out []string
+	for i := range signals {
+		s := signals[i].Subject
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// rollupSelectSQL builds the per-(subject,name) latest+summary SELECT over the
+// deduped base table for the subjects matched by ph. It mirrors
+// getAllLatestSignalsLake's aggregation exactly (max/arg_max + (0,0)-loc FILTER
+// + count/min/max), folding sources — the no-source-filter case the rollup
+// serves. The QUALIFY dedup matches the read path (CHD-2).
+func rollupSelectSQL(ph string) string {
+	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
+	return fmt.Sprintf(`SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
+		max(timestamp) AS timestamp,
+		arg_max(value_number, timestamp) AS value_number,
+		arg_max(value_string, timestamp) AS value_string,
+		coalesce(arg_max(loc_lat, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lat,
+		coalesce(arg_max(loc_lon, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lon,
+		coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
+		coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading,
+		CAST(count(*) AS BIGINT) AS count,
+		min(timestamp) AS first_seen, max(timestamp) AS last_seen
+	FROM (SELECT * FROM lake.signals WHERE subject IN (%[2]s)
+	      QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1)
+	GROUP BY subject, name`, locNonzero, ph)
 }
 
 // antiJoinInsert builds the idempotent INSERT for a decoded table: it skips any
