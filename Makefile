@@ -1,4 +1,4 @@
-.PHONY: clean run build test lint gqlgen gql-model gql generate generate-grpc tools-protoc tools-protoc-plugins
+.PHONY: clean run build test test-gated lint gqlgen gql-model gql generate generate-grpc tools-protoc tools-protoc-plugins
 
 SHELL := /bin/sh
 PATHINSTBIN = $(abspath ./bin)
@@ -37,6 +37,13 @@ tidy: ## Tidy go modules
 
 test: ## Run tests
 	@go test -v ./...
+
+test-gated: ## Run the cutover-gate suites (PG concurrency, chaos, perf, MinIO). Suites without their env/flag/binary skip cleanly.
+	@echo "== standard ==";        CGO_ENABLED=1 go test ./...
+	@echo "== PG concurrency (set PG_CATALOG_DSN) =="; CGO_ENABLED=1 go test ./tests/ -run TestDuckLakePostgres -count=1
+	@echo "== chaos (set DQ_CHAOS=1) ==";  CGO_ENABLED=1 go test ./tests/ -run Chaos -count=1
+	@echo "== perf (-perf) ==";     CGO_ENABLED=1 go test ./tests/ -run Perf -perf -count=1
+	@echo "== MinIO (install minio) =="; CGO_ENABLED=1 go test ./tests/ -run MinIO -count=1
 
 lint: ## Run linter
 	@golangci-lint run
