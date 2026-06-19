@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/fetch"
@@ -28,6 +29,15 @@ func NewServer(buckets []string, eventService eventrepo.EventService) *Server {
 		eventService: eventService,
 		buckets:      buckets,
 	}
+}
+
+// validObjectKey rejects index keys that could escape the expected object
+// namespace via path traversal. Defense-in-depth for the gRPC fetch path, which
+// dereferences client-supplied keys on the legacy ClickHouse/JSON path (CHD-22);
+// the lake path re-queries by (subject,id) and ignores the key. A legitimate key
+// is a parquet ref, a lake:// locator, or a blob/object key — none contain "..".
+func validObjectKey(key string) bool {
+	return key != "" && !strings.Contains(key, "..")
 }
 
 // GetLatestIndex translates the gRPC call to the indexrepo type and returns the latest index for the given options.
@@ -74,6 +84,11 @@ func (s *Server) ListIndexes(ctx context.Context, req *grpc.ListIndexesRequest) 
 		}
 		return nil, status.Errorf(codes.Internal, "failed to get index keys: %v", err)
 	}
+	// The lake backend returns an empty slice (no error) when nothing matches;
+	// ClickHouse returned NotFound. Map empty → NotFound for contract parity (CHD-22).
+	if len(indexObjs) == 0 {
+		return nil, status.Error(codes.NotFound, "no index keys found")
+	}
 	indexList := make([]*grpc.CloudEventIndex, len(indexObjs))
 	for i := range indexObjs {
 		indexList[i] = &grpc.CloudEventIndex{
@@ -102,6 +117,9 @@ func (s *Server) ListCloudEvents(ctx context.Context, req *grpc.ListCloudEventsR
 			return nil, status.Errorf(codes.NotFound, "no index keys Found: %v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "failed to get index keys: %v", err)
+	}
+	if len(metaList) == 0 {
+		return nil, status.Error(codes.NotFound, "no index keys found") // CH parity (CHD-22)
 	}
 	data, err := fetch.ListCloudEventsFromIndexes(ctx, s.eventService, metaList, s.buckets)
 	if err != nil {
@@ -144,6 +162,9 @@ func (s *Server) ListCloudEventsFromIndex(ctx context.Context, req *grpc.ListClo
 	protoIndexList := req.GetIndexes()
 	events := make([]cloudevent.CloudEvent[eventrepo.ObjectInfo], len(protoIndexList))
 	for i, index := range protoIndexList {
+		if !validObjectKey(index.GetData().GetKey()) {
+			return nil, status.Error(codes.InvalidArgument, "invalid index key")
+		}
 		events[i] = cloudevent.CloudEvent[eventrepo.ObjectInfo]{
 			CloudEventHeader: index.GetHeader().AsCloudEventHeader(),
 			Data: eventrepo.ObjectInfo{
