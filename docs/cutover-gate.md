@@ -53,3 +53,32 @@ and gate on what is configured.
 Only when 1–4 hold: flip `QUERY_BACKEND=ducklake`, keep ClickHouse +
 telemetry/fetch-api hot for the bake period, and do not retire them until the
 rollback window has closed.
+
+## Storage & dual-run budget (CHD-38)
+
+DuckLake **snapshot expiry** (`LAKE_SNAPSHOT_RETENTION`) bounds how far back the
+change feed goes; it does **not** bound decoded-table data size — `lake.signals`
+/ `lake.events` grow unbounded. Two levers:
+
+- **Row-level TTL (optional):** set `LAKE_DECODED_RETENTION` (Go duration, e.g.
+  `8760h`) on the materializer release to prune decoded rows past the window
+  (`PruneDecoded`, hourly). Default empty = no TTL — enabling it deletes
+  customer history, so it is a product decision. The rollup
+  (`lake.signals_latest`) is never pruned (it is current state). din's catalog
+  maintenance reclaims the deleted files.
+- **Dual-run budget:** during the bake period both ClickHouse and the lake hold
+  the full dataset, so plan for ~2× storage until CH teardown. Budget the
+  overlap explicitly; do not shorten the bake to save storage.
+
+## Per-signal privilege (CHD-37)
+
+List/latest endpoints enforce per-signal privileges through the GraphQL auth
+directives wired in `app.New` (`RequiresAllOfPrivileges` / `RequiresOneOfPrivilege`
+/ `RequiresVehicleToken`), bound to the validated token claims. Verify any new
+signal field carries the appropriate directive.
+
+## din side (separate)
+
+NATS repartitioning runbook + consumer-skew metric and MsgID sub-second
+precision (CHD-37) live in the din ingest service; they are tracked on the din
+branch, not here.

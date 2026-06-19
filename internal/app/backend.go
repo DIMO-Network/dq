@@ -238,11 +238,21 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	// presigns/downloads (settings.ParquetBucket): din writes payloads larger
 	// than the inline threshold to a blob and leaves only the key on the row.
 	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.ParquetBucket)
+
+	var decodedRetention time.Duration
+	if settings.LakeDecodedRetention != "" {
+		decodedRetention, err = time.ParseDuration(settings.LakeDecodedRetention)
+		if err != nil {
+			_ = duckSvc.Close()
+			return nil, fmt.Errorf("invalid LAKE_DECODED_RETENTION %q: %w", settings.LakeDecodedRetention, err)
+		}
+	}
 	runner := materializer.New(materializer.Config{
 		PollInterval:      pollInterval,
 		ChainID:           settings.DIMORegistryChainID,
 		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
 		Workers:           settings.MaterializerWorkers,
+		DecodedRetention:  decodedRetention,
 	}, nil, logger).WithDuckLake(mat)
 
 	stop := runMaterializerLoop(runner, logger)

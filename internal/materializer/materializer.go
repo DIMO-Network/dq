@@ -101,6 +101,10 @@ type Config struct {
 	// CompactMinFiles is the per-partition file count that triggers a
 	// merge. Defaults to 4.
 	CompactMinFiles int
+	// DecodedRetention deletes decoded rows older than this from the DuckLake
+	// tables (CHD-38). Zero (default) disables it — a row-level TTL on customer
+	// history is a product decision. Honored only on the ducklake path.
+	DecodedRetention time.Duration
 	// ShardIndex/ShardCount split raw partitions across N materializer
 	// replicas by partition hash. Each shard owns disjoint partitions,
 	// writes its own watermark file and its own latest/summary bucket
@@ -226,6 +230,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Start a full interval out so a restart loop doesn't compact every
 	// boot; recovery of interrupted merges still runs inside CompactOnce.
 	lastCompact := time.Now()
+	lastPrune := time.Now()
 	for {
 		processed, err := r.RunOnce(ctx)
 		if err != nil {
@@ -243,12 +248,36 @@ func (r *Runner) Run(ctx context.Context) error {
 			// etc. cover every table in the attachment) — exactly one
 			// maintenance process per catalog, so dq runs none.
 			r.maybeCompact(ctx, &lastCompact)
+		} else {
+			r.maybePrune(ctx, &lastPrune)
 		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 		}
+	}
+}
+
+// pruneInterval is how often the ducklake path enforces DecodedRetention.
+const pruneInterval = time.Hour
+
+// maybePrune runs the decoded-retention prune at most once per pruneInterval
+// when a retention window is configured (CHD-38). A no-op when DecodedRetention
+// is zero (the default).
+func (r *Runner) maybePrune(ctx context.Context, last *time.Time) {
+	if r.cfg.DecodedRetention <= 0 || time.Since(*last) < pruneInterval {
+		return
+	}
+	*last = time.Now()
+	n, err := r.lake.PruneDecoded(ctx, r.cfg.DecodedRetention)
+	if err != nil {
+		r.log.Error().Err(err).Msg("decoded retention prune failed")
+		return
+	}
+	if n > 0 {
+		r.log.Info().Int64("rows", n).Dur("retention", r.cfg.DecodedRetention).
+			Msg("pruned decoded rows past retention")
 	}
 }
 

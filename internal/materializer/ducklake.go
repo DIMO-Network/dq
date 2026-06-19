@@ -498,6 +498,31 @@ func sqlLit(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
+// PruneDecoded deletes decoded rows older than retention from lake.signals and
+// lake.events, returning the number removed. DuckLake snapshot expiry bounds
+// history AGE (LAKE_SNAPSHOT_RETENTION) but not data SIZE, so without a
+// row-level TTL the decoded tables grow unbounded (CHD-38). retention <= 0
+// disables it — the default, since deleting customer history is a product
+// decision. The rollup (lake.signals_latest) is left intact: it is current
+// state, not history. din's catalog maintenance reclaims the deleted files.
+func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.Duration) (int64, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().Add(-retention).UTC().UnixMicro()
+	var total int64
+	for _, table := range []string{"lake.signals", "lake.events"} {
+		res, err := m.db.ExecContext(ctx,
+			fmt.Sprintf("DELETE FROM %s WHERE timestamp < make_timestamp(%d)", table, cutoff))
+		if err != nil {
+			return total, fmt.Errorf("pruning %s: %w", table, err)
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
 // refreshRollup recomputes lake.signals_latest for every subject the batch
 // touched, inside the commit transaction (CHD-3). It deletes the affected
 // subjects' rollup rows and re-inserts a fresh per-(subject,name) latest+summary
