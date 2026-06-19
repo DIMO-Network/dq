@@ -39,6 +39,17 @@ const maxLakeQueryLimit = 1000
 // lakeRawColumns matches rawColumns and scanStoredEvent's scan order.
 const lakeRawColumns = "subject, time, type, id, source, producer, data_content_type, data_version, extras, data, data_base64, data_index_key, voids_id"
 
+// voidingClause builds the tombstone-exclusion predicate for raw_events: drop
+// tombstones (voids_id set) and any event a same-subject tombstone voids. ref is
+// the row alias/qualifier ("e" in a search, the table name in an aggregate).
+// Single source of truth so the search and summary paths cannot drift (CHD-30).
+func voidingClause(ref string) string {
+	return fmt.Sprintf(
+		" AND (%[1]s.voids_id IS NULL OR %[1]s.voids_id = '')"+
+			" AND NOT EXISTS (SELECT 1 FROM %[2]s t WHERE t.subject = %[1]s.subject AND t.voids_id = %[1]s.id)",
+		ref, lakeRawEvents)
+}
+
 // LakeEventService serves the eventrepo.EventService surface from
 // lake.raw_events. Index lookups return a header + an ObjectInfo locator;
 // payload resolution reads inline data (or presigns a blob).
@@ -75,12 +86,7 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 	where, args := whereClauseQ(filter, "e.")
 	voiding := ""
 	if filter.ExcludeVoided {
-		// Exclude tombstones themselves (voids_id != '') and events whose id is
-		// referenced by a tombstone's voids_id for the same subject.
-		voiding = fmt.Sprintf(
-			" AND (e.voids_id IS NULL OR e.voids_id = '')"+
-				" AND NOT EXISTS (SELECT 1 FROM %s t WHERE t.subject = e.subject AND t.voids_id = e.id)",
-			lakeRawEvents)
+		voiding = voidingClause("e")
 	}
 	order := "DESC"
 	if filter.TimestampAsc {
@@ -184,11 +190,9 @@ func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Contex
 	// Exclude tombstones and voided events in the aggregate.
 	q := fmt.Sprintf(`SELECT type, count(*) AS cnt, min(time) AS first_seen, max(time) AS last_seen`+
 		` FROM %s`+
-		` WHERE %s`+
-		`   AND (voids_id IS NULL OR voids_id = '')`+
-		`   AND NOT EXISTS (SELECT 1 FROM %s t WHERE t.subject = %s.subject AND t.voids_id = %s.id)`+
+		` WHERE %s%s`+
 		` GROUP BY type ORDER BY type`,
-		lakeRawEvents, where, lakeRawEvents, lakeRawEvents, lakeRawEvents)
+		lakeRawEvents, where, voidingClause(lakeRawEvents))
 
 	rows, err := l.svc.DB().QueryContext(ctx, q, args...)
 	if err != nil {

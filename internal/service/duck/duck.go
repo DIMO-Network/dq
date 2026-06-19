@@ -84,9 +84,13 @@ func bootstrapQueries(cfg Config) []string {
 		queries = append(queries, fmt.Sprintf("SET temp_directory = %s", sqlString(cfg.TempDirectory)))
 	}
 	queries = append(queries, "SET enable_object_cache = true")
-	// Decoded parquet timestamps are TIMESTAMPTZ and our queries inline
-	// naive make_timestamp literals, which DuckDB resolves in the session
-	// TimeZone. Pin UTC so results don't depend on the host zone.
+	// HARD INVARIANT (CHD-35): every connection pins UTC. raw_events."time" and
+	// the decoded timestamps are TIMESTAMP WITH TIME ZONE, and the query layer
+	// inlines naive make_timestamp literals that DuckDB resolves in the session
+	// TimeZone. Correctness of every time comparison, window boundary, and date
+	// partition rests on this being UTC on EVERY pooled connection — it is a
+	// per-connection bootstrap statement (not session-global) for that reason.
+	// Do not remove, and do not rely on TIMESTAMP being zone-less anywhere.
 	queries = append(queries, "SET TimeZone = 'UTC'")
 
 	// extension_directory must be set before INSTALL/LOAD so pre-baked
