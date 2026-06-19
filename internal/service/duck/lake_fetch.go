@@ -22,6 +22,13 @@ var errOrClauseUnsupported = errors.New("lake fetch: Or clauses in advanced filt
 
 const lakeRawEvents = "lake.raw_events"
 
+// defaultFetchScanWindow bounds an open-ended lake fetch (no After supplied):
+// ClickHouse eventrepo capped lookbacks (90/400-day); the lake path had none, so
+// a filter without a time bound scanned all of raw_events (CHD-34). 400 days
+// matches CH's widest bound so it does not hide data a caller could previously
+// see. A point lookup by id is exempt (see queryLakeRaw).
+const defaultFetchScanWindow = 400 * 24 * time.Hour
+
 // maxLakeQueryLimit caps the number of rows a single lake fetch query may
 // return, matching ClickHouse eventrepo.maxQueryLimit. Without it an oversized
 // caller-supplied limit (the gRPC layer passes it through unguarded) forces an
@@ -54,11 +61,17 @@ func NewLakeEventService(svc *Service, getter eventrepo.ObjectGetter, presigner 
 var _ eventrepo.EventService = (*LakeEventService)(nil)
 
 // queryLakeRaw returns at most limit events matching filter, deduped on the
-// header key. When filter.ExcludeVoided is set, tombstones (voids_id != '')
+// header key. When filter.ExcludeVoided is set, tombstones (voids_id != ”)
 // and events referenced by a tombstone are excluded. ORDER BY direction
 // matches ClickHouse eventrepo: DESC (newest-first) by default, ASC
 // (oldest-first) when filter.TimestampAsc is true.
 func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, limit int) ([]cloudevent.StoredEvent, error) {
+	// Bound an otherwise unbounded scan with a default lookback window, but only
+	// for searches — a point lookup by id (GetCloudEventFromIndex) must still
+	// reach arbitrarily old events (CHD-34).
+	if filter.After.IsZero() && len(filter.IDs) == 0 {
+		filter.After = time.Now().Add(-defaultFetchScanWindow)
+	}
 	where, args := whereClauseQ(filter, "e.")
 	voiding := ""
 	if filter.ExcludeVoided {
