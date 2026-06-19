@@ -39,6 +39,10 @@ func NewService(cfg Config) (*Service, error) {
 	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(cfg.MaxConns)
 	db.SetMaxIdleConns(cfg.MaxConns)
+	// Recycle connections so a DuckLake→Postgres catalog attach poisoned by a
+	// PG blip is dropped and re-bootstrapped, not pinned in the pool (CHD-21).
+	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(cfg.ConnMaxIdleTime)
 
 	// Force one connection open so bootstrap errors surface at startup
 	// instead of on the first query.

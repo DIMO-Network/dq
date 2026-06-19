@@ -1,6 +1,9 @@
 package duck
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // Default values applied by Config.withDefaults.
 const (
@@ -10,6 +13,15 @@ const (
 	DefaultDecodedPrefix = "decoded/v1"
 	// DefaultMaxConns is the default maximum number of open DuckDB connections.
 	DefaultMaxConns = 6
+	// DefaultConnMaxLifetime caps how long a pooled DuckDB connection lives
+	// before it is recycled. The DuckLake catalog is reached over a Postgres
+	// attach inside each connection; recycling drops a connection whose attach
+	// was poisoned by a catalog blip so it re-bootstraps (re-ATTACH) instead of
+	// staying broken until pod restart (CHD-21).
+	DefaultConnMaxLifetime = 30 * time.Minute
+	// DefaultConnMaxIdleTime retires idle connections so a poisoned one is not
+	// pinned in the pool indefinitely.
+	DefaultConnMaxIdleTime = 5 * time.Minute
 )
 
 // Config holds DuckDB query-engine settings.
@@ -28,6 +40,12 @@ type Config struct {
 	TempDirectory string `yaml:"DUCKDB_TEMP_DIRECTORY"`
 	// MaxConns caps sql.DB open connections. Zero means DefaultMaxConns.
 	MaxConns int `yaml:"DUCKDB_MAX_CONNS"`
+	// ConnMaxLifetime / ConnMaxIdleTime recycle pooled DuckDB connections so a
+	// connection whose DuckLake→Postgres catalog attach is poisoned by a PG blip
+	// is dropped and re-bootstrapped rather than staying broken (CHD-21). Zero
+	// means the defaults; negative disables recycling.
+	ConnMaxLifetime time.Duration `yaml:"DUCKDB_CONN_MAX_LIFETIME"`
+	ConnMaxIdleTime time.Duration `yaml:"DUCKDB_CONN_MAX_IDLE_TIME"`
 
 	// S3Enabled controls whether httpfs/aws extensions are loaded and an S3
 	// secret is created. Disable for local-filesystem tests.
@@ -115,6 +133,12 @@ func (c Config) withDefaults() Config {
 	c.DecodedPrefix = strings.TrimSuffix(c.DecodedPrefix, "/")
 	if c.MaxConns <= 0 {
 		c.MaxConns = DefaultMaxConns
+	}
+	if c.ConnMaxLifetime == 0 {
+		c.ConnMaxLifetime = DefaultConnMaxLifetime
+	}
+	if c.ConnMaxIdleTime == 0 {
+		c.ConnMaxIdleTime = DefaultConnMaxIdleTime
 	}
 	return c
 }

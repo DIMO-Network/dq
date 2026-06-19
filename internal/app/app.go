@@ -31,6 +31,10 @@ import (
 // AppName is the name of the application.
 var AppName = "dq"
 
+// maxGRPCMessageBytes bounds gRPC message size. Cloudevent blob payloads reach
+// ~50 MiB; the 4 MiB default would truncate them on the fetch path (CHD-22).
+const maxGRPCMessageBytes = 50 << 20 // 50 MiB
+
 // App is the main application.
 type App struct {
 	Handler    http.Handler
@@ -206,6 +210,11 @@ func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.
 
 	grpcPanic := metrics.GRPCPanicker{Logger: logger}
 	server := grpc.NewServer(
+		// Blob payloads run 4–50 MiB; the gRPC default 4 MiB send limit
+		// silently truncated them once the fetch path started serving blobs
+		// (CHD-22). Raise both directions to cover the largest payloads.
+		grpc.MaxSendMsgSize(maxGRPCMessageBytes),
+		grpc.MaxRecvMsgSize(maxGRPCMessageBytes),
 		grpc.ChainUnaryInterceptor(
 			metrics.GRPCMetricsAndLogMiddleware(logger),
 			recovery.UnaryServerInterceptor(recovery.WithRecoveryHandler(grpcPanic.GRPCPanicRecoveryHandler)),
