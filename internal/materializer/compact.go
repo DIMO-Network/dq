@@ -306,6 +306,7 @@ func (r *Runner) maybeCompact(ctx context.Context, last *time.Time) {
 	*last = time.Now()
 	n, err := r.CompactOnce(ctx)
 	if err != nil {
+		compactionErrorsTotal.Inc()
 		r.log.Error().Err(err).Msg("decoded compaction failed")
 		return
 	}

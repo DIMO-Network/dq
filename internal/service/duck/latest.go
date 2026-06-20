@@ -30,8 +30,10 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 		// location names and source-filtered queries fall back to the full
 		// deduped scan (SR-5).
 		if noSourceFilter(latestArgs.Filter) && len(latestArgs.LocationSignalNames) == 0 {
+			observeLakePath(true)
 			return q.getLatestSignalsRollup(ctx, subject, latestArgs)
 		}
+		observeLakePath(false)
 		return q.getLatestSignalsLake(ctx, subject, latestArgs)
 	}
 	table, err := q.tableExpr(ctx, q.latestPaths(subject))
@@ -106,8 +108,10 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 func (q *Queries) GetAllLatestSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error) {
 	if q.lake {
 		if noSourceFilter(filter) {
+			observeLakePath(true)
 			return q.getAllLatestSignalsRollup(ctx, subject) // O(distinct-names) rollup (CHD-3)
 		}
+		observeLakePath(false)
 		return q.getAllLatestSignalsLake(ctx, subject, filter)
 	}
 	table, err := q.tableExpr(ctx, q.latestPaths(subject))
@@ -163,8 +167,10 @@ func lastSeenQuery(table, subject, srcSQL string, srcArgs []any) (string, []any)
 func (q *Queries) GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
 	if q.lake {
 		if noSourceFilter(filter) {
+			observeLakePath(true)
 			return q.getAvailableSignalsRollup(ctx, subject) // rollup (CHD-3)
 		}
+		observeLakePath(false)
 		return q.getAvailableSignalsLake(ctx, subject, filter)
 	}
 	table, err := q.tableExpr(ctx, q.summaryPaths(subject))
@@ -210,8 +216,10 @@ func (q *Queries) GetAvailableSignals(ctx context.Context, subject string, filte
 func (q *Queries) GetSignalSummaries(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
 	if q.lake {
 		if noSourceFilter(filter) {
+			observeLakePath(true)
 			return q.getSignalSummariesRollup(ctx, subject) // rollup (CHD-3)
 		}
+		observeLakePath(false)
 		return q.getSignalSummariesLake(ctx, subject, filter)
 	}
 	table, err := q.tableExpr(ctx, q.summaryPaths(subject))

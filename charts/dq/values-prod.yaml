@@ -14,6 +14,13 @@ env:
   # the QUERY_BACKEND=ducklake cutover.
   DUCKDB_MEMORY_LIMIT: 6GiB
   DUCKDB_THREADS: 4
+  # Query fleet never writes the lake — only the single-writer materializer
+  # does — so attach the DuckLake catalog read-only. This keeps the 2-10
+  # autoscaled query replicas off the primary catalog as writers and lets them
+  # read from a Postgres read replica (set DUCKLAKE_CATALOG_READ_DSN). Inert
+  # until QUERY_BACKEND=ducklake; backend.go force-disables it on the
+  # materializer release so the writer can never come up read-only.
+  DUCKLAKE_READ_ONLY: 'true'
 ingress:
   enabled: true
   className: nginx

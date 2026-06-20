@@ -34,6 +34,25 @@ var (
 		Name: "dq_materializer_compactions_total",
 		Help: "Decoded partitions merged by the decoded-layer compactor.",
 	})
+	// Failure counters for the background loops, so a silently-failing prune or
+	// compaction is alertable instead of only logged (SR-14).
+	pruneErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dq_materializer_prune_errors_total",
+		Help: "Decoded-retention prune passes that failed.",
+	})
+	compactionErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dq_materializer_compaction_errors_total",
+		Help: "Decoded-layer compaction passes that failed.",
+	})
+	// rollupRefreshSeconds tracks the per-batch latest/summary rollup refresh
+	// cost. The refresh recomputes affected subjects from the deduped base
+	// (subject_bucket-pruned, SR-6); this gauge makes its growth with history
+	// visible so the O(history) recompute can be caught before it gates decode
+	// throughput (the SR-1 incremental-merge follow-up).
+	rollupRefreshSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dq_materializer_rollup_refresh_seconds",
+		Help: "Wall-clock of the most recent signals_latest rollup refresh.",
+	})
 	cursorResetsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dq_materializer_cursor_resets_total",
 		Help: "DuckLake snapshot cursor resets after the consumer lagged past LAKE_SNAPSHOT_RETENTION (expired change feed). Each reset skips an un-decoded gap — alert on any increase.",

@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
+	"github.com/DIMO-Network/dq/internal/service/duck"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/rs/zerolog"
 )
@@ -534,19 +536,50 @@ func (m *DuckLakeMaterializer) refreshRollup(ctx context.Context, tx *sql.Tx, si
 	if len(subjects) == 0 {
 		return nil
 	}
+	start := time.Now()
 	ph := strings.TrimSuffix(strings.Repeat("?,", len(subjects)), ",")
 	args := make([]any, len(subjects))
 	for i, s := range subjects {
 		args[i] = s
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest WHERE subject IN ("+ph+")", args...); err != nil {
+	// Prune the rollup delete and the base recompute to the batch's hash buckets.
+	// signals_latest and lake.signals are PARTITIONED BY subject_bucket, so this
+	// skips every partition but the batch's (SR-6) — the recompute reads only the
+	// touched buckets' files, not the whole table. (The recompute is still
+	// O(history within those buckets); the SR-1 incremental-merge follow-up would
+	// make it O(batch), but that must replicate the (subject,name,timestamp)
+	// read-dedup exactly, so it is deferred over correctness risk.)
+	buckets := distinctBucketClause(subjects)
+	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest WHERE subject IN ("+ph+")"+buckets, args...); err != nil {
 		return fmt.Errorf("rollup delete: %w", err)
 	}
-	// The subject list is bound once for the inner base-table scan.
-	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest "+rollupSelectSQL(ph), args...); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest "+rollupSelectSQL(ph, buckets), args...); err != nil {
 		return fmt.Errorf("rollup insert: %w", err)
 	}
+	rollupRefreshSeconds.Set(time.Since(start).Seconds())
 	return nil
+}
+
+// distinctBucketClause returns " AND subject_bucket IN (b1,b2,...)" for the hash
+// buckets of the given subjects, or "" when empty. Buckets are small ints — a
+// deterministic function of subject — so they are inlined like the read path's
+// subjectBucketPredicate; no injection risk. duck.HashBucket matches the
+// subject_bucket the decoder stamped (decode.go), so the partitions line up.
+func distinctBucketClause(subjects []string) string {
+	seen := make(map[int]struct{}, len(subjects))
+	bs := make([]string, 0, len(subjects))
+	for _, s := range subjects {
+		b := duck.HashBucket(s)
+		if _, ok := seen[b]; ok {
+			continue
+		}
+		seen[b] = struct{}{}
+		bs = append(bs, strconv.Itoa(b))
+	}
+	if len(bs) == 0 {
+		return ""
+	}
+	return " AND subject_bucket IN (" + strings.Join(bs, ",") + ")"
 }
 
 // distinctSubjects returns the unique subjects in a decoded signal batch.
@@ -569,7 +602,7 @@ func distinctSubjects(signals []SignalRow) []string {
 // getAllLatestSignalsLake's aggregation exactly (max/arg_max + (0,0)-loc FILTER
 // + count/min/max), folding sources — the no-source-filter case the rollup
 // serves. The QUALIFY dedup matches the read path (CHD-2).
-func rollupSelectSQL(ph string) string {
+func rollupSelectSQL(ph, bucketClause string) string {
 	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
 	return fmt.Sprintf(`SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
 		max(timestamp) AS timestamp,
@@ -581,9 +614,9 @@ func rollupSelectSQL(ph string) string {
 		coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading,
 		CAST(count(*) AS BIGINT) AS count,
 		min(timestamp) AS first_seen, max(timestamp) AS last_seen
-	FROM (SELECT * FROM lake.signals WHERE subject IN (%[2]s)
+	FROM (SELECT * FROM lake.signals WHERE subject IN (%[2]s)%[3]s
 	      QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1)
-	GROUP BY subject, name`, locNonzero, ph)
+	GROUP BY subject, name`, locNonzero, ph, bucketClause)
 }
 
 // antiJoinInsert builds the idempotent INSERT for a decoded table: it skips any

@@ -272,6 +272,7 @@ func (r *Runner) maybePrune(ctx context.Context, last *time.Time) {
 	*last = time.Now()
 	n, err := r.lake.PruneDecoded(ctx, r.cfg.DecodedRetention)
 	if err != nil {
+		pruneErrorsTotal.Inc()
 		r.log.Error().Err(err).Msg("decoded retention prune failed")
 		return
 	}
