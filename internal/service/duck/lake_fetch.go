@@ -22,11 +22,12 @@ var errOrClauseUnsupported = errors.New("lake fetch: Or clauses in advanced filt
 
 const lakeRawEvents = "lake.raw_events"
 
-// defaultFetchScanWindow bounds an open-ended lake fetch (no After supplied):
-// ClickHouse eventrepo capped lookbacks (90/400-day); the lake path had none, so
-// a filter without a time bound scanned all of raw_events (CHD-34). 400 days
-// matches CH's widest bound so it does not hide data a caller could previously
-// see. A point lookup by id is exempt (see queryLakeRaw).
+// defaultFetchScanWindow bounds a subject-less, id-less lake fetch as a DoS
+// guard against scanning all of raw_events (CHD-34). It is NOT a parity bound:
+// ClickHouse applies no lookback floor when the caller supplies no `after` (it
+// just ORDER BY time DESC LIMIT n over its index), so a subject-scoped fetch
+// must reach arbitrarily old events too (SR review #4). queryLakeRaw therefore
+// applies this window only when neither an id nor a subject narrows the scan.
 const defaultFetchScanWindow = 400 * 24 * time.Hour
 
 // maxLakeQueryLimit caps the number of rows a single lake fetch query may
@@ -77,10 +78,15 @@ var _ eventrepo.EventService = (*LakeEventService)(nil)
 // matches ClickHouse eventrepo: DESC (newest-first) by default, ASC
 // (oldest-first) when filter.TimestampAsc is true.
 func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, limit int) ([]cloudevent.StoredEvent, error) {
-	// Bound an otherwise unbounded scan with a default lookback window, but only
-	// for searches — a point lookup by id (GetCloudEventFromIndex) must still
-	// reach arbitrarily old events (CHD-34).
-	if filter.After.IsZero() && len(filter.IDs) == 0 {
+	// Apply the default lookback only when nothing else narrows the scan: not a
+	// point lookup by id (GetCloudEventFromIndex), and not a subject-scoped
+	// fetch. A subject prunes via raw_events' (subject, time) sort + zone maps to
+	// that one vehicle's files, so latestCloudEvent / cloudEvents can reach
+	// arbitrarily old events without a full scan — and must, to match ClickHouse,
+	// which imposes no floor when the caller supplies no `after`. A dormant
+	// vehicle whose newest event predates the window otherwise wrongly looked
+	// empty (SR review #4). Only a subject-less, id-less search keeps the guard.
+	if filter.After.IsZero() && len(filter.IDs) == 0 && filter.Subject == "" && len(filter.Subjects) == 0 {
 		filter.After = time.Now().Add(-defaultFetchScanWindow)
 	}
 	where, args := whereClauseQ(filter, "e.")

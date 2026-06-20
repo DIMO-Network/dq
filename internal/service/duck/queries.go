@@ -64,12 +64,26 @@ func (q *Queries) signalTable(ctx context.Context, from, to time.Time) (string, 
 	return q.tableExpr(ctx, q.signalGlobs(from, to))
 }
 
+// lakeEventsDeduped is the canonical DuckLake decoded-event source: lake.events
+// with at-rest duplicate rows collapsed to one. The materializer's INSERT
+// anti-join keys on (subject_bucket, cloud_event_id, name, timestamp), so two
+// distinct cloud_event_ids that decode to the same logical event both survive —
+// reading the bare table over-counts events vs ClickHouse, whose event
+// ReplacingMergeTree collapses on (subject, timestamp, name, source). Dedup on
+// that same key here (lowest cloud_event_id wins, deterministically) restores
+// parity (SR review #3; the events analogue of lakeSignalsDeduped / CHD-2).
+// subject/timestamp remain partition/sort keys, so predicates still prune.
+const lakeEventsDeduped = `(SELECT * FROM lake.events ` +
+	`QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, timestamp, name, source ORDER BY cloud_event_id) = 1)`
+
 // eventTable is signalTable for the decoded events source. A zero from/to
 // means all-time (event summaries): the whole lake.events table, or the
 // all-dates glob in bucket mode.
 func (q *Queries) eventTable(ctx context.Context, from, to time.Time) (string, error) {
 	if q.lake {
-		return "lake.events", nil
+		// Deduped like the signal path; the caller aliases it, so it must be a
+		// bare parenthesized subquery.
+		return lakeEventsDeduped, nil
 	}
 	if from.IsZero() && to.IsZero() {
 		return q.tableExpr(ctx, []string{AllEventsGlob(q.bucket, q.decodedPrefix)})

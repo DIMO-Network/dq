@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,9 +44,6 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 	}
 	if aggArgs.Interval <= 0 {
 		return nil, errors.New("aggregation interval must be positive")
-	}
-	if err := checkLocationFilters(aggArgs.LocationArgs); err != nil {
-		return nil, err
 	}
 
 	table, err := q.signalTable(ctx, aggArgs.FromTS, aggArgs.ToTS)
@@ -186,19 +184,64 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 	return result, nil
 }
 
-// checkLocationFilters rejects polygon/circle location filters.
-//
-// TODO(duckdb): ClickHouse used pointInPolygon and geoDistance for these.
-// DuckDB needs either the spatial extension (deliberately not installed) or
-// hand-rolled WGS-84 math; implement before exposing location filters on
-// this backend.
-func checkLocationFilters(locationArgs []model.LocationSignalArgs) error {
-	for _, la := range locationArgs {
-		if la.Filter != nil && (len(la.Filter.InPolygon) > 0 || la.Filter.InCircle != nil) {
-			return errors.New("location filters not yet supported on duckdb backend")
-		}
+// locationFilterSQL renders a WGS-84 spatial predicate over latCol/lonCol for a
+// location signal filter, or "" when there is none. Pure SQL — no spatial
+// extension dependency: inCircle is a haversine great-circle distance (km) and
+// inPolygon is an even-odd ray cast unrolled over the request's vertices (fixed
+// at query-build time). Replaces the old "not supported" rejection and mirrors
+// ClickHouse's geoDistance / pointInPolygon (SR review #10). InCircle takes
+// precedence when both are set.
+func locationFilterSQL(latCol, lonCol string, f *model.SignalLocationFilter) string {
+	if f == nil {
+		return ""
 	}
-	return nil
+	if f.InCircle != nil && f.InCircle.Center != nil {
+		return haversineWithinSQL(latCol, lonCol, f.InCircle.Center.Latitude, f.InCircle.Center.Longitude, f.InCircle.Radius)
+	}
+	if len(f.InPolygon) >= 3 {
+		return pointInPolygonSQL(latCol, lonCol, f.InPolygon)
+	}
+	return ""
+}
+
+// haversineWithinSQL constrains the great-circle distance (km, mean Earth radius
+// 6371 — matching ClickHouse geoDistance's sphere) from (latCol,lonCol) to the
+// center to be within radiusKm.
+func haversineWithinSQL(latCol, lonCol string, clat, clon, radiusKm float64) string {
+	return fmt.Sprintf(
+		"(2 * 6371 * asin(sqrt("+
+			"pow(sin(radians((%[1]s - %[3]s) / 2)), 2) + "+
+			"cos(radians(%[3]s)) * cos(radians(%[1]s)) * "+
+			"pow(sin(radians((%[2]s - %[4]s) / 2)), 2))) <= %[5]s)",
+		latCol, lonCol, floatLit(clat), floatLit(clon), floatLit(radiusKm))
+}
+
+// pointInPolygonSQL renders an even-odd ray cast: the point (lonCol=px,
+// latCol=py) is inside when an odd number of polygon edges straddle its latitude
+// to the west. The ring closes by wrapping the last vertex to the first. A
+// horizontal edge (yi == yj) makes the straddle guard false and the slope a NaN
+// whose comparison is also false, so it contributes zero — no divide-by-zero.
+// Vertices are inlined as DOUBLE literals (fixed by the request), so there is no
+// bound parameter and no injection surface.
+func pointInPolygonSQL(latCol, lonCol string, poly []*model.FilterLocation) string {
+	terms := make([]string, 0, len(poly))
+	for i := range poly {
+		j := (i + 1) % len(poly)
+		yi, xi := floatLit(poly[i].Latitude), floatLit(poly[i].Longitude)
+		yj, xj := floatLit(poly[j].Latitude), floatLit(poly[j].Longitude)
+		terms = append(terms, fmt.Sprintf(
+			"CASE WHEN ((%[3]s > %[1]s) <> (%[4]s > %[1]s)) AND "+
+				"(%[2]s < (%[6]s - %[5]s) * (%[1]s - %[3]s) / (%[4]s - %[3]s) + %[5]s) "+
+				"THEN 1 ELSE 0 END",
+			latCol, lonCol, yi, yj, xi, xj))
+	}
+	return "((" + strings.Join(terms, " + ") + ") % 2 = 1)"
+}
+
+// floatLit formats f as a parenthesized DuckDB DOUBLE literal (parens keep a
+// negative coordinate from forming "- -122.4" after a subtraction operator).
+func floatLit(f float64) string {
+	return "(" + strconv.FormatFloat(f, 'g', -1, 64) + ")"
 }
 
 // aggValuesTable renders the (signal_type, signal_index, name) inline VALUES
@@ -224,8 +267,8 @@ func aggValuesTable(floatArgs []model.FloatSignalArgs, stringArgs []model.String
 //	OR signal_type = 2
 //	OR (signal_type = 3 AND (lat != 0 OR lon != 0) AND ((signal_index = 0) OR ...))
 //
-// Location filters were validated away by checkLocationFilters, so location
-// branches carry only the index condition plus the (0, 0) exclusion.
+// Location branches carry the index condition, the (0, 0) exclusion, and any
+// inPolygon/inCircle predicate (locationFilterSQL).
 func perSignalFilterSQL(aggArgs *model.AggregatedSignalArgs) (string, []any) {
 	var branches []string
 	var args []any
@@ -247,8 +290,12 @@ func perSignalFilterSQL(aggArgs *model.AggregatedSignalArgs) (string, []any) {
 	}
 	if len(aggArgs.LocationArgs) != 0 {
 		parts := make([]string, 0, len(aggArgs.LocationArgs))
-		for i := range aggArgs.LocationArgs {
-			parts = append(parts, fmt.Sprintf("(agg_table.signal_index = %d)", i))
+		for i, la := range aggArgs.LocationArgs {
+			cond := fmt.Sprintf("agg_table.signal_index = %d", i)
+			if lf := locationFilterSQL("s.loc_lat", "s.loc_lon", la.Filter); lf != "" {
+				cond += " AND " + lf
+			}
+			parts = append(parts, "("+cond+")")
 		}
 		branches = append(branches, fmt.Sprintf("(agg_table.signal_type = %d AND (s.loc_lat != 0 OR s.loc_lon != 0) AND (%s))",
 			ch.LocType, strings.Join(parts, " OR ")))

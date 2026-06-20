@@ -307,23 +307,56 @@ func TestGetAggregatedSignalsEdgeCases(t *testing.T) {
 		assert.Empty(t, signals)
 	})
 
-	t.Run("location filters are rejected", func(t *testing.T) {
+	// minute 0 holds two location points: (1,2)@:20 and (3,4)@:40. A spatial
+	// filter that encloses exactly one of them must select that one (SR review
+	// #10 — replaces the old "location filters are rejected").
+	t.Run("inCircle filter selects only points within the radius", func(t *testing.T) {
 		aggArgs := &model.AggregatedSignalArgs{
 			SignalArgs: model.SignalArgs{Subject: testSubject1},
 			FromTS:     d1(t, "00:00:00"),
-			ToTS:       d1(t, "01:00:00"),
+			ToTS:       d1(t, "00:01:00"),
 			Interval:   time.Minute.Microseconds(),
 			LocationArgs: []model.LocationSignalArgs{{
 				Name: sigLoc,
 				Agg:  model.LocationAggregationFirst,
 				Filter: &model.SignalLocationFilter{
-					InCircle: &model.InCircleFilter{Center: &model.FilterLocation{Latitude: 1, Longitude: 2}, Radius: 5},
+					// ~5 km around (3,4); (1,2) is ~314 km away and excluded.
+					InCircle: &model.InCircleFilter{Center: &model.FilterLocation{Latitude: 3, Longitude: 4}, Radius: 5},
 				},
 			}},
 		}
-		_, err := q.GetAggregatedSignals(context.Background(), testSubject1, aggArgs)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "location filters not yet supported")
+		signals, err := q.GetAggregatedSignals(context.Background(), testSubject1, aggArgs)
+		require.NoError(t, err)
+		require.Len(t, signals, 1)
+		assert.InDelta(t, 3, signals[0].ValueLocation.Latitude, 1e-9)
+		assert.InDelta(t, 4, signals[0].ValueLocation.Longitude, 1e-9)
+	})
+
+	t.Run("inPolygon filter selects only points inside the polygon", func(t *testing.T) {
+		aggArgs := &model.AggregatedSignalArgs{
+			SignalArgs: model.SignalArgs{Subject: testSubject1},
+			FromTS:     d1(t, "00:00:00"),
+			ToTS:       d1(t, "00:01:00"),
+			Interval:   time.Minute.Microseconds(),
+			LocationArgs: []model.LocationSignalArgs{{
+				Name: sigLoc,
+				Agg:  model.LocationAggregationFirst,
+				Filter: &model.SignalLocationFilter{
+					// A box around (1,2) only; (3,4) is outside.
+					InPolygon: []*model.FilterLocation{
+						{Latitude: 0.5, Longitude: 1.5},
+						{Latitude: 0.5, Longitude: 2.5},
+						{Latitude: 1.5, Longitude: 2.5},
+						{Latitude: 1.5, Longitude: 1.5},
+					},
+				},
+			}},
+		}
+		signals, err := q.GetAggregatedSignals(context.Background(), testSubject1, aggArgs)
+		require.NoError(t, err)
+		require.Len(t, signals, 1)
+		assert.InDelta(t, 1, signals[0].ValueLocation.Latitude, 1e-9)
+		assert.InDelta(t, 2, signals[0].ValueLocation.Longitude, 1e-9)
 	})
 }
 

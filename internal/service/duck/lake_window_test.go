@@ -12,10 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLakeEventService_DefaultScanWindow proves an open-ended lake fetch is
-// bounded by a default lookback window (CH capped lookbacks; the lake path had
-// none → unbounded full scan, CHD-34), while a point lookup by id stays
-// unbounded so old events remain fetchable.
+// TestLakeEventService_DefaultScanWindow proves the default lookback window is a
+// DoS guard for subject-less, id-less scans only — NOT a parity bound. A
+// subject-scoped fetch prunes to one vehicle's files, so it reaches arbitrarily
+// old events (matching ClickHouse, which imposes no floor when given no
+// `after`); only a subject-less search keeps the window, and a point lookup by
+// id bypasses it (SR review #4).
 func TestLakeEventService_DefaultScanWindow(t *testing.T) {
 	ctx := context.Background()
 	lsvc, svc := newLakeEventServiceForTest(t)
@@ -26,10 +28,22 @@ func TestLakeEventService_DefaultScanWindow(t *testing.T) {
 	insertRawEvent(t, svc, old)
 	insertRawEvent(t, svc, recent)
 
-	// List with no time bound excludes the 500-day-old event.
+	// Subject-scoped list: no floor, so the 500-day-old event is returned too
+	// (a dormant vehicle must not look empty).
 	res, err := lsvc.ListIndexesAdvanced(ctx, 100, &grpc.AdvancedSearchOptions{
 		Subject: &grpc.StringFilterOption{In: []string{lakeRawSubj}},
 	})
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, e := range res {
+		ids[e.ID] = true
+	}
+	assert.Equal(t, map[string]bool{"old-ev": true, "recent-ev": true}, ids,
+		"a subject-scoped fetch must reach arbitrarily old events (no floor)")
+
+	// Subject-less, id-less search keeps the default window as a DoS guard: the
+	// 500-day-old event is excluded.
+	res, err = lsvc.ListIndexesAdvanced(ctx, 100, &grpc.AdvancedSearchOptions{})
 	require.NoError(t, err)
 	require.Len(t, res, 1)
 	assert.Equal(t, "recent-ev", res[0].ID)

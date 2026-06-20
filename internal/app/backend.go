@@ -229,6 +229,16 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 // owns its own DuckDB service (catalog attached) for the lifetime of the
 // loop; the query backend opens a separate one.
 func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Duration, logger zerolog.Logger) (func(), error) {
+	// Sharding is not honored on the DuckLake path — readDelta reads the whole
+	// raw_events delta and the single global ingest_progress cursor makes exactly
+	// one logical processor (extra replicas just lose the cursor CAS and roll
+	// back). Refuse the config rather than silently ignore it: run the
+	// materializer as a single replicaCount=1 release (SR review #8).
+	if settings.MaterializerShardCount > 1 {
+		return nil, fmt.Errorf(
+			"MATERIALIZER_SHARD_COUNT=%d is not supported on the DuckLake path: the global ingest_progress cursor allows only one materializer; run a single replicaCount=1 release",
+			settings.MaterializerShardCount)
+	}
 	cfg := duckConfigFromSettings(settings)
 	cfg.DuckLakeEnabled = true
 	duckSvc, err := duck.NewService(cfg)
