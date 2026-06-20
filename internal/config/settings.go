@@ -36,6 +36,15 @@ type Settings struct {
 	// DuckLakeDataPath is where DuckLake parquet data files live (s3:// or
 	// a local dir). Must match din's LAKE_DATA_PATH.
 	DuckLakeDataPath string `yaml:"DUCKLAKE_DATA_PATH"`
+	// DuckLakeReadOnly attaches the DuckLake catalog read-only. Set it on the
+	// query/shadow fleet (which never writes the lake — only the single-writer
+	// materializer does) so the reader fleet can sit on a Postgres read replica
+	// and never opens the primary catalog read-write. Forced off when
+	// MaterializerEnabled so the writer can never come up read-only.
+	DuckLakeReadOnly bool `yaml:"DUCKLAKE_READ_ONLY"`
+	// DuckLakeCatalogReadDSN is an optional Postgres read-replica DSN for the
+	// read-only reader role. Empty reads the primary DuckLakeCatalogDSN.
+	DuckLakeCatalogReadDSN string `yaml:"DUCKLAKE_CATALOG_READ_DSN"`
 	// DuckDB parse-on-read query engine (maps into duck.Config).
 	DuckDBMemoryLimit   string `yaml:"DUCKDB_MEMORY_LIMIT"`
 	DuckDBThreads       int    `yaml:"DUCKDB_THREADS"`

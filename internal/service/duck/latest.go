@@ -24,6 +24,14 @@ const nonZeroLocCond = "(loc_lat_nonzero != 0 OR loc_lon_nonzero != 0)"
 //     signals, materialized per (subject, source) under model.LastSeenField)
 func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error) {
 	if q.lake {
+		// The rollup serves named latest in O(distinct-names), but it stores
+		// only the per-name latest value + its overall-max timestamp — not the
+		// separate nonzero-location timestamp the location-name path needs — so
+		// location names and source-filtered queries fall back to the full
+		// deduped scan (SR-5).
+		if noSourceFilter(latestArgs.Filter) && len(latestArgs.LocationSignalNames) == 0 {
+			return q.getLatestSignalsRollup(ctx, subject, latestArgs)
+		}
 		return q.getLatestSignalsLake(ctx, subject, latestArgs)
 	}
 	table, err := q.tableExpr(ctx, q.latestPaths(subject))

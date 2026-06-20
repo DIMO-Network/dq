@@ -92,9 +92,19 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 	if filter.TimestampAsc {
 		order = "ASC"
 	}
+	// Collapse redelivery duplicates in SQL on the cloudevent header key
+	// (subject, second-precision time, type, source, id) — date_trunc('second')
+	// matches cloudevent.Key's RFC3339 second precision exactly. This replaces
+	// the old "fetch limit*2, dedup in a Go map, truncate to limit" pattern,
+	// which silently returned a short page when over half the window was
+	// duplicates and materialized a dedup map per query (SR-11).
 	q := fmt.Sprintf(
-		"SELECT %s FROM %s e WHERE %s%s ORDER BY e.time %s LIMIT %d",
-		lakeRawColumns, lakeRawEvents, where, voiding, order, limit*2)
+		"SELECT %s FROM %s e WHERE %s%s "+
+			"QUALIFY ROW_NUMBER() OVER ("+
+			"PARTITION BY e.subject, date_trunc('second', e.time), e.type, e.source, e.id "+
+			"ORDER BY e.time) = 1 "+
+			"ORDER BY e.time %s LIMIT %d",
+		lakeRawColumns, lakeRawEvents, where, voiding, order, limit)
 
 	rows, err := l.svc.DB().QueryContext(ctx, q, args...)
 	if err != nil {
@@ -102,18 +112,12 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 	}
 	defer rows.Close() //nolint:errcheck
 
-	seen := map[string]struct{}{}
 	var events []cloudevent.StoredEvent
-	for rows.Next() && len(events) < limit {
+	for rows.Next() {
 		ev, err := scanStoredEvent(rows)
 		if err != nil {
 			return nil, err
 		}
-		key := ev.Key()
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
 		events = append(events, ev)
 	}
 	return events, rows.Err()
@@ -180,6 +184,12 @@ func (l *LakeEventService) GetLatestIndex(ctx context.Context, opts *grpc.Search
 
 // GetCloudEventTypeSummariesAdvanced returns per-type counts and time ranges
 // matching opts. Voided events are excluded (ExcludeVoided always true here).
+//
+// This intentionally does NOT apply defaultFetchScanWindow: first_seen/last_seen
+// are all-time min/max per type, so a lookback bound would corrupt them and
+// diverge from ClickHouse's getEventSummariesQuery, which is also unbounded
+// (SR-10). raw_events is partitioned by (type, day), so a type filter still
+// prunes; an unfiltered summary is an inherent full scan by definition.
 func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Context, opts *grpc.AdvancedSearchOptions) ([]eventrepo.CloudEventTypeSummary, error) {
 	f, err := filterFromAdvanced(opts)
 	if err != nil {
@@ -263,15 +273,45 @@ func (l *LakeEventService) resolvePayload(ctx context.Context, ev cloudevent.Sto
 	return raw, nil
 }
 
-// ListCloudEventsFromIndexes fetches the payload for each index entry.
+// ListCloudEventsFromIndexes fetches the payload for each index entry, in input
+// order. It groups the requested ids by subject and issues one query per
+// subject instead of one per index (SR-4) — a list of N indexes for one vehicle
+// is a single raw_events query, not N. Blob payloads are still resolved per
+// event (each needs its own bytes). A requested index with no row is ErrNotFound,
+// matching the old per-index path.
 func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, indexes []cloudevent.CloudEvent[eventrepo.ObjectInfo], _ string) ([]cloudevent.RawEvent, error) {
-	out := make([]cloudevent.RawEvent, 0, len(indexes))
+	if len(indexes) == 0 {
+		return nil, nil
+	}
+	idsBySubject := make(map[string][]string)
 	for i := range indexes {
-		ev, err := l.GetCloudEventFromIndex(ctx, &indexes[i], "")
+		s := indexes[i].Subject
+		idsBySubject[s] = append(idsBySubject[s], indexes[i].ID)
+	}
+
+	type key struct{ subject, id string }
+	found := make(map[key]cloudevent.StoredEvent, len(indexes))
+	for subject, ids := range idsBySubject {
+		evs, err := l.queryLakeRaw(ctx, RawFilter{Subject: subject, IDs: ids, ExcludeVoided: true}, len(ids))
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, ev)
+		for _, ev := range evs {
+			found[key{ev.Subject, ev.ID}] = ev
+		}
+	}
+
+	out := make([]cloudevent.RawEvent, 0, len(indexes))
+	for i := range indexes {
+		ev, ok := found[key{indexes[i].Subject, indexes[i].ID}]
+		if !ok {
+			return nil, ErrNotFound
+		}
+		raw, err := l.resolvePayload(ctx, ev)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, raw)
 	}
 	return out, nil
 }

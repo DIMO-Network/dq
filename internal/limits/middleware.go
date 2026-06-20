@@ -9,6 +9,10 @@ import (
 
 type contextKey struct{}
 
+// defaultMaxRequestDuration is used when MAX_REQUEST_DURATION is unset. Without
+// a fallback, an omitted env var fails New and crash-loops the pod (SR-12).
+const defaultMaxRequestDuration = 5 * time.Minute
+
 // RequestStartTime returns the time the request started, if set by the Limiter middleware.
 func RequestStartTime(ctx context.Context) (time.Time, bool) {
 	t, ok := ctx.Value(contextKey{}).(time.Time)
@@ -24,6 +28,9 @@ type Limiter struct {
 // The string maxRequestDuration must be parseable as a positive time.Duration; e.g.,
 // "5m", "30s".
 func New(maxRequestDuration string) (*Limiter, error) {
+	if maxRequestDuration == "" {
+		return &Limiter{maxRequestDuration: defaultMaxRequestDuration}, nil
+	}
 	mrd, err := time.ParseDuration(maxRequestDuration)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't parse duration %q: %w", maxRequestDuration, err)

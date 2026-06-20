@@ -79,6 +79,31 @@ type Config struct {
 	// DataPath is where DuckLake writes parquet data files: an s3:// prefix
 	// in prod, a local directory in tests.
 	DataPath string `yaml:"DUCKLAKE_DATA_PATH"`
+	// ReadOnly attaches the DuckLake catalog (and its meta side database) in
+	// READ_ONLY mode. Only the single-writer materializer writes the lake; the
+	// query/shadow fleet never does, so it attaches read-only. Besides being
+	// defense-in-depth, a read-only attach lets the reader fleet point at a
+	// Postgres read replica (CatalogReadDSN) so the catalog read load of many
+	// query replicas never lands on the primary that din ingest, din
+	// maintenance, and the materializer all write. DuckLake supports
+	// `ATTACH 'ducklake:...' (READ_ONLY)`; backend.go forces this off whenever
+	// the materializer is enabled so a writer can never come up read-only.
+	ReadOnly bool `yaml:"DUCKLAKE_READ_ONLY"`
+	// CatalogReadDSN is an optional Postgres read-replica DSN used only by the
+	// read-only reader role. Empty reads the primary CatalogDSN. Ignored when
+	// ReadOnly is false.
+	CatalogReadDSN string `yaml:"DUCKLAKE_CATALOG_READ_DSN"`
+}
+
+// effectiveCatalogDSN is the catalog DSN this role connects to: the read
+// replica (CatalogReadDSN) for a read-only reader when one is configured,
+// otherwise the primary CatalogDSN. Centralizing the choice keeps catalogURI,
+// CatalogIsPostgres, and MetaTarget agreeing on a single target.
+func (c Config) effectiveCatalogDSN() string {
+	if c.ReadOnly && c.CatalogReadDSN != "" {
+		return c.CatalogReadDSN
+	}
+	return c.CatalogDSN
 }
 
 // CatalogIsPostgres reports whether the DuckLake catalog DSN names a Postgres
@@ -86,16 +111,17 @@ type Config struct {
 // (no "postgres:" prefix) — same convention as din's LAKE_CATALOG_DSN, so an
 // operator sets one DSN format for both services attaching the catalog.
 func (c Config) CatalogIsPostgres() bool {
-	return strings.HasPrefix(c.CatalogDSN, "postgres://") || strings.HasPrefix(c.CatalogDSN, "postgresql://") ||
-		strings.Contains(c.CatalogDSN, "host=") || strings.Contains(c.CatalogDSN, "dbname=")
+	dsn := c.effectiveCatalogDSN()
+	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") ||
+		strings.Contains(dsn, "host=") || strings.Contains(dsn, "dbname=")
 }
 
 // catalogURI maps the DSN onto a ducklake ATTACH URI, matching din.catalogURI.
 func (c Config) catalogURI() string {
 	if c.CatalogIsPostgres() {
-		return "ducklake:postgres:" + c.CatalogDSN
+		return "ducklake:postgres:" + c.effectiveCatalogDSN()
 	}
-	return "ducklake:" + c.CatalogDSN
+	return "ducklake:" + c.effectiveCatalogDSN()
 }
 
 // MetaTarget is the ATTACH target for the side database holding consumer
@@ -104,15 +130,24 @@ func (c Config) catalogURI() string {
 // exactly so both attach the same database.
 func (c Config) MetaTarget() string {
 	if c.CatalogIsPostgres() {
-		return c.CatalogDSN
+		return c.effectiveCatalogDSN()
 	}
-	return c.CatalogDSN + ".progress.db"
+	return c.effectiveCatalogDSN() + ".progress.db"
 }
 
-// MetaAttachOpts is the ATTACH options clause for the meta database.
+// MetaAttachOpts is the ATTACH options clause for the meta database. A
+// read-only reader attaches meta read-only too: it never writes consumer
+// progress (only the materializer does), and a read-only attach is what lets
+// the reader role sit on a Postgres read replica.
 func (c Config) MetaAttachOpts() string {
 	if c.CatalogIsPostgres() {
+		if c.ReadOnly {
+			return " (TYPE postgres, READ_ONLY)"
+		}
 		return " (TYPE postgres)"
+	}
+	if c.ReadOnly {
+		return " (READ_ONLY)"
 	}
 	return ""
 }

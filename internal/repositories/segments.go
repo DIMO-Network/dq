@@ -491,12 +491,24 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 		return nil, err
 	}
 
-	var out []*model.DailyActivity
+	// One batched ForRanges call covers every calendar day, replacing the old
+	// per-day GetAggregatedSignals + GetEventCounts — up to 64 serialized
+	// round-trips for a 32-day window, which blew the request timeout (SR-3).
+	// Each result's SegIndex maps back to the day's position in `days`.
+	floatArgs, locationArgs := buildAggArgs(signalReqs)
+	var days []dayWindow
 	for d := fromDate; !d.After(toDate); d = d.Add(24 * time.Hour) {
-		dayStart := d
-		dayEnd := d.Add(24 * time.Hour)
-		dayStartUTC := dayStart.UTC()
-		dayEndUTC := dayEnd.UTC()
+		days = append(days, dayWindow{start: d.UTC(), end: d.Add(24 * time.Hour).UTC()})
+	}
+	aggsByDay, eventCountsByDay, err := r.batchDaySummaries(ctx, did, days, floatArgs, locationArgs, eventNames)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []*model.DailyActivity
+	for i, w := range days {
+		dayStartUTC := w.start
+		dayEndUTC := w.end
 
 		var segmentCount int
 		var totalActiveSeconds int
@@ -525,10 +537,8 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 			lastSeg = seg
 		}
 
-		signalSummary, startLoc, endLoc, eventSummary, err := r.daySummary(ctx, did, dayStartUTC, dayEndUTC, signalReqs, eventNames)
-		if err != nil {
-			return nil, err
-		}
+		signalSummary, startLoc, endLoc := buildSummaryFromAggs(aggsByDay[i], floatArgs)
+		eventSummary := buildEventSummary(eventCountsByDay[i], eventNames)
 		if firstSeg != nil && firstSeg.Start != nil && firstSeg.Start.Value != nil {
 			startLoc = firstSeg.Start.Value
 		}
@@ -559,30 +569,61 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 	return out, nil
 }
 
-func (r *Repository) daySummary(ctx context.Context, did string, dayStart, dayEnd time.Time, signalReqs []*model.SegmentSignalRequest, eventNames []string) ([]*model.SignalAggregationValue, *model.Location, *model.Location, []*model.EventCount, error) {
-	intervalMicro := dayEnd.Sub(dayStart).Microseconds()
-	if intervalMicro <= 0 {
-		intervalMicro = 1
-	}
-	floatArgs, locationArgs := buildAggArgs(signalReqs)
-	aggArgs := &model.AggregatedSignalArgs{
-		SignalArgs:   model.SignalArgs{Subject: did},
-		FromTS:       dayStart,
-		ToTS:         dayEnd,
-		Interval:     intervalMicro,
-		FloatArgs:    floatArgs,
-		LocationArgs: locationArgs,
-	}
-	aggs, err := r.chService.GetAggregatedSignals(ctx, did, aggArgs)
-	if err != nil {
-		return nil, nil, nil, nil, handleDBError(ctx, err)
-	}
-	signalSummary, startLoc, endLoc := buildSummaryFromAggs(aggs, floatArgs)
+// dayWindow is one calendar day's UTC [start, end) bounds, in the order
+// GetDailyActivity iterates days so a ForRanges SegIndex maps back by position.
+type dayWindow struct {
+	start, end time.Time
+}
 
-	eventCounts, err := r.chService.GetEventCounts(ctx, did, dayStart, dayEnd, eventNames)
-	if err != nil {
-		return nil, nil, nil, nil, handleDBError(ctx, err)
+// batchDaySummaries fetches every day's signal aggregation and event counts in
+// a single GetAggregatedSignalsForRanges + GetEventCountsForRanges pair (run
+// concurrently), then scatters the results by day index. This replaces the old
+// per-day daySummary (one GetAggregatedSignals + one GetEventCounts each), whose
+// serialized round-trips blew the request timeout for wide ranges (SR-3).
+func (r *Repository) batchDaySummaries(ctx context.Context, did string, days []dayWindow, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs, eventNames []string) (map[int][]*ch.AggSignal, map[int]map[string]int, error) {
+	if len(days) == 0 {
+		return map[int][]*ch.AggSignal{}, map[int]map[string]int{}, nil
 	}
-	eventSummary := buildEventSummary(eventCountsToMap(eventCounts), eventNames)
-	return signalSummary, startLoc, endLoc, eventSummary, nil
+	ranges := make([]ch.TimeRange, len(days))
+	for i, w := range days {
+		ranges[i] = ch.TimeRange{From: w.start, To: w.end}
+	}
+	globalFrom := days[0].start
+	globalTo := days[len(days)-1].end
+
+	var batchAggs []*ch.AggSignalForRange
+	var batchCounts []*ch.EventCountForRange
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		var err error
+		batchAggs, err = r.chService.GetAggregatedSignalsForRanges(gctx, did, ranges, globalFrom, globalTo, floatArgs, locationArgs)
+		return err
+	})
+	g.Go(func() error {
+		var err error
+		batchCounts, err = r.chService.GetEventCountsForRanges(gctx, did, ranges, eventNames)
+		return err
+	})
+	if err := g.Wait(); err != nil {
+		return nil, nil, handleDBError(ctx, err)
+	}
+
+	aggsByDay := make(map[int][]*ch.AggSignal, len(days))
+	for _, a := range batchAggs {
+		aggsByDay[a.SegIndex] = append(aggsByDay[a.SegIndex], &ch.AggSignal{
+			SignalType:    a.SignalType,
+			SignalIndex:   a.SignalIndex,
+			ValueNumber:   a.ValueNumber,
+			ValueString:   a.ValueString,
+			ValueLocation: a.ValueLocation,
+		})
+	}
+	eventCountsByDay := make(map[int]map[string]int, len(days))
+	for _, ec := range batchCounts {
+		if eventCountsByDay[ec.SegIndex] == nil {
+			eventCountsByDay[ec.SegIndex] = make(map[string]int)
+		}
+		eventCountsByDay[ec.SegIndex][ec.Name] = ec.Count
+	}
+	return aggsByDay, eventCountsByDay, nil
 }

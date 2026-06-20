@@ -57,6 +57,20 @@ func TestListCloudEventsFromIndex_RejectsTraversalKey(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
+// TestListCloudEventsFromIndex_RejectsTooManyKeys bounds the request: an
+// oversized index list would fan out into that many fetches from one call
+// (SR-4). It must be rejected, not processed.
+func TestListCloudEventsFromIndex_RejectsTooManyKeys(t *testing.T) {
+	s := NewServer(nil, emptyEventService{})
+	idxs := make([]*grpc.CloudEventIndex, maxIndexKeysPerRequest+1)
+	for i := range idxs {
+		idxs[i] = &grpc.CloudEventIndex{Data: &grpc.ObjectInfo{Key: "cloudevent/blobs/x"}}
+	}
+	_, err := s.ListCloudEventsFromIndex(context.Background(), &grpc.ListCloudEventsFromKeysRequest{Indexes: idxs})
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
 // TestListIndexes_EmptyReturnsNotFound pins the gRPC contract: an empty result
 // is NotFound, matching ClickHouse, not OK+empty (CHD-22). The lake backend
 // returns an empty slice with no error, which silently broke clients expecting

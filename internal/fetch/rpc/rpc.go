@@ -16,6 +16,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// maxIndexKeysPerRequest bounds how many index keys one ListCloudEventsFromIndex
+// call may carry. Each key fans out into a fetch (and, for blobs, an S3 GET), so
+// an unbounded list is a memory/latency amplifier from a single RPC (SR-4).
+const maxIndexKeysPerRequest = 1000
+
 // Server is used to implement grpc.FetchServiceServer.
 type Server struct {
 	eventService eventrepo.EventService
@@ -160,6 +165,9 @@ func (s *Server) GetLatestCloudEvent(ctx context.Context, req *grpc.GetLatestClo
 // ListCloudEventsFromIndex translates the gRPC call to the indexrepo type and fetches data for the given index keys.
 func (s *Server) ListCloudEventsFromIndex(ctx context.Context, req *grpc.ListCloudEventsFromKeysRequest) (*grpc.ListCloudEventsFromKeysResponse, error) {
 	protoIndexList := req.GetIndexes()
+	if len(protoIndexList) > maxIndexKeysPerRequest {
+		return nil, status.Errorf(codes.InvalidArgument, "too many indexes: %d (max %d)", len(protoIndexList), maxIndexKeysPerRequest)
+	}
 	events := make([]cloudevent.CloudEvent[eventrepo.ObjectInfo], len(protoIndexList))
 	for i, index := range protoIndexList {
 		if !validObjectKey(index.GetData().GetKey()) {

@@ -3,6 +3,7 @@ package duck
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
@@ -36,6 +37,42 @@ func (q *Queries) getAllLatestSignalsRollup(ctx context.Context, subject string)
 		sqlString(model.LastSeenField), epochLiteral, bucket)
 	stmt := mainStmt + " UNION ALL " + lastSeenStmt + " ORDER BY name"
 	return q.querySignals(ctx, stmt, []any{subject, subject})
+}
+
+// getLatestSignalsRollup serves GetLatestSignals for the requested non-location
+// signal names from lake.signals_latest (SR-5): each stored row is already the
+// per-name latest value at its overall-max timestamp, matching the GROUP BY in
+// getLatestSignalsLake by construction. The caller guarantees no source filter
+// and no location names. IncludeLastSeen adds the virtual lastSeen row.
+func (q *Queries) getLatestSignalsRollup(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error) {
+	if len(latestArgs.SignalNames) == 0 && !latestArgs.IncludeLastSeen {
+		return nil, nil
+	}
+	bucket := subjectBucketPredicate("", subject)
+	var stmts []string
+	var args []any
+	if len(latestArgs.SignalNames) > 0 {
+		names := mapKeys(latestArgs.SignalNames)
+		stmts = append(stmts, fmt.Sprintf(
+			`SELECT name, timestamp AS ts, value_number, value_string,
+				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
+			 FROM lake.signals_latest WHERE subject = ? AND %s AND name IN (%s)`,
+			bucket, placeholders(len(names))))
+		args = append(args, subject)
+		for _, n := range names {
+			args = append(args, n)
+		}
+	}
+	if latestArgs.IncludeLastSeen {
+		stmts = append(stmts, fmt.Sprintf(
+			`SELECT %s AS name, coalesce(max(last_seen), %s) AS ts,
+				0.0 AS value_number, '' AS value_string,
+				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
+			 FROM lake.signals_latest WHERE subject = ? AND %s`,
+			sqlString(model.LastSeenField), epochLiteral, bucket))
+		args = append(args, subject)
+	}
+	return q.querySignals(ctx, strings.Join(stmts, " UNION ALL ")+" ORDER BY name", args)
 }
 
 // getSignalSummariesRollup serves GetSignalSummaries from lake.signals_latest.

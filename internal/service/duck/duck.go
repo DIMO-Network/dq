@@ -126,13 +126,22 @@ func bootstrapQueries(cfg Config) []string {
 }
 
 // attachDuckLakeSQL attaches the DuckLake catalog as schema "lake".
-// IF NOT EXISTS makes it idempotent across pooled connections.
+// IF NOT EXISTS makes it idempotent across pooled connections. A reader role
+// (cfg.ReadOnly) attaches READ_ONLY so it can never write the shared catalog
+// and can read from a Postgres read replica.
 func attachDuckLakeSQL(cfg Config) string {
+	var opts []string
 	if cfg.DataPath != "" {
-		return fmt.Sprintf("ATTACH IF NOT EXISTS %s AS lake (DATA_PATH %s)",
-			sqlString(cfg.catalogURI()), sqlString(cfg.DataPath))
+		opts = append(opts, "DATA_PATH "+sqlString(cfg.DataPath))
 	}
-	return fmt.Sprintf("ATTACH IF NOT EXISTS %s AS lake", sqlString(cfg.catalogURI()))
+	if cfg.ReadOnly {
+		opts = append(opts, "READ_ONLY")
+	}
+	if len(opts) == 0 {
+		return fmt.Sprintf("ATTACH IF NOT EXISTS %s AS lake", sqlString(cfg.catalogURI()))
+	}
+	return fmt.Sprintf("ATTACH IF NOT EXISTS %s AS lake (%s)",
+		sqlString(cfg.catalogURI()), strings.Join(opts, ", "))
 }
 
 // createS3SecretSQL builds the CREATE SECRET statement for S3 access.

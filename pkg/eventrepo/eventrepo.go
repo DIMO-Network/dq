@@ -107,6 +107,11 @@ func (s *Service) GetLatestIndexAdvanced(ctx context.Context, advancedOpts *grpc
 	if err != nil {
 		return cloudevent.CloudEvent[ObjectInfo]{}, err
 	}
+	// Defensive: ListIndexesAdvanced returns sql.ErrNoRows on empty today, but a
+	// backend whose contract returns (nil, nil) must not panic here (SR-16).
+	if len(events) == 0 {
+		return cloudevent.CloudEvent[ObjectInfo]{}, sql.ErrNoRows
+	}
 	return events[0], nil
 }
 
