@@ -60,7 +60,4 @@ type SegmentDetector interface {
 		from, to time.Time,
 		config *model.SegmentConfig,
 	) ([]*model.Segment, error)
-
-	// GetMechanismName returns the name of this detection mechanism
-	GetMechanismName() string
 }

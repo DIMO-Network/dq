@@ -98,8 +98,3 @@ func (d *ChangePointDetector) applyCUSUM(windows []ActiveWindow) []ActiveWindow 
 
 	return active
 }
-
-// GetMechanismName returns the name of this detection mechanism
-func (d *ChangePointDetector) GetMechanismName() string {
-	return "CHANGE_POINT_DETECTION"
-}

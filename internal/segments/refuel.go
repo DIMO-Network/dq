@@ -92,11 +92,6 @@ func (d *RefuelDetector) DetectSegments(
 	return timeRangesToSegments(merged, from), nil
 }
 
-// GetMechanismName returns the name of this detection mechanism.
-func (d *RefuelDetector) GetMechanismName() string {
-	return "REFUEL"
-}
-
 // findRefuelTroughAndPeak finds the trough (last low sample at or before riseStart) and
 // peak (first sample where fuel stabilizes high after riseEnd) around a detected fuel rise.
 // Uses binary search to jump to the relevant indices. samples must be sorted by TS.

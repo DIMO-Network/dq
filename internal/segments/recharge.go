@@ -46,11 +46,6 @@ func (d *RechargeDetector) DetectSegments(
 	return detectRechargeSegments(ctx, d.src, subject, from, to, rc.minDuration, minRisePct)
 }
 
-// GetMechanismName returns the name of this detection mechanism.
-func (d *RechargeDetector) GetMechanismName() string {
-	return "RECHARGE"
-}
-
 // detectRechargeSegments: 2 queries (SoC + odometer), then all processing in-memory.
 func detectRechargeSegments(ctx context.Context, src SignalSource, subject string, from, to time.Time, minDuration int, minRisePct float64) ([]*model.Segment, error) {
 	// Query 1: SoC samples (returned sorted)

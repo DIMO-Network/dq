@@ -56,8 +56,3 @@ func (d *FrequencyDetector) DetectSegments(
 
 	return segments, nil
 }
-
-// GetMechanismName returns the name of this detection mechanism.
-func (d *FrequencyDetector) GetMechanismName() string {
-	return "FREQUENCY_ANALYSIS"
-}

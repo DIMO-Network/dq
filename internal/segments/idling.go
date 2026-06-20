@@ -55,11 +55,6 @@ func (d *IdlingDetector) DetectSegments(
 	return timeRangesToSegments(ranges, from), nil
 }
 
-// GetMechanismName returns the name of this detection mechanism.
-func (d *IdlingDetector) GetMechanismName() string {
-	return "IDLING"
-}
-
 // findIdleRpmRanges walks sorted RPM samples and finds contiguous runs where 0 < RPM <= maxIdleRpm.
 // A gap between consecutive idle samples larger than maxGap seconds ends the current run.
 // Only runs with duration >= minDuration are emitted. Ranges are clipped to [from, to].
