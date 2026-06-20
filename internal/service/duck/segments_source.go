@@ -61,7 +61,7 @@ FROM (
   SELECT %s AS window_start, name
   FROM lake.signals
   WHERE subject = ? AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1
+  `+signalDedupQualify+`
 )
 GROUP BY window_start
 HAVING count(*) >= ? AND count(DISTINCT name) >= ?
@@ -94,7 +94,7 @@ func (s *LakeSignalSource) LevelSamples(ctx context.Context, subject, name strin
 SELECT timestamp, value_number
 FROM lake.signals
 WHERE subject = ? AND name = ? AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
-QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1
+`+signalDedupQualify+`
 ORDER BY timestamp`,
 		fromUS, toUS)
 	rows, err := s.svc.db.QueryContext(ctx, q, subject, name)
@@ -162,7 +162,7 @@ WITH deduped AS (
   WHERE subject = ? AND name = 'isIgnitionOn'
     AND value_number IS NOT NULL
     AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1
+  `+signalDedupQualify+`
 ),
 transitions AS (
   SELECT

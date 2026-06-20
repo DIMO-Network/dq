@@ -9,6 +9,15 @@ import (
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
+// signalDedupQualify collapses duplicate lake.signals rows to one per
+// (subject,name,timestamp), keeping the lowest cloud_event_id — the read-side
+// mirror of ClickHouse's FINAL merge. This dedup key is parity-critical and
+// must stay in lockstep with the materializer's INSERT anti-join, so it lives
+// in exactly one place: lakeSignalsDeduped wraps it as an aggregation source,
+// and the segment signal-source queries (segments_source.go) embed it against
+// the bare table.
+const signalDedupQualify = `QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1`
+
 // lakeSignalsDeduped is the canonical DuckLake decoded-signal source:
 // lake.signals with at-rest duplicate (subject,name,timestamp) rows collapsed
 // to one row (lowest cloud_event_id). At-least-once ingest (device retry, sink
@@ -20,8 +29,7 @@ import (
 // (segments_source.go) and ClickHouse FINAL merge semantics. The PARTITION BY
 // columns are partition/sort keys (CHD-1), so subject/timestamp predicates
 // still prune below the window.
-const lakeSignalsDeduped = `(SELECT * FROM lake.signals ` +
-	`QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1)`
+const lakeSignalsDeduped = `(SELECT * FROM lake.signals ` + signalDedupQualify + `)`
 
 // lakeNonZeroLoc is the on-the-fly (0,0)-exclusion over base location
 // columns, replacing the bucket layout's precomputed loc_*_nonzero columns.
