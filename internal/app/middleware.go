@@ -1,9 +1,7 @@
 package app
 
 import (
-	"fmt"
 	"net/http"
-	"os"
 	"runtime/debug"
 
 	"github.com/DIMO-Network/dq/internal/auth"
@@ -56,7 +54,10 @@ func PanicRecoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "panic: %v\n%s\n", err, debug.Stack())
+				zerolog.Ctx(r.Context()).Error().
+					Interface("panic", err).
+					Bytes("stack", debug.Stack()).
+					Msg("recovered from panic in HTTP handler")
 				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			}
 		}()

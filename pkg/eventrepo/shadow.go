@@ -42,8 +42,11 @@ var (
 )
 
 const (
-	defaultFetchShadowTimeout        = 10 * time.Second
-	defaultFetchShadowMaxConcurrency = 4
+	defaultFetchShadowTimeout = 10 * time.Second
+	// 16, not 4: at 4 the shadow drops the great majority of comparisons under
+	// even moderate QPS (CH p99 is 50–200ms), so a clean mismatch counter meant
+	// "didn't look", not "matched" — undermining the cutover gate (SR-13).
+	defaultFetchShadowMaxConcurrency = 16
 	fetchShadowDiffSampleLen         = 512
 )
 
@@ -66,11 +69,11 @@ var _ EventService = (*ShadowEventService)(nil)
 // NewShadowEventService creates a ShadowEventService with bounded shadow
 // concurrency. primary (ClickHouse) always serves responses; secondary (lake)
 // is compared in the background.
-func NewShadowEventService(primary, secondary EventService) *ShadowEventService {
+func NewShadowEventService(primary, secondary EventService, log zerolog.Logger) *ShadowEventService {
 	return &ShadowEventService{
 		primary:   primary,
 		secondary: secondary,
-		log:       zerolog.Nop(),
+		log:       log,
 		sem:       make(chan struct{}, defaultFetchShadowMaxConcurrency),
 		timeout:   defaultFetchShadowTimeout,
 	}

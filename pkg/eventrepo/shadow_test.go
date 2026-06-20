@@ -9,6 +9,7 @@ import (
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/DIMO-Network/dq/pkg/grpc"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,7 +95,7 @@ func TestShadowEventService_PrimaryAlwaysServed(t *testing.T) {
 		},
 	}
 
-	shadow := eventrepo.NewShadowEventService(primary, secondary)
+	shadow := eventrepo.NewShadowEventService(primary, secondary, zerolog.Nop())
 
 	// ListIndexesAdvanced should return primary result.
 	list, err := shadow.ListIndexesAdvanced(ctx, 10, nil)
@@ -131,7 +132,7 @@ func TestShadowEventService_PayloadMethodsPrimaryOnly(t *testing.T) {
 
 	primary := &fakeEventService{}
 	secondary := &fakeEventService{}
-	shadow := eventrepo.NewShadowEventService(primary, secondary)
+	shadow := eventrepo.NewShadowEventService(primary, secondary, zerolog.Nop())
 
 	idx := &cloudevent.CloudEvent[eventrepo.ObjectInfo]{
 		CloudEventHeader: cloudevent.CloudEventHeader{ID: "x", Subject: "s"},
@@ -175,7 +176,7 @@ func TestShadowEventService_MismatchIncrementsCounter(t *testing.T) {
 		},
 	}
 
-	shadow := eventrepo.NewShadowEventService(primary, secondary)
+	shadow := eventrepo.NewShadowEventService(primary, secondary, zerolog.Nop())
 
 	list, err := shadow.ListIndexesAdvanced(ctx, 10, nil)
 	require.NoError(t, err)
@@ -204,7 +205,7 @@ func TestShadowEventService_PrimaryErrorSkipsShadow(t *testing.T) {
 		},
 	}
 
-	shadow := eventrepo.NewShadowEventService(primary, secondary)
+	shadow := eventrepo.NewShadowEventService(primary, secondary, zerolog.Nop())
 
 	_, err := shadow.ListIndexesAdvanced(ctx, 10, nil)
 	require.Error(t, err, "primary error propagated")
@@ -228,7 +229,7 @@ func TestShadowEventService_MatchNoCounter(t *testing.T) {
 	primary := &fakeEventService{latestIndexResult: event}
 	secondary := &fakeEventService{latestIndexResult: event}
 
-	shadow := eventrepo.NewShadowEventService(primary, secondary)
+	shadow := eventrepo.NewShadowEventService(primary, secondary, zerolog.Nop())
 
 	got, err := shadow.GetLatestIndexAdvanced(ctx, nil)
 	require.NoError(t, err)

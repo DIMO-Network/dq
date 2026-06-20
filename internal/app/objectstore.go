@@ -66,12 +66,24 @@ func (s *s3ObjectStore) GetObject(ctx context.Context, key string) ([]byte, erro
 		return nil, fmt.Errorf("getting s3://%s/%s: %w", s.bucket, key, err)
 	}
 	defer out.Body.Close() //nolint:errcheck
+	// Fail fast on a pathologically large object rather than reading it whole
+	// into memory and risking OOM (SR-22). The cap is generous — well above any
+	// legitimate raw bundle or compacted partition — so it only catches
+	// corrupt/runaway objects.
+	if out.ContentLength != nil && *out.ContentLength > maxStoreObjectBytes {
+		return nil, fmt.Errorf("s3://%s/%s is %d bytes, over the %d-byte store object limit", s.bucket, key, *out.ContentLength, maxStoreObjectBytes)
+	}
 	body, err := io.ReadAll(out.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading s3://%s/%s: %w", s.bucket, key, err)
 	}
 	return body, nil
 }
+
+// maxStoreObjectBytes bounds a single object read into memory by the materializer
+// object store. Generous (2 GiB) so it never trips on a normal large compacted
+// partition — it exists only to stop a corrupt/runaway object from OOMing.
+const maxStoreObjectBytes = 2 << 30
 
 // PutObject uploads one object.
 func (s *s3ObjectStore) PutObject(ctx context.Context, key string, body []byte) error {

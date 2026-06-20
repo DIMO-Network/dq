@@ -5,14 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"slices"
 
+	"github.com/DIMO-Network/dq/internal/service/duck"
 	"golang.org/x/sync/errgroup"
 )
-
-// numBuckets is the number of latest/summary hash buckets.
-const numBuckets = 256
 
 // lastSeenFieldName is the virtual signal name carrying the
 // per-(subject, source) max(timestamp) across all signals, replicating
@@ -20,13 +17,11 @@ const numBuckets = 256
 // model.LastSeenField (internal/graph/model/signalArgs.go).
 const lastSeenFieldName = "lastSeen"
 
-// hashBucket maps a subject to its latest/summary bucket.
-// NOTE: this must match duck.HashBucket (built in parallel on the
-// query/compactor side); both are fnv32a(subject) % 256.
+// hashBucket maps a subject to its latest/summary bucket. Delegates to
+// duck.HashBucket so write-side and read-side bucketing share one implementation
+// — no more hand-synced "must match" duplicate (SR-18).
 func hashBucket(subject string) uint32 {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(subject))
-	return h.Sum32() % numBuckets
+	return uint32(duck.HashBucket(subject))
 }
 
 type latestKey struct {

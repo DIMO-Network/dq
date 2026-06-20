@@ -66,11 +66,10 @@ func main() {
 	}
 	defer application.Cleanup()
 
-	rpcServer, grpcCleanup, err := app.CreateGRPCServer(&logger, &cfg)
+	rpcServer, err := app.CreateGRPCServer(&logger, application)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create gRPC server.")
 	}
-	defer grpcCleanup()
 
 	monSrv := monserver.NewMonitoringServer(&logger, cfg.EnablePprof)
 	runner.RunHandler(runnerCtx, runnerGroup, monSrv, ":"+strconv.Itoa(cfg.MonPort))

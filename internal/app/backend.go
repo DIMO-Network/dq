@@ -128,7 +128,7 @@ func newQueryBackend(settings *config.Settings, chService *ch.Service, logger ze
 // duckSvc must be non-nil when the backend is ducklake or shadow (the same
 // catalog-attached service returned by newQueryBackend). s3Client must be
 // non-nil for all backends.
-func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client *s3.Client) (eventrepo.EventService, error) {
+func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client *s3.Client, log zerolog.Logger) (eventrepo.EventService, error) {
 	presigner := s3.NewPresignClient(s3Client)
 	bucket := settings.ParquetBucket
 
@@ -149,7 +149,7 @@ func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client 
 			return chEvtSvc, nil
 		}
 		lakeSvc := duck.NewLakeEventService(duckSvc, s3Client, presigner, bucket)
-		return eventrepo.NewShadowEventService(chEvtSvc, lakeSvc), nil
+		return eventrepo.NewShadowEventService(chEvtSvc, lakeSvc, log), nil
 
 	default:
 		// clickhouse, duckdb, or unset: build a CH event service.

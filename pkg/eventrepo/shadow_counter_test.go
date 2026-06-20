@@ -8,6 +8,7 @@ import (
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -84,7 +85,7 @@ func TestShadowMismatchCounter_IncrementOnMismatch(t *testing.T) {
 		},
 	}
 
-	shadow := NewShadowEventService(primary, secondary)
+	shadow := NewShadowEventService(primary, secondary, zerolog.Nop())
 
 	before := counterFor(method)
 
@@ -112,7 +113,7 @@ func TestShadowMismatchCounter_NoIncrementOnMatch(t *testing.T) {
 	primary := &fakeWhiteBoxService{latestResult: event}
 	secondary := &fakeWhiteBoxService{latestResult: event}
 
-	shadow := NewShadowEventService(primary, secondary)
+	shadow := NewShadowEventService(primary, secondary, zerolog.Nop())
 
 	before := counterFor(method)
 

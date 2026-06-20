@@ -18,6 +18,7 @@ import (
 	"github.com/DIMO-Network/dq/internal/limits"
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/dq/internal/service/ch"
+	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	fetchgrpc "github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
 	gqlmetrics "github.com/DIMO-Network/server-garage/pkg/gql/metrics"
@@ -43,6 +44,11 @@ type App struct {
 	// readyCheck probes backend health for the /ready endpoint; nil = always
 	// ready (e.g. pure ClickHouse mode).
 	readyCheck func(context.Context) error
+	// eventService and buckets are the query backend New already built; the gRPC
+	// server reuses them instead of opening a second duck.Service + S3 client in
+	// the same process (SR-9). Owned by this App — Cleanup closes them.
+	eventService eventrepo.EventService
+	buckets      []string
 }
 
 // New creates a new application.
@@ -80,7 +86,7 @@ func New(settings config.Settings) (*App, error) {
 	}
 
 	s3Client := s3ClientFromSettings(&settings)
-	eventService, err := newEventService(&settings, duckSvc, s3Client)
+	eventService, err := newEventService(&settings, duckSvc, s3Client, logger)
 	if err != nil {
 		if stopMaterializer != nil {
 			stopMaterializer()
@@ -153,9 +159,11 @@ func New(settings config.Settings) (*App, error) {
 	}
 
 	return &App{
-		Handler:    authChain(gqlSrv),
-		MCPHandler: authChain(mcpHandler),
-		readyCheck: readyCheck,
+		Handler:      authChain(gqlSrv),
+		MCPHandler:   authChain(mcpHandler),
+		readyCheck:   readyCheck,
+		eventService: eventService,
+		buckets:      buckets,
 		cleanup: func() {
 			if stopMaterializer != nil {
 				stopMaterializer()
@@ -176,37 +184,12 @@ func noOp(ctx context.Context, obj interface{}, next graphql.Resolver) (res inte
 	return next(ctx)
 }
 
-// CreateGRPCServer creates a new gRPC server wired to the event service.
-// In ducklake mode no ClickHouse client is constructed.
-// The returned cleanup function releases the underlying duck.Service (DuckDB
-// connection + catalog attach) and must be called after the server has stopped
-// serving (e.g. after GracefulStop returns).
-func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.Server, func(), error) {
-	// Build a duck.Service for backends that need the catalog.
-	// chService is nil in ducklake mode; newQueryBackend handles that.
-	var chSvc *ch.Service
-	if settings.QueryBackend != config.QueryBackendDuckLake {
-		var err error
-		chSvc, err = ch.NewService(*settings)
-		if err != nil {
-			return nil, nil, fmt.Errorf("creating ClickHouse service for gRPC: %w", err)
-		}
-	}
-
-	_, duckSvc, cleanup, err := newQueryBackend(settings, chSvc, *logger)
-	if err != nil {
-		return nil, nil, fmt.Errorf("creating query backend for gRPC: %w", err)
-	}
-
-	s3Client := s3ClientFromSettings(settings)
-	eventService, err := newEventService(settings, duckSvc, s3Client)
-	if err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("creating event service for gRPC: %w", err)
-	}
-
-	buckets := []string{settings.CloudEventBucket, settings.EphemeralBucket, settings.ParquetBucket}
-	rpcServer := rpc.NewServer(buckets, eventService)
+// CreateGRPCServer builds the fetch gRPC server, reusing the query backend the
+// given App already opened rather than opening a second duck.Service + S3 client
+// in the same process (SR-9). The App owns that backend, so there is no separate
+// cleanup to return.
+func CreateGRPCServer(logger *zerolog.Logger, application *App) (*grpc.Server, error) {
+	rpcServer := rpc.NewServer(application.buckets, application.eventService)
 
 	grpcPanic := metrics.GRPCPanicker{Logger: logger}
 	server := grpc.NewServer(
@@ -222,7 +205,7 @@ func CreateGRPCServer(logger *zerolog.Logger, settings *config.Settings) (*grpc.
 	)
 	fetchgrpc.RegisterFetchServiceServer(server, rpcServer)
 
-	return server, cleanup, nil
+	return server, nil
 }
 
 func newServer(es graphql.ExecutableSchema) *handler.Server {

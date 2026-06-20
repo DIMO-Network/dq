@@ -46,8 +46,10 @@ var (
 )
 
 const (
-	defaultShadowTimeout        = 10 * time.Second
-	defaultShadowMaxConcurrency = 4
+	defaultShadowTimeout = 10 * time.Second
+	// 16, not 4: at 4 most comparisons are dropped under load, so a clean
+	// mismatch counter does not mean the backends agreed (SR-13).
+	defaultShadowMaxConcurrency = 16
 	// floatEpsilon is the absolute tolerance used when comparing float values
 	// between the two backends.
 	floatEpsilon = 1e-9
