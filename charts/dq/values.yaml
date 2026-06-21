@@ -23,6 +23,11 @@ securityContext:
 cronJob:
   enabled: false
   schedule: 0 0 * * 0
+prometheusRule:
+  # Set true ONLY in the single-writer materializer release so the
+  # absent-metric liveness alert (DQMaterializerDown) does not false-fire on
+  # query-only pods that legitimately emit no materializer metrics.
+  materializerEnabled: false
 # Recreate: the embedded materializer + decoded compactor are
 # single-writer components — two pods must never overlap during a deploy
 # until leader election lands. Query-only fleets (MATERIALIZER_ENABLED=false)

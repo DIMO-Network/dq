@@ -27,6 +27,25 @@ spec:
           annotations:
             summary: materializer has pending work but committed no batches in 30m
             description: watermark is not advancing — decode pipeline is stuck.
+{{- if (.Values.prometheusRule | default dict).materializerEnabled }}
+        - alert: DQMaterializerDown
+          # The single-writer materializer is replicaCount:1 with no PDB. When it
+          # is down / Pending after a node drain / CrashLooping, its gauges go
+          # ABSENT — so Stalled (rate==0 AND lag>0) and DecodeLag never fire on the
+          # missing series. absent_over_time alerts on the absence itself. Rendered
+          # only in the materializer release, where the gauge is expected.
+          expr: absent_over_time(dq_materializer_cursor_snapshot_id[15m])
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: materializer is not reporting (down, CrashLooping, or unscraped)
+            description: >-
+              No materializer metric scraped for 15m — the single-writer
+              materializer is not running. Decode has halted; restart it before
+              lag passes LAKE_SNAPSHOT_RETENTION → cursor reset
+              (DQMaterializerCursorReset) and permanent data loss.
+{{- end }}
         - alert: DQMaterializerCursorReset
           expr: increase(dq_materializer_cursor_resets_total[1h]) > 0
           for: 1m
