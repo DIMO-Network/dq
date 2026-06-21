@@ -28,6 +28,17 @@ prometheusRule:
   # absent-metric liveness alert (DQMaterializerDown) does not false-fire on
   # query-only pods that legitimately emit no materializer metrics.
   materializerEnabled: false
+networkPolicy:
+  # The gRPC fetch service (GRPC_PORT) has no request-level authz — it returns
+  # any subject's data. Enable this policy and set grpcAllowedFrom to the known
+  # callers so an in-cluster foothold cannot read the gRPC fetch path; the
+  # authenticated HTTP (GraphQL) and metrics ports stay open. Disabled by
+  # default because enabling it with an empty allowlist denies all gRPC callers
+  # (outage); configure grpcAllowedFrom with your caller set before enabling.
+  enabled: false
+  # NetworkPolicyPeer list for the gRPC port's `from:` — e.g. a namespaceSelector
+  # and/or podSelector for the services allowed to call gRPC fetch.
+  grpcAllowedFrom: []
 # Recreate: the embedded materializer + decoded compactor are
 # single-writer components — two pods must never overlap during a deploy
 # until leader election lands. Query-only fleets (MATERIALIZER_ENABLED=false)

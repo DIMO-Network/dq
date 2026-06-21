@@ -1,0 +1,42 @@
+{{- if .Values.networkPolicy.enabled }}
+# Ingress restriction for the gRPC fetch port. The fetch gRPC service performs
+# NO request-level authorization — it returns any subject's cloud events and
+# blobs for whatever subject the request names. Until a JWT/subject interceptor
+# lands on that path, network reachability is the only access control, so an
+# in-cluster foothold can read any vehicle's data. This policy admits the gRPC
+# port only from the callers you allowlist; the authenticated HTTP surface
+# (GraphQL/MCP) and the metrics port stay open.
+#
+# With networkPolicy.grpcAllowedFrom set, gRPC is reachable only from those
+# peers. With it empty, the gRPC rule is omitted entirely, so the port is
+# denied (default-deny for a selected pod). Keep this disabled until you have
+# set grpcAllowedFrom to your real caller set — enabling it with an empty
+# allowlist denies all gRPC callers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dq.fullname" . }}-grpc
+  labels:
+    {{- include "dq.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dq.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Authenticated HTTP (GraphQL/MCP) and metrics: open to all sources.
+    - ports:
+        - port: {{ .Values.env.PORT }}
+          protocol: TCP
+        - port: {{ .Values.env.MON_PORT }}
+          protocol: TCP
+    {{- with .Values.networkPolicy.grpcAllowedFrom }}
+    # gRPC fetch (unauthenticated): only the allowlisted callers.
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - port: {{ $.Values.env.GRPC_PORT }}
+          protocol: TCP
+    {{- end }}
+{{- end }}
