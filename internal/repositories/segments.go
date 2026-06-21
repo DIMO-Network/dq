@@ -197,13 +197,7 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	defaultReqs := defaultSegmentSignalSet(mechanism)
 	signalReqs := mergeSegmentSignalRequests(defaultReqs, signalRequests)
 	wantSummary := len(signalReqs) > 0 || len(eventRequests) > 0
-	var eventNames []string
-	if len(eventRequests) > 0 {
-		eventNames = make([]string, len(eventRequests))
-		for i, e := range eventRequests {
-			eventNames[i] = e.Name
-		}
-	}
+	eventNames := eventNamesOf(eventRequests)
 
 	const summaryEndBuffer = 2 * time.Minute
 	extendSummaryEnd := mechanism == model.DetectionMechanismRefuel || mechanism == model.DetectionMechanismRecharge
@@ -253,23 +247,8 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 		if err := g.Wait(); err != nil {
 			return nil, handleDBError(ctx, err)
 		}
-		eventCountsBySeg = make(map[int]map[string]int, len(chSegments))
-		for _, ec := range batchCounts {
-			if eventCountsBySeg[ec.SegIndex] == nil {
-				eventCountsBySeg[ec.SegIndex] = make(map[string]int)
-			}
-			eventCountsBySeg[ec.SegIndex][ec.Name] = ec.Count
-		}
-		aggsBySeg = make(map[int][]*ch.AggSignal, len(chSegments))
-		for _, a := range batchAggs {
-			aggsBySeg[a.SegIndex] = append(aggsBySeg[a.SegIndex], &ch.AggSignal{
-				SignalType:    a.SignalType,
-				SignalIndex:   a.SignalIndex,
-				ValueNumber:   a.ValueNumber,
-				ValueString:   a.ValueString,
-				ValueLocation: a.ValueLocation,
-			})
-		}
+		eventCountsBySeg = scatterEventCountsByIndex(batchCounts)
+		aggsBySeg = scatterAggsByIndex(batchAggs)
 	}
 
 	segments := chSegments
@@ -478,13 +457,7 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 
 	defaultReqs := defaultSegmentSignalSet(mechanism)
 	signalReqs := mergeSegmentSignalRequests(defaultReqs, signalRequests)
-	var eventNames []string
-	if len(eventRequests) > 0 {
-		eventNames = make([]string, len(eventRequests))
-		for i, e := range eventRequests {
-			eventNames[i] = e.Name
-		}
-	}
+	eventNames := eventNamesOf(eventRequests)
 
 	segments, err := r.GetSegments(ctx, did, rangeStart, rangeEnd, mechanism, config, signalReqs, eventRequests, nil, nil)
 	if err != nil {
@@ -608,9 +581,27 @@ func (r *Repository) batchDaySummaries(ctx context.Context, did string, days []d
 		return nil, nil, handleDBError(ctx, err)
 	}
 
-	aggsByDay := make(map[int][]*ch.AggSignal, len(days))
-	for _, a := range batchAggs {
-		aggsByDay[a.SegIndex] = append(aggsByDay[a.SegIndex], &ch.AggSignal{
+	return scatterAggsByIndex(batchAggs), scatterEventCountsByIndex(batchCounts), nil
+}
+
+// eventNamesOf extracts the requested event names, or nil when none are requested.
+func eventNamesOf(eventRequests []*model.SegmentEventRequest) []string {
+	if len(eventRequests) == 0 {
+		return nil
+	}
+	names := make([]string, len(eventRequests))
+	for i, e := range eventRequests {
+		names[i] = e.Name
+	}
+	return names
+}
+
+// scatterAggsByIndex groups per-range aggregated signals by SegIndex — the
+// position of the originating segment/day in the request slice.
+func scatterAggsByIndex(aggs []*ch.AggSignalForRange) map[int][]*ch.AggSignal {
+	out := make(map[int][]*ch.AggSignal)
+	for _, a := range aggs {
+		out[a.SegIndex] = append(out[a.SegIndex], &ch.AggSignal{
 			SignalType:    a.SignalType,
 			SignalIndex:   a.SignalIndex,
 			ValueNumber:   a.ValueNumber,
@@ -618,12 +609,18 @@ func (r *Repository) batchDaySummaries(ctx context.Context, did string, days []d
 			ValueLocation: a.ValueLocation,
 		})
 	}
-	eventCountsByDay := make(map[int]map[string]int, len(days))
-	for _, ec := range batchCounts {
-		if eventCountsByDay[ec.SegIndex] == nil {
-			eventCountsByDay[ec.SegIndex] = make(map[string]int)
+	return out
+}
+
+// scatterEventCountsByIndex groups per-range event counts by SegIndex into a
+// name→count map.
+func scatterEventCountsByIndex(counts []*ch.EventCountForRange) map[int]map[string]int {
+	out := make(map[int]map[string]int)
+	for _, ec := range counts {
+		if out[ec.SegIndex] == nil {
+			out[ec.SegIndex] = make(map[string]int)
 		}
-		eventCountsByDay[ec.SegIndex][ec.Name] = ec.Count
+		out[ec.SegIndex][ec.Name] = ec.Count
 	}
-	return aggsByDay, eventCountsByDay, nil
+	return out
 }
