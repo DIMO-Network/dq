@@ -88,13 +88,11 @@ func (q *Queries) getSignalSummariesRollup(ctx context.Context, subject string) 
 	defer rows.Close() //nolint:errcheck
 	summaries := []*model.SignalDataSummary{}
 	for rows.Next() {
-		var s model.SignalDataSummary
-		if err := rows.Scan(&s.Name, &s.NumberOfSignals, &s.FirstSeen, &s.LastSeen); err != nil {
+		s, err := scanSignalSummary(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scanning rollup summary: %w", err)
 		}
-		s.FirstSeen = s.FirstSeen.UTC()
-		s.LastSeen = s.LastSeen.UTC()
-		summaries = append(summaries, &s)
+		summaries = append(summaries, s)
 	}
 	return summaries, rows.Err()
 }

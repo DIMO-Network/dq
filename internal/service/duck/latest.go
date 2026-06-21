@@ -248,18 +248,29 @@ func (q *Queries) GetSignalSummaries(ctx context.Context, subject string, filter
 	}
 	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
-		var s model.SignalDataSummary
-		if err := rows.Scan(&s.Name, &s.NumberOfSignals, &s.FirstSeen, &s.LastSeen); err != nil {
+		s, err := scanSignalSummary(rows)
+		if err != nil {
 			return nil, fmt.Errorf("failed scanning duckdb row: %w", err)
 		}
-		s.FirstSeen = s.FirstSeen.UTC()
-		s.LastSeen = s.LastSeen.UTC()
-		summaries = append(summaries, &s)
+		summaries = append(summaries, s)
 	}
 	if rows.Err() != nil {
 		return nil, fmt.Errorf("duckdb row error: %w", rows.Err())
 	}
 	return summaries, nil
+}
+
+// scanSignalSummary scans one summary row (name, count, first_seen, last_seen)
+// and normalizes both timestamps to UTC. The column order is shared by every
+// signal-summary query (bucket, lake, rollup), so it lives in one place.
+func scanSignalSummary(rows rowScanner) (*model.SignalDataSummary, error) {
+	var s model.SignalDataSummary
+	if err := rows.Scan(&s.Name, &s.NumberOfSignals, &s.FirstSeen, &s.LastSeen); err != nil {
+		return nil, err
+	}
+	s.FirstSeen = s.FirstSeen.UTC()
+	s.LastSeen = s.LastSeen.UTC()
+	return &s, nil
 }
 
 // querySignals runs a signal-shaped query (name, ts, value_number,
