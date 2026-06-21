@@ -346,6 +346,17 @@ func (r *Runner) decodeEvents(ctx context.Context, events []cloudevent.RawEvent)
 		jobs = append(jobs, ev)
 	}
 
+	r.convertJobs(ctx, dec, jobs, func(raw *cloudevent.RawEvent) string { return raw.Type })
+	return dec
+}
+
+// convertJobs fans model-garage conversion across jobs — the CPU-heavy step,
+// stateless per event — merging the per-job signal/event rows into dec in
+// input order (writers re-sort anyway). routeType selects the converter for a
+// job: the lake path keys on each event's own Type, the batch path on the
+// partition's single ceType. The convert funcs never return an error (decode
+// failures are counted into errorCount), so the errgroup wait is informational.
+func (r *Runner) convertJobs(ctx context.Context, dec *decodedBatch, jobs []*cloudevent.RawEvent, routeType func(*cloudevent.RawEvent) string) {
 	type convResult struct {
 		signals []SignalRow
 		events  []EventRow
@@ -356,7 +367,7 @@ func (r *Runner) decodeEvents(ctx context.Context, events []cloudevent.RawEvent)
 	conv.SetLimit(r.cfg.Workers)
 	for i, raw := range jobs {
 		conv.Go(func() error {
-			switch raw.Type {
+			switch routeType(raw) {
 			case cloudevent.TypeStatus:
 				rows, failed := r.convertSignals(convCtx, raw)
 				results[i] = convResult{signals: rows, failed: failed}
@@ -375,7 +386,6 @@ func (r *Runner) decodeEvents(ctx context.Context, events []cloudevent.RawEvent)
 		dec.eventCount += len(results[i].events)
 		dec.errorCount += results[i].failed
 	}
-	return dec
 }
 
 // rawBatch is one unit of work: up to BatchMaxFiles raw objects from a
@@ -601,38 +611,9 @@ func (r *Runner) decodeBatch(ctx context.Context, b rawBatch) (*decodedBatch, er
 
 	// Stage 3: model-garage conversion is the CPU-heavy step — fan out.
 	// Conversion is stateless per event; results are merged in input order
-	// so output content stays deterministic (writers re-sort anyway).
-	type convResult struct {
-		signals []SignalRow
-		events  []EventRow
-		failed  int
-	}
-	results := make([]convResult, len(jobs))
-	conv, convCtx := errgroup.WithContext(ctx)
-	conv.SetLimit(r.cfg.Workers)
-	for i, raw := range jobs {
-		conv.Go(func() error {
-			switch b.ceType {
-			case cloudevent.TypeStatus:
-				rows, failed := r.convertSignals(convCtx, raw)
-				results[i] = convResult{signals: rows, failed: failed}
-			case cloudevent.TypeEvents:
-				rows, failed := r.convertEvents(convCtx, raw)
-				results[i] = convResult{events: rows, failed: failed}
-			}
-			return nil
-		})
-	}
-	if err := conv.Wait(); err != nil {
-		return nil, err
-	}
-	for i := range results {
-		dec.signals = append(dec.signals, results[i].signals...)
-		dec.signalCount += len(results[i].signals)
-		dec.events = append(dec.events, results[i].events...)
-		dec.eventCount += len(results[i].events)
-		dec.errorCount += results[i].failed
-	}
+	// so output content stays deterministic (writers re-sort anyway). Every
+	// event in the batch shares the partition's ceType.
+	r.convertJobs(ctx, dec, jobs, func(*cloudevent.RawEvent) string { return b.ceType })
 	return dec, nil
 }
 
