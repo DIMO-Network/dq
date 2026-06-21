@@ -99,15 +99,23 @@ func newQueryBackend(settings *config.Settings, chService *ch.Service, logger ze
 		// Segment detection is not implemented on DuckDB; it stays on ClickHouse.
 		return repositories.ComposeBackend(queries, chService), duckSvc, closeDuck(duckSvc, logger), nil
 	case config.QueryBackendShadow:
-		// secondarySegment shadows segment detection against the lake when the
-		// catalog DSN is configured (DuckLakeEnabled is set above for this case).
-		// When no catalog DSN is present, pass nil — the shadow skips segment
-		// comparison and treats every call as a match (nil-guard in ShadowBackend).
+		// Shadow must validate the SAME backend that goes live under
+		// QUERY_BACKEND=ducklake — lake mode (NewLakeQueries), not bucket mode.
+		// With a catalog DSN configured (the cutover scenario; DuckLakeEnabled is
+		// set above for this case) the signal/latest/summary secondary reads
+		// lake.signals exactly like the live ducklake path, and segments shadow
+		// against the lake too. Bucket mode here would read decoded/v1/*.parquet
+		// globs the ducklake materializer never writes — comparing ClickHouse
+		// against empty results, so a green shadow would be false confidence on
+		// the highest-traffic surface. With no catalog DSN there is no lake to
+		// compare, so fall back to the legacy bucket secondary unchanged.
+		secondary := repositories.Backend(queries)
 		var secondarySegment repositories.SegmentsBackend
 		if settings.DuckLakeCatalogDSN != "" {
+			secondary = duck.NewLakeQueries(duckSvc)
 			secondarySegment = duck.NewLakeSegments(duckSvc)
 		}
-		shadow := repositories.NewShadowBackend(chService, queries, secondarySegment, logger)
+		shadow := repositories.NewShadowBackend(chService, secondary, secondarySegment, logger)
 		cleanup := func() {
 			shadow.Wait()
 			closeDuck(duckSvc, logger)()
