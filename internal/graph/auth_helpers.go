@@ -35,14 +35,20 @@ func requireRawDataToken(ctx context.Context) (*tokenclaims.Token, error) {
 	if tok == nil {
 		return nil, fmt.Errorf("%s", errNoTokenClaims)
 	}
-	hasGetRawData := slices.Contains(tok.Permissions, tokenclaims.PermissionGetRawData)
-	hasLocationHistory := slices.Contains(tok.Permissions, tokenclaims.PermissionGetLocationHistory)
-	hasNonLocationHistory := slices.Contains(tok.Permissions, tokenclaims.PermissionGetNonLocationHistory)
-	hasAllTimeData := hasLocationHistory && hasNonLocationHistory
-	if !hasGetRawData && !hasAllTimeData {
+	if !hasRawDataAccess(tok.Permissions) {
 		return nil, fmt.Errorf("%s", errNoPermission)
 	}
 	return tok, nil
+}
+
+// hasRawDataAccess reports whether perms grant raw-data access: either the
+// explicit GetRawData permission, or both location- and non-location-history
+// (holding all-time history implies raw-data access).
+func hasRawDataAccess(perms []string) bool {
+	hasGetRawData := slices.Contains(perms, tokenclaims.PermissionGetRawData)
+	hasAllTimeData := slices.Contains(perms, tokenclaims.PermissionGetLocationHistory) &&
+		slices.Contains(perms, tokenclaims.PermissionGetNonLocationHistory)
+	return hasGetRawData || hasAllTimeData
 }
 
 func (r *queryResolver) ensureRequestedDIDLinkedToPermissionedSubject(ctx context.Context, requestedDID string, tokenSubjectDID string) (string, error) {

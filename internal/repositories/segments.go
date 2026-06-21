@@ -42,37 +42,36 @@ func validateSegmentArgs(did string, from, to time.Time) error {
 	return nil
 }
 
+// checkRange validates an optional bounded int: nil passes, otherwise the
+// value must lie within [lo, hi]. name appears in the out-of-range error.
+func checkRange(name string, v *int, lo, hi int) error {
+	if v != nil && (*v < lo || *v > hi) {
+		return fmt.Errorf("%s must be between %d and %d", name, lo, hi)
+	}
+	return nil
+}
+
 func validateSegmentConfig(config *model.SegmentConfig, mechanism model.DetectionMechanism) error {
 	if config == nil {
 		return nil
 	}
-	if config.MaxGapSeconds != nil {
-		if *config.MaxGapSeconds < 60 || *config.MaxGapSeconds > 3600 {
-			return fmt.Errorf("maxGapSeconds must be between 60 and 3600")
-		}
+	if err := checkRange("maxGapSeconds", config.MaxGapSeconds, 60, 3600); err != nil {
+		return err
 	}
-	if config.MinSegmentDurationSeconds != nil {
-		if *config.MinSegmentDurationSeconds < 60 || *config.MinSegmentDurationSeconds > 3600 {
-			return fmt.Errorf("minSegmentDurationSeconds must be between 60 and 3600")
-		}
+	if err := checkRange("minSegmentDurationSeconds", config.MinSegmentDurationSeconds, 60, 3600); err != nil {
+		return err
 	}
-	if config.SignalCountThreshold != nil {
-		if *config.SignalCountThreshold < 1 || *config.SignalCountThreshold > 3600 {
-			return fmt.Errorf("signalCountThreshold must be between 1 and 3600")
-		}
+	if err := checkRange("signalCountThreshold", config.SignalCountThreshold, 1, 3600); err != nil {
+		return err
 	}
 	if mechanism == model.DetectionMechanismIdling {
-		if config.MaxIdleRpm != nil {
-			if *config.MaxIdleRpm < 300 || *config.MaxIdleRpm > 3000 {
-				return fmt.Errorf("maxIdleRpm must be between 300 and 3000")
-			}
+		if err := checkRange("maxIdleRpm", config.MaxIdleRpm, 300, 3000); err != nil {
+			return err
 		}
 	}
 	if mechanism == model.DetectionMechanismRefuel || mechanism == model.DetectionMechanismRecharge {
-		if config.MinIncreasePercent != nil {
-			if *config.MinIncreasePercent < 1 || *config.MinIncreasePercent > 100 {
-				return fmt.Errorf("minIncreasePercent must be between 1 and 100")
-			}
+		if err := checkRange("minIncreasePercent", config.MinIncreasePercent, 1, 100); err != nil {
+			return err
 		}
 	}
 	return nil

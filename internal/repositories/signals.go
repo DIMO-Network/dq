@@ -173,6 +173,17 @@ func (r *Repository) GetAvailableSignals(ctx context.Context, subject string, fi
 }
 
 // GetDataSummary returns the signal and event metadata for the given DID and filter.
+// foldTimeRange widens [minTime, maxTime] to include first and last.
+func foldTimeRange(minTime, maxTime, first, last time.Time) (time.Time, time.Time) {
+	if first.Before(minTime) {
+		minTime = first
+	}
+	if last.After(maxTime) {
+		maxTime = last
+	}
+	return minTime, maxTime
+}
+
 func (r *Repository) GetDataSummary(ctx context.Context, subject string, filter *model.SignalFilter) (*model.DataSummary, error) {
 	signalDataSummary, err := r.chService.GetSignalSummaries(ctx, subject, filter)
 	if err != nil {
@@ -198,20 +209,10 @@ func (r *Repository) GetDataSummary(ctx context.Context, subject string, filter 
 	for i, metadata := range signalDataSummary {
 		availableSignals[i] = metadata.Name
 		totalCount += metadata.NumberOfSignals
-		if metadata.FirstSeen.Before(minTimestamp) {
-			minTimestamp = metadata.FirstSeen
-		}
-		if metadata.LastSeen.After(maxTimestamp) {
-			maxTimestamp = metadata.LastSeen
-		}
+		minTimestamp, maxTimestamp = foldTimeRange(minTimestamp, maxTimestamp, metadata.FirstSeen, metadata.LastSeen)
 	}
 	for _, es := range eventSummaries {
-		if es.FirstSeen.Before(minTimestamp) {
-			minTimestamp = es.FirstSeen
-		}
-		if es.LastSeen.After(maxTimestamp) {
-			maxTimestamp = es.LastSeen
-		}
+		minTimestamp, maxTimestamp = foldTimeRange(minTimestamp, maxTimestamp, es.FirstSeen, es.LastSeen)
 	}
 	return &model.DataSummary{
 		NumberOfSignals:   totalCount,
