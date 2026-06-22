@@ -209,6 +209,7 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 	// exactly-once; Run re-polls immediately while processed>0, so the backlog
 	// still drains continuously. The loop only iterates past the first chunk to
 	// skip empty sub-spans (windows of this decoder's own snapshots).
+	advanced := false // whether this pass advanced the cursor over empty sub-spans
 	for {
 		to := head
 		if m.maxSnapshotSpan > 0 && to-cur > m.maxSnapshotSpan {
@@ -256,6 +257,11 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 		// arrives.
 		if to >= head {
 			observeLakeLag(nil) // no pending raw events: no decode lag
+			if advanced {
+				// Report the final skipped position once (not per empty sub-span)
+				// so din's expiry floor reflects the drain without N tiny txns.
+				m.reportProgress(ctx, cur)
+			}
 			return 0, nil
 		}
 		// Empty sub-span below head (only this decoder's own snapshots in the
@@ -267,8 +273,8 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 			}
 			return 0, err
 		}
-		m.reportProgress(ctx, to)
 		cur = to
+		advanced = true
 	}
 }
 

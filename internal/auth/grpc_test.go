@@ -18,6 +18,7 @@ func TestBearerFromMetadata(t *testing.T) {
 		{"no incoming metadata", nil, ""},
 		{"Bearer scheme", metadata.Pairs("authorization", "Bearer tok123"), "tok123"},
 		{"lowercase bearer", metadata.Pairs("authorization", "bearer tok123"), "tok123"},
+		{"uppercase BEARER (case-insensitive)", metadata.Pairs("authorization", "BEARER tok123"), "tok123"},
 		{"raw token (no scheme)", metadata.Pairs("authorization", "tok123"), "tok123"},
 		{"unrelated header", metadata.Pairs("other", "x"), ""},
 	}

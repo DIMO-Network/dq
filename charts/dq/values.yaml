@@ -1,4 +1,7 @@
 replicaCount: 1
+# Grace period for SIGTERM: exceeds the 25s HTTP drain so in-flight queries
+# finish, and lets the single-writer materializer release exit cleanly.
+terminationGracePeriodSeconds: 60
 image:
   repository: dimozone/dq
   pullPolicy: IfNotPresent

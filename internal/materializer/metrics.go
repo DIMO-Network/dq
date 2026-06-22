@@ -65,7 +65,11 @@ var (
 	})
 	headSnapshotID = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dq_materializer_head_snapshot_id",
-		Help: "Latest committed DuckLake snapshot id (raw_events head). head - cursor is the snapshot backlog.",
+		// Catalog-global max snapshot id — it includes this decoder's own
+		// signals/events/rollup writes and din's maintenance snapshots, so
+		// head - cursor is NOT the raw_events backlog and stays non-zero even when
+		// fully caught up. Use dq_materializer_lag_seconds for decode lag.
+		Help: "Latest catalog snapshot id (NOT a backlog gauge; see dq_materializer_lag_seconds).",
 	})
 	cursorResetGap = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dq_materializer_last_cursor_reset_gap_snapshots",

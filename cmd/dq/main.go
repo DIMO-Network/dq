@@ -74,7 +74,7 @@ func main() {
 	}
 
 	monSrv := monserver.NewMonitoringServer(&logger, cfg.EnablePprof)
-	runner.RunHandler(runnerCtx, runnerGroup, monSrv, ":"+strconv.Itoa(cfg.MonPort))
+	serveHTTP(runnerCtx, runnerGroup, logger, monSrv, ":"+strconv.Itoa(cfg.MonPort))
 
 	mux := http.NewServeMux()
 	mux.Handle("/", app.LoggerMiddleware(app.PanicRecoveryMiddleware(playground.Handler("GraphQL playground", "/query"))))
@@ -85,7 +85,7 @@ func main() {
 	mux.HandleFunc("/ready", app.ReadyHandler(application.Ready))
 
 	logger.Info().Msgf("Server started on port: %d", cfg.Port)
-	serveHTTP(runnerCtx, runnerGroup, mux, ":"+strconv.Itoa(cfg.Port))
+	serveHTTP(runnerCtx, runnerGroup, logger, mux, ":"+strconv.Itoa(cfg.Port))
 
 	logger.Info().Msgf("gRPC server started on port: %d", cfg.GRPCPort)
 	runner.RunGRPC(runnerCtx, runnerGroup, rpcServer, ":"+strconv.Itoa(cfg.GRPCPort))
@@ -107,7 +107,7 @@ const maxHTTPBodyBytes = 4 << 20 // 4 MiB
 // with the already-cancelled ctx, which returns immediately and severs in-flight
 // requests. No WriteTimeout: GraphQL websocket subscriptions and long lake scans
 // are bounded by the per-request timeout middleware, not the socket.
-func serveHTTP(ctx context.Context, group *errgroup.Group, handler http.Handler, addr string) {
+func serveHTTP(ctx context.Context, group *errgroup.Group, log zerolog.Logger, handler http.Handler, addr string) {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           http.MaxBytesHandler(handler, maxHTTPBodyBytes),
@@ -127,7 +127,9 @@ func serveHTTP(ctx context.Context, group *errgroup.Group, handler http.Handler,
 		shCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shCtx); err != nil {
-			return fmt.Errorf("failed to shut down server: %w", err)
+			// A slow drain hitting the deadline on a normal SIGTERM must not become
+			// a non-zero exit (the errgroup would Fatal); log it and exit cleanly.
+			log.Warn().Err(err).Str("addr", addr).Msg("http server did not drain within the shutdown deadline")
 		}
 		return nil
 	})

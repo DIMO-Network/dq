@@ -77,10 +77,10 @@ func bearerFromMetadata(ctx context.Context) string {
 		return ""
 	}
 	tok := vals[0]
-	for _, prefix := range []string{"Bearer ", "bearer "} {
-		if strings.HasPrefix(tok, prefix) {
-			return strings.TrimPrefix(tok, prefix)
-		}
+	// The auth scheme is case-insensitive (RFC 7235); strip a "bearer " prefix in
+	// any casing, otherwise treat the value as a raw token.
+	if len(tok) >= 7 && strings.EqualFold(tok[:7], "bearer ") {
+		return strings.TrimSpace(tok[7:])
 	}
 	return tok
 }
