@@ -71,6 +71,13 @@ var (
 		Name: "dq_materializer_last_cursor_reset_gap_snapshots",
 		Help: "Snapshot span skipped by the most recent cursor reset (to - from). Non-zero means un-decoded data was permanently skipped — backfill the range.",
 	})
+	// blobMissingTotal counts raw_events rows whose externalized payload is
+	// permanently gone (S3 NoSuchKey/404). Such a row is skipped so it can't wedge
+	// the whole delta; alert on any increase — it means decoded data was dropped.
+	blobMissingTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dq_materializer_blob_missing_total",
+		Help: "raw_events rows skipped because their externalized blob payload was permanently missing (S3 404).",
+	})
 )
 
 // lakeMetricType labels the DuckLake-path materializer metrics. The bucket path

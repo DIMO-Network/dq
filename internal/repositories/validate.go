@@ -39,6 +39,13 @@ func validateAggSigArgs(args *model.AggregatedSignalArgs) error {
 	if args.Interval < 1 {
 		return ValidationError("interval is not a positive integer")
 	}
+	// Bound the GROUP-BY bucket cardinality: a tiny interval (microseconds) over a
+	// wide window would otherwise materialize an unbounded number of buckets and
+	// OOM the per-replica DuckDB. 100k buckets is far beyond any real dashboard.
+	const maxAggBuckets = 100_000
+	if windowMicros := args.ToTS.Sub(args.FromTS).Microseconds(); windowMicros > 0 && args.Interval < windowMicros/maxAggBuckets {
+		return ValidationError("interval too small for the requested window (exceeds the aggregation bucket limit)")
+	}
 
 	if len(args.FloatArgs) > math.MaxUint16 {
 		return ValidationError("too many float aggregations")

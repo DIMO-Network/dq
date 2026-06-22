@@ -14,8 +14,10 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// NewJWTMiddleware creates JWT middleware with the given token-exchange issuer and JWKS URI.
-func NewJWTMiddleware(issuer, jwksURI string) (*jwtmiddleware.JWTMiddleware, error) {
+// newValidator builds the token-exchange JWT validator (RS256, dimo.zone
+// audience, *DQClaim custom claims) shared by the HTTP middleware and the gRPC
+// fetch interceptor so both enforce identical token semantics.
+func newValidator(issuer, jwksURI string) (*validator.Validator, error) {
 	issuerURL, err := url.Parse(issuer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse issuer URL: %w", err)
@@ -32,13 +34,18 @@ func NewJWTMiddleware(issuer, jwksURI string) (*jwtmiddleware.JWTMiddleware, err
 	newCustomClaims := func() validator.CustomClaims {
 		return &DQClaim{}
 	}
-	jwtValidator, err := validator.New(
+	return validator.New(
 		provider.KeyFunc,
 		validator.RS256,
 		issuerURL.String(),
 		[]string{"dimo.zone"},
 		validator.WithCustomClaims(newCustomClaims),
 	)
+}
+
+// NewJWTMiddleware creates JWT middleware with the given token-exchange issuer and JWKS URI.
+func NewJWTMiddleware(issuer, jwksURI string) (*jwtmiddleware.JWTMiddleware, error) {
+	jwtValidator, err := newValidator(issuer, jwksURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create validator: %w", err)
 	}

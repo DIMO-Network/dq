@@ -54,14 +54,12 @@ func (d *IgnitionDetector) buildSegmentsWithDebouncing(stateChanges []StateChang
 	// Second pass: build segments from cleaned state changes
 	var segments []*model.Segment
 	var currentSegmentStart *time.Time
-	var startedWithPrevMinus1 bool
 
 	for _, sc := range filtered {
 		if sc.NewState == 1 {
 			// ON signal - start a new segment if we don't have one
 			if currentSegmentStart == nil && sc.PrevState != 1 {
 				currentSegmentStart = &sc.TS
-				startedWithPrevMinus1 = (sc.PrevState == -1)
 			}
 		} else if sc.NewState == 0 && currentSegmentStart != nil {
 			// OFF signal - end the segment
@@ -73,12 +71,13 @@ func (d *IgnitionDetector) buildSegmentsWithDebouncing(stateChanges []StateChang
 			}
 
 			currentSegmentStart = nil
-			startedWithPrevMinus1 = false
 		}
 	}
 
-	// Handle ongoing segment (started but no end signal)
-	if currentSegmentStart != nil && !startedWithPrevMinus1 {
+	// Handle ongoing segment (started but no end signal). Emitted for any open
+	// segment: no source seeds prev_state=-1 anymore, so an in-progress segment on
+	// a continuously-ON vehicle is reported exactly as ClickHouse does (parity).
+	if currentSegmentStart != nil {
 		duration := int32(to.Sub(*currentSegmentStart).Seconds())
 		if int(duration) >= minDuration {
 			segments = append(segments, newSegment(*currentSegmentStart, nil, duration, true, currentSegmentStart.Before(from)))

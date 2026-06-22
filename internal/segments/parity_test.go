@@ -528,20 +528,24 @@ func TestIgnitionDetectorFiltersShortOff(t *testing.T) {
 	require.Equal(t, from.Add(30*time.Minute), got[0].End.Timestamp)
 }
 
-func TestIgnitionDetectorIgnoresPrevStateMinus1(t *testing.T) {
-	// Mirrors ch/TestBuildSegmentsWithDebouncing "ignores initial ON with prev_state -1"
+func TestIgnitionDetectorEmitsOngoingInitialOn(t *testing.T) {
+	// CH-aligned behavior: an initial ON with no prior OFF in the window opens an
+	// ongoing segment that IS emitted. The source now seeds prev_state=0 (like CH's
+	// signal_state_changes) rather than -1, and the detector no longer special-cases
+	// -1 — so a continuously-ON vehicle's in-progress segment is reported, matching
+	// ClickHouse at cutover.
 	now := time.Now()
 	from := now.Add(-time.Hour)
 	to := now
 
 	changes := []StateChange{
-		{TS: from.Add(10 * time.Minute), NewState: 1, PrevState: -1},
+		{TS: from.Add(10 * time.Minute), NewState: 1, PrevState: 0},
 	}
 	src := fakeSource{changes: changes}
 	d := NewIgnitionDetector(src)
 	got, err := d.DetectSegments(context.Background(), "did:1", from, to, nil)
 	require.NoError(t, err)
-	require.Empty(t, got)
+	require.Len(t, got, 1, "an initial ON with no end must emit an ongoing segment")
 }
 
 func TestIgnitionDetectorStartedBeforeRange(t *testing.T) {

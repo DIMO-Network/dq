@@ -146,15 +146,13 @@ func (s *LakeSignalSource) IgnitionStateChanges(ctx context.Context, subject str
 	// would be silently excluded from transitions (NULL != x is NULL, not true)
 	// AND would poison the next row's LAG (prev_state coalesces to -1), wrongly
 	// emitting an unchanged reading as a spurious transition.
-	// coalesce(lag(...), -1): if a vehicle has been ON continuously for MORE than
+	// coalesce(lag(...), 0): if a vehicle has been ON continuously for MORE than
 	// the 30-day lookback (no OFF event in the window), this LAG yields NULL for
-	// the very first row and coalesce maps it to -1, so that row is NOT emitted as
-	// a transition (prev_state=-1 != new_state=1 is true, but effectively the
-	// ongoing segment is suppressed). CH's pre-materialized signal_state_changes
-	// stores prev_state=0 for the ongoing segment even outside the lookback window,
-	// so CH DOES emit that row. This is a known, intentional divergence: it is an
-	// accepted consequence of the 30-day lookback cap design decision. Shadow mode
-	// will surface affected vehicles; no logic change is warranted here.
+	// the very first row. Coalesce maps it to 0 — matching CH's pre-materialized
+	// signal_state_changes, which seeds prev_state=0 for an ongoing segment — so
+	// the first ON row IS emitted as a transition and the in-progress segment is
+	// reported, exactly as CH does (segments parity at cutover; the previous -1
+	// seed suppressed that segment for duck only).
 	q := fmt.Sprintf(`
 WITH deduped AS (
   SELECT timestamp, value_number
@@ -170,7 +168,7 @@ transitions AS (
     value_number AS new_state,
     coalesce(
       lag(value_number) OVER (ORDER BY timestamp),
-      -1
+      0
     ) AS prev_state
   FROM deduped
 )

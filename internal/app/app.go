@@ -188,24 +188,60 @@ func noOp(ctx context.Context, obj interface{}, next graphql.Resolver) (res inte
 // given App already opened rather than opening a second duck.Service + S3 client
 // in the same process (SR-9). The App owns that backend, so there is no separate
 // cleanup to return.
-func CreateGRPCServer(logger *zerolog.Logger, application *App) (*grpc.Server, error) {
+func CreateGRPCServer(logger *zerolog.Logger, application *App, settings config.Settings) (*grpc.Server, error) {
 	rpcServer := rpc.NewServer(application.buckets, application.eventService)
 
 	grpcPanic := metrics.GRPCPanicker{Logger: logger}
+	interceptors := []grpc.UnaryServerInterceptor{
+		metrics.GRPCMetricsAndLogMiddleware(logger),
+		recovery.UnaryServerInterceptor(recovery.WithRecoveryHandler(grpcPanic.GRPCPanicRecoveryHandler)),
+		// Bound a fetch RPC that arrives with no client deadline: DuckDB cancels
+		// via context, so without a deadline a pathological query runs unbounded on
+		// one of the few pooled connections and can starve the replica.
+		unaryDeadlineInterceptor(defaultFetchRPCTimeout),
+	}
+	// Authenticate the fetch port with a DIMO JWT when an issuer is configured —
+	// the RPCs return any subject's raw data, so an unauthenticated port is
+	// readable by any in-cluster caller. Added after metrics/recovery so auth
+	// rejections are still logged and a panic in validation is contained.
+	if settings.TokenExchangeIssuer != "" {
+		authInterceptor, err := auth.NewGRPCFetchAuthInterceptor(
+			settings.TokenExchangeIssuer, settings.TokenExchangeJWTKeySetURL, settings.FetchGRPCRequireJWT, logger)
+		if err != nil {
+			return nil, fmt.Errorf("creating fetch gRPC auth interceptor: %w", err)
+		}
+		interceptors = append(interceptors, authInterceptor)
+	} else {
+		logger.Warn().Msg("fetch gRPC has no JWT auth (TOKEN_EXCHANGE_ISSUER_URL unset) — relying on the network policy only")
+	}
 	server := grpc.NewServer(
 		// Blob payloads run 4–50 MiB; the gRPC default 4 MiB send limit
 		// silently truncated them once the fetch path started serving blobs
 		// (CHD-22). Raise both directions to cover the largest payloads.
 		grpc.MaxSendMsgSize(maxGRPCMessageBytes),
 		grpc.MaxRecvMsgSize(maxGRPCMessageBytes),
-		grpc.ChainUnaryInterceptor(
-			metrics.GRPCMetricsAndLogMiddleware(logger),
-			recovery.UnaryServerInterceptor(recovery.WithRecoveryHandler(grpcPanic.GRPCPanicRecoveryHandler)),
-		),
+		grpc.ChainUnaryInterceptor(interceptors...),
 	)
 	fetchgrpc.RegisterFetchServiceServer(server, rpcServer)
 
 	return server, nil
+}
+
+// defaultFetchRPCTimeout bounds a fetch RPC that arrives without a client
+// deadline. Generous (blob downloads + lake scans) but finite.
+const defaultFetchRPCTimeout = 30 * time.Second
+
+// unaryDeadlineInterceptor applies d as a deadline to any request whose context
+// has none, so DuckDB query cancellation always has something to fire on.
+func unaryDeadlineInterceptor(d time.Duration) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, d)
+			defer cancel()
+		}
+		return handler(ctx, req)
+	}
 }
 
 func newServer(es graphql.ExecutableSchema) *handler.Server {

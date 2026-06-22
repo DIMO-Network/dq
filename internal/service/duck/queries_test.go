@@ -137,7 +137,7 @@ type eventFixture struct {
 }
 
 var eventFixtureColumns = []string{
-	"subject", "source", "producer", "cloud_event_id", "type", "data_version",
+	"subject", "subject_bucket", "source", "producer", "cloud_event_id", "type", "data_version",
 	"name", "timestamp", "duration_ns", "metadata", "tags",
 }
 
@@ -146,8 +146,10 @@ func writeEventsFixture(t *testing.T, svc *Service, root, day string, rows []eve
 	path := filepath.Join(root, "decoded", "v1", "events", "date="+day, "part-0.parquet")
 	valueRows := make([]string, len(rows))
 	for i, r := range rows {
-		valueRows[i] = fmt.Sprintf("(%s, %s, 'prod-1', 'ce-1', 'dimo.event', '1.0', %s, %s, CAST(%d AS UBIGINT), %s, %s)",
-			sqlString(r.subject), sqlString(r.source), sqlString(r.name), tsMicroLiteral(r.ts),
+		// subject_bucket mirrors the materializer's stamping so the partition-prune
+		// predicate (subject_bucket = HashBucket(subject)) matches the fixture.
+		valueRows[i] = fmt.Sprintf("(%s, %d, %s, 'prod-1', 'ce-1', 'dimo.event', '1.0', %s, %s, CAST(%d AS UBIGINT), %s, %s)",
+			sqlString(r.subject), HashBucket(r.subject), sqlString(r.source), sqlString(r.name), tsMicroLiteral(r.ts),
 			r.durNs, sqlString(r.metadata), tagsLit(r.tags))
 	}
 	copyValuesToParquet(t, svc, path, eventFixtureColumns, valueRows)

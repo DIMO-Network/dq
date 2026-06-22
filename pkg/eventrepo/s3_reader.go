@@ -2,12 +2,41 @@ package eventrepo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
 )
+
+// IsObjectNotFound reports whether err indicates the S3 object does not exist
+// (NoSuchKey / NotFound / 404) — a permanent condition — as opposed to a
+// transient fetch failure (timeout, throttle, 5xx). Callers use it to skip a
+// permanently-missing payload (or return a clean NotFound) instead of wedging.
+func IsObjectNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var nsk *types.NoSuchKey
+	if errors.As(err, &nsk) {
+		return true
+	}
+	var nf *types.NotFound
+	if errors.As(err, &nf) {
+		return true
+	}
+	var api smithy.APIError
+	if errors.As(err, &api) {
+		switch api.ErrorCode() {
+		case "NoSuchKey", "NotFound", "NotFoundException", "404":
+			return true
+		}
+	}
+	return false
+}
 
 // downloadS3Object fetches an S3 object into memory, rejecting anything larger than maxSize bytes.
 func downloadS3Object(ctx context.Context, client ObjectGetter, bucket, key string, maxSize int64) ([]byte, error) {

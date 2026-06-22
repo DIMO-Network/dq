@@ -189,7 +189,12 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
-	if limit != nil && len(chSegments) > *limit {
+	// For IDLING, the post-summary speed filter (below) drops moving segments, so
+	// truncating to `limit` here would under-return — and under cursor pagination
+	// permanently skip real idle segments past the cutoff. Defer idling's
+	// truncation until after that filter; other mechanisms truncate now to bound
+	// the per-segment summary fetch.
+	if limit != nil && mechanism != model.DetectionMechanismIdling && len(chSegments) > *limit {
 		chSegments = chSegments[:*limit]
 	}
 
@@ -291,6 +296,11 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 
 	if mechanism == model.DetectionMechanismIdling {
 		segments = filterIdlingSegmentsBySpeed(segments, 0)
+		// Truncate to `limit` only now that moving segments are removed, so a page
+		// returns up to `limit` real idle segments (deferred from above).
+		if limit != nil && len(segments) > *limit {
+			segments = segments[:*limit]
+		}
 	}
 	return segments, nil
 }

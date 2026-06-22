@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 
@@ -54,10 +55,30 @@ func (r *Runner) convertSignals(ctx context.Context, rawEvent *cloudevent.RawEve
 
 	rows = make([]SignalRow, 0, len(signals))
 	for i := range signals {
-		rows = append(rows, signalRowFromVSS(rawEvent, &signals[i]))
+		row := signalRowFromVSS(rawEvent, &signals[i])
+		if !finiteSignalRow(&row) {
+			// A non-finite numeric/location value is garbage that also breaks JSON
+			// serialization of signals_latest when served; drop it and count a
+			// decode failure rather than persisting NaN/Inf.
+			failed = 1
+			r.log.Warn().Str("source", rawEvent.Source).Str("name", row.Name).
+				Msg("dropping signal with non-finite value")
+			continue
+		}
+		rows = append(rows, row)
 	}
 	return rows, failed
 }
+
+// finiteSignalRow reports whether every float in the row is finite. A NaN/Inf
+// value (bad decode) would corrupt aggregates and break JSON encoding of the
+// served rows, so such rows are dropped at the materializer boundary.
+func finiteSignalRow(r *SignalRow) bool {
+	return isFinite(r.ValueNumber) && isFinite(r.LocLat) && isFinite(r.LocLon) &&
+		isFinite(r.LocHDOP) && isFinite(r.LocHeading)
+}
+
+func isFinite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
 
 // convertEvents decodes one raw events cloudevent into flattened event
 // rows, salvaging partial decodes the same way convertSignals does.

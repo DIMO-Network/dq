@@ -47,7 +47,11 @@ func (d *RefuelDetector) DetectSegments(
 	}
 	windowDur := time.Duration(refuelWindowMinutes) * time.Minute
 	fuelFrom := from.Add(-windowDur)
-	fuelTo := to.Add(windowDur)
+	// Fetch far enough past `to` that findRefuelTroughAndPeak can still find a
+	// peak that stabilizes up to refuelPeakSearchMaxMin after a rise near the end
+	// of the range; fetching only to+windowDur truncated the search and dropped
+	// real refuels there (undersized absRise failing the absolute-rise gate).
+	fuelTo := to.Add(time.Duration(refuelPeakSearchMaxMin) * time.Minute)
 
 	// Single query: fuel samples (returned sorted)
 	samples, err := d.src.LevelSamples(ctx, subject, vss.FieldPowertrainFuelSystemRelativeLevel, fuelFrom, fuelTo)

@@ -26,6 +26,7 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 
 	conds := []string{
 		"subject = ?",
+		subjectBucketPredicate("", subject), // partition pruning (CHD-1): subject_bucket is the leading partition key
 		"timestamp >= " + tsMicroLiteral(from),
 		"timestamp < " + tsMicroLiteral(to),
 	}
@@ -33,9 +34,11 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 	conds, args = appendEventFilterConds(conds, args, filter)
 
 	// tags is a parquet list; serialize to JSON in SQL so it round-trips
-	// through database/sql as a plain string.
-	stmt := "SELECT name, source, timestamp, duration_ns, metadata, CAST(to_json(tags) AS VARCHAR) FROM " + table +
-		" WHERE " + strings.Join(conds, " AND ") + " ORDER BY timestamp DESC"
+	// through database/sql as a plain string. LIMIT caps an unbounded decoded
+	// scan (a busy vehicle over a wide window) the way the raw fetch path is
+	// capped — otherwise every matching row is materialized into Go memory.
+	stmt := fmt.Sprintf("SELECT name, source, timestamp, duration_ns, metadata, CAST(to_json(tags) AS VARCHAR) FROM %s WHERE %s ORDER BY timestamp DESC LIMIT %d",
+		table, strings.Join(conds, " AND "), maxLakeQueryLimit)
 
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
@@ -77,6 +80,7 @@ func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to t
 
 	conds := []string{
 		"subject = ?",
+		subjectBucketPredicate("", subject), // partition pruning (CHD-1)
 		"timestamp >= " + tsMicroLiteral(from),
 		"timestamp < " + tsMicroLiteral(to),
 	}
@@ -135,7 +139,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 		return result, nil
 	}
 
-	conds := []string{"subject = ?"}
+	conds := []string{"subject = ?", subjectBucketPredicate("", subject)} // partition pruning (CHD-1)
 	args := []any{subject}
 	if len(eventNames) > 0 {
 		conds = append(conds, "name IN ("+placeholders(len(eventNames))+")")
@@ -181,7 +185,8 @@ func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*ch.
 	}
 
 	stmt := "SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM " + table +
-		" WHERE subject = ? GROUP BY name ORDER BY name"
+		" WHERE subject = ? AND " + subjectBucketPredicate("", subject) + // partition pruning (CHD-1): all-time scan must still prune to one bucket
+		" GROUP BY name ORDER BY name"
 
 	rows, err := q.svc.db.QueryContext(ctx, stmt, subject)
 	if err != nil {

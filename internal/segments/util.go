@@ -142,7 +142,15 @@ func mergeWindowsIntoSegments(windows []ActiveWindow, from, to time.Time, maxGap
 	// Convert ActiveWindows to timeRanges and delegate to the shared merge pipeline.
 	ranges := make([]timeRange, len(windows))
 	for i, w := range windows {
-		ranges[i] = timeRange{start: w.WindowStart, end: w.WindowEnd}
+		// window_end is a nominal bucket end (toStartOfInterval + 60s) that can
+		// overshoot the query boundary; clamp it so the ongoing/duration math below
+		// sees end <= to (a negative to-end would skew the ongoing decision and a
+		// non-ongoing segment's duration would extend past the requested range).
+		end := w.WindowEnd
+		if end.After(to) {
+			end = to
+		}
+		ranges[i] = timeRange{start: w.WindowStart, end: end}
 	}
 	merged := mergeTimeRanges(ranges, time.Duration(maxGap)*time.Second, minDuration, from, to, nil)
 

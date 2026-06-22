@@ -296,13 +296,16 @@ func TestLakeSignalSource_IgnitionStateChanges_OldSeedIgnored(t *testing.T) {
 	tooOld := from.AddDate(0, 0, -31)
 	insertSignal(t, svc, subject, "isIgnitionOn", "ce-old", tooOld, 1.0)
 
-	// One in-range transition.
-	insertSignal(t, svc, subject, "isIgnitionOn", "ce-r1", from.Add(10*time.Minute), 0.0)
+	// One in-range ON: with the old row excluded by the lookback, this is the
+	// first row in the window, so prev_state seeds to 0 (CH-aligned) and 0->1 is a
+	// genuine transition. If the old row leaked in, it would poison this row's LAG
+	// to 1 (1->1, not a transition) and the result would be empty — so Len 1 proves
+	// the lookback cap excluded it.
+	insertSignal(t, svc, subject, "isIgnitionOn", "ce-r1", from.Add(10*time.Minute), 1.0)
 
 	changes, err := src.IgnitionStateChanges(ctx, subject, from, to)
 	require.NoError(t, err)
 
-	// The old row is outside the lookback window; only the in-range transition.
 	require.Len(t, changes, 1)
 	assert.Equal(t, from.Add(10*time.Minute), changes[0].TS)
 }

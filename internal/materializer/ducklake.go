@@ -38,11 +38,21 @@ type DuckLakeMaterializer struct {
 	// nothing. nil disables blob resolution (blobs not expected, e.g. tests).
 	blobs      eventrepo.ObjectGetter
 	blobBucket string
+	// maxSnapshotSpan bounds the snapshot span processed per RunOnce pass so a
+	// large backlog (lag, restart, historical backfill) is drained in
+	// memory-bounded chunks instead of materializing the entire (cur, head]
+	// delta at once and OOM-killing the single writer. <= 0 means unbounded.
+	maxSnapshotSpan int64
 }
 
 // snapshotCursorPartition is the single ingest_progress key holding the last
 // raw_events snapshot id this decoder has processed.
 const snapshotCursorPartition = "lake.raw_events#snapshot"
+
+// defaultMaxSnapshotSpan caps snapshots processed per pass. din bundles flush at
+// up to 128 MiB, so this bounds the per-pass working set; the Run loop re-polls
+// immediately while a batch was processed, so a backlog still drains continuously.
+const defaultMaxSnapshotSpan = 16
 
 // rawEventCols is the lake.raw_events projection, matching din's DDL order.
 const rawEventCols = `subject, "time", type, id, source, producer, ` +
@@ -52,11 +62,22 @@ const rawEventCols = `subject, "time", type, id, source, producer, ` +
 // returns a materializer over db (which must have the shared catalog attached
 // as schema "lake", with din's raw_events present).
 func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger) (*DuckLakeMaterializer, error) {
-	m := &DuckLakeMaterializer{db: db, log: log.With().Str("component", "ducklake-materializer").Logger()}
+	m := &DuckLakeMaterializer{
+		db:              db,
+		log:             log.With().Str("component", "ducklake-materializer").Logger(),
+		maxSnapshotSpan: defaultMaxSnapshotSpan,
+	}
 	if err := m.ensureSchema(ctx); err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+// WithMaxSnapshotSpan overrides the per-pass snapshot-span bound (see the field
+// doc). A non-positive n restores unbounded behavior. Returns m for chaining.
+func (m *DuckLakeMaterializer) WithMaxSnapshotSpan(n int64) *DuckLakeMaterializer {
+	m.maxSnapshotSpan = n
+	return m
 }
 
 // WithBlobStore configures blob-payload resolution: when a raw_events row has
@@ -149,22 +170,9 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 // caller retries from the new cursor next pass.
 var errSnapshotMoved = errors.New("snapshot cursor advanced by another writer")
 
-// errExpiredCursor means the cursor points before the oldest retained
-// snapshot: din expired the change feed for the range while the consumer
-// lagged past LAKE_SNAPSHOT_RETENTION.
-var errExpiredCursor = errors.New("snapshot cursor expired")
-
-// isExpiredSnapshot best-effort classifies a ducklake_table_changes error as
-// "the requested snapshot range is no longer retained" vs a transient fault.
-func isExpiredSnapshot(err error) bool {
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "snapshot") &&
-		(strings.Contains(s, "expired") || strings.Contains(s, "not found") ||
-			strings.Contains(s, "does not exist") || strings.Contains(s, "out of range"))
-}
-
 // resetCursor advances the cursor from->to without decoding, used only on
-// expired-feed recovery. The gap is unavoidably skipped.
+// expired-feed recovery (maybeRecoverExpired). The skipped span is un-decoded
+// data that was already expired from the change feed.
 func (m *DuckLakeMaterializer) resetCursor(ctx context.Context, from, to int64) error {
 	// CAS against the seeded row (from=0 matches the seeded '0'). If another
 	// writer already advanced past `from`, the UPDATE matches nothing and the
@@ -194,54 +202,139 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 		return 0, nil
 	}
 
-	events, err := m.readDelta(ctx, cur, head)
-	if errors.Is(err, errExpiredCursor) {
-		// The consumer lagged past LAKE_SNAPSHOT_RETENTION: din expired the
-		// snapshots covering (cur, oldestRetained], so the change feed for
-		// that range is gone. Skip to head and alert — wedging in a permanent
-		// error loop is worse. The gap is a misconfiguration (retention must
-		// exceed max consumer lag), made visible by the counter.
-		cursorResetsTotal.Inc()
-		cursorResetGap.Set(float64(head - cur))
-		m.log.Error().Int64("from", cur).Int64("to", head).Int64("skipped_snapshots", head-cur).
-			Msg("DuckLake change feed expired; resetting cursor to head (un-decoded gap skipped — increase LAKE_SNAPSHOT_RETENTION)")
-		if rerr := m.resetCursor(ctx, cur, head); rerr != nil {
-			return 0, rerr
+	// Drain the (cur, head] backlog in memory-bounded snapshot-span chunks so a
+	// large lag/restart/backfill can't materialize the whole delta at once and
+	// OOM the single writer (which would then crash-loop on the same delta).
+	// Every snapshot id is a valid CAS target, so chunking preserves
+	// exactly-once; Run re-polls immediately while processed>0, so the backlog
+	// still drains continuously. The loop only iterates past the first chunk to
+	// skip empty sub-spans (windows of this decoder's own snapshots).
+	for {
+		to := head
+		if m.maxSnapshotSpan > 0 && to-cur > m.maxSnapshotSpan {
+			to = cur + m.maxSnapshotSpan
 		}
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	if len(events) == 0 {
-		// The (cur, head] range held no raw_events inserts — head advanced
-		// only because of this decoder's own writes to signals/events. Don't
-		// burn a cursor-advance transaction; the next pass re-reads the same
-		// empty range cheaply and the cursor moves once real data arrives.
-		observeLakeLag(nil) // no pending raw events: no decode lag
-		return 0, nil
-	}
-	observeLakeLag(events) // decode lag = age of the oldest pending event
-	decoded := dec.decodeEvents(ctx, events)
 
-	if err := m.commit(ctx, decoded, cur, head); err != nil {
-		if errors.Is(err, errSnapshotMoved) {
-			return 0, nil // another decoder won this range; retry next pass
+		events, err := m.readDelta(ctx, cur, to)
+		if err != nil {
+			// Any feed-read failure might mean din's maintenance expired the
+			// cursor range. Decide on retention (the oldest retained snapshot),
+			// not on the error text — so a real expiry with unmatched wording
+			// can't wedge us forever, and a transient error that merely looks
+			// like expiry can't make us skip retained data.
+			if n, handled, rerr := m.maybeRecoverExpired(ctx, cur, err); handled {
+				return n, rerr
+			}
+			return 0, err
 		}
-		return 0, err
+
+		if len(events) > 0 {
+			observeLakeLag(events) // decode lag = age of the oldest pending event
+			decoded := dec.decodeEvents(ctx, events)
+			if err := m.commit(ctx, decoded, cur, to); err != nil {
+				if errors.Is(err, errSnapshotMoved) {
+					return 0, nil // another decoder won this range; retry next pass
+				}
+				return 0, err
+			}
+			// A batch committed: feed the freshness/throughput alerts (CHD-12).
+			batchesTotal.WithLabelValues(lakeMetricType).Inc()
+			rowsTotal.WithLabelValues("signals").Add(float64(decoded.signalCount))
+			rowsTotal.WithLabelValues("events").Add(float64(decoded.eventCount))
+			errorsTotal.Add(float64(decoded.errorCount))
+			cursorSnapshotID.Set(float64(to))
+			// Report progress to din's snapshot-expiry floor. Best-effort: the
+			// batch is already durable, and a failed report only holds expiry
+			// back (conservative, not unsafe).
+			m.reportProgress(ctx, to)
+			return len(events), nil
+		}
+
+		// Empty span. If it reached head, the decoder is caught up: head advanced
+		// only via this decoder's own writes. Don't burn a cursor-advance — the
+		// next pass re-reads the empty range cheaply and moves once real data
+		// arrives.
+		if to >= head {
+			observeLakeLag(nil) // no pending raw events: no decode lag
+			return 0, nil
+		}
+		// Empty sub-span below head (only this decoder's own snapshots in the
+		// window): advance the cursor past it so the next chunk reaches the data
+		// beyond, then continue. CAS so a decoder that advanced first wins.
+		if err := m.advanceCursor(ctx, cur, to); err != nil {
+			if errors.Is(err, errSnapshotMoved) {
+				return 0, nil
+			}
+			return 0, err
+		}
+		m.reportProgress(ctx, to)
+		cur = to
 	}
-	// A batch committed: feed the freshness/throughput alerts the bucket path
-	// already drove (dead in ducklake mode before CHD-12).
-	batchesTotal.WithLabelValues(lakeMetricType).Inc()
-	rowsTotal.WithLabelValues("signals").Add(float64(decoded.signalCount))
-	rowsTotal.WithLabelValues("events").Add(float64(decoded.eventCount))
-	errorsTotal.Add(float64(decoded.errorCount))
-	cursorSnapshotID.Set(float64(head))
-	// Report progress to din's snapshot-expiry floor. Best-effort: the batch
-	// is already durable, and a failed report only holds expiry back
-	// (din won't reclaim past the stale floor — conservative, not unsafe).
-	m.reportProgress(ctx, head)
-	return len(events), nil
+}
+
+// advanceCursor moves the cursor from->to via compare-and-swap, used to skip an
+// empty sub-span (no raw_events inserts) without decoding. RowsAffected==0 means
+// another writer advanced first → errSnapshotMoved, and the caller retries.
+func (m *DuckLakeMaterializer) advanceCursor(ctx context.Context, from, to int64) error {
+	res, err := m.db.ExecContext(ctx,
+		"UPDATE lake.ingest_progress SET cursor = ? WHERE partition = ? AND cursor = ?",
+		fmt.Sprint(to), snapshotCursorPartition, fmt.Sprint(from))
+	if err != nil {
+		return fmt.Errorf("advance cursor over empty span: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errSnapshotMoved
+	}
+	return nil
+}
+
+// maybeRecoverExpired classifies a readDelta error as an expired change feed
+// using retention, not error text. It reads the oldest retained snapshot:
+//   - oldest <= cur+1: the range is still retained, so the error was transient —
+//     returns handled=false so the caller propagates it for retry (no data skip).
+//   - oldest >  cur+1: din expired (cur, oldest); skip ONLY that unretained
+//     prefix (to oldest-1) and resume decode from oldest — never jump to head,
+//     which would drop everything still retained. Reports the recovered position
+//     to din's expiry floor (a reset otherwise leaves it stale).
+//
+// returns (n, handled, err): handled means the caller should return (n, err).
+func (m *DuckLakeMaterializer) maybeRecoverExpired(ctx context.Context, cur int64, cause error) (int, bool, error) {
+	oldest, err := m.oldestSnapshot(ctx)
+	if err != nil {
+		// Can't determine retention; treat as transient so we never skip data on a
+		// guess. The caller propagates the original error and retries.
+		m.log.Warn().Err(err).Msg("could not read oldest snapshot to classify feed error")
+		return 0, false, nil
+	}
+	if oldest <= cur+1 {
+		return 0, false, nil // range still retained → genuine transient error
+	}
+	skipTo := oldest - 1 // resume decode from the oldest retained snapshot
+	cursorResetsTotal.Inc()
+	cursorResetGap.Set(float64(skipTo - cur))
+	m.log.Error().Err(cause).Int64("from", cur).Int64("to", skipTo).Int64("oldest_retained", oldest).
+		Int64("skipped_snapshots", skipTo-cur).
+		Msg("DuckLake change feed expired below retention; skipping only the unretained prefix and resuming (increase LAKE_SNAPSHOT_RETENTION)")
+	if err := m.resetCursor(ctx, cur, skipTo); err != nil {
+		return 0, true, err
+	}
+	// The reset path skips the normal commit's progress report; do it here so
+	// din's expiry floor reflects the post-gap position instead of staying stale.
+	m.reportProgress(ctx, skipTo)
+	return 0, true, nil
+}
+
+// oldestSnapshot returns the smallest retained snapshot id (0 when the catalog
+// has none).
+func (m *DuckLakeMaterializer) oldestSnapshot(ctx context.Context) (int64, error) {
+	var oldest sql.NullInt64
+	if err := m.db.QueryRowContext(ctx, "SELECT min(snapshot_id) FROM lake.snapshots()").Scan(&oldest); err != nil {
+		return 0, fmt.Errorf("reading oldest snapshot: %w", err)
+	}
+	if !oldest.Valid {
+		return 0, nil
+	}
+	return oldest.Int64, nil
 }
 
 // consumerName is the identity dq reports under in meta.din_consumer_progress.
@@ -311,9 +404,7 @@ func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([
 		rawEventCols, from+1, to)
 	rows, err := m.db.QueryContext(ctx, q)
 	if err != nil {
-		if isExpiredSnapshot(err) {
-			return nil, fmt.Errorf("%w: %v", errExpiredCursor, err)
-		}
+		// Don't classify here — RunOnce decides expired-vs-transient on retention.
 		return nil, fmt.Errorf("reading raw_events delta: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
@@ -325,6 +416,18 @@ func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([
 			return nil, err
 		}
 		if err := m.resolveBlob(ctx, &ev, blobKey); err != nil {
+			if eventrepo.IsObjectNotFound(err) {
+				// The externalized payload is permanently gone (S3 404). Blocking
+				// the whole delta on it forever helps nobody — skip this one row,
+				// count it, and let the cursor advance past it. A transient fetch
+				// error (timeout/throttle/5xx) still aborts the pass for retry; a
+				// missing object store (misconfig) is not a NotFound, so it still
+				// surfaces loudly rather than silently dropping every blob row.
+				blobMissingTotal.Inc()
+				m.log.Error().Err(err).Str("id", ev.ID).Str("blob", blobKey).
+					Msg("raw_events blob payload permanently missing; skipping row")
+				continue
+			}
 			return nil, err
 		}
 		out = append(out, ev)

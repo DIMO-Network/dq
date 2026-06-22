@@ -17,6 +17,12 @@ type Settings struct {
 	ClickhouseFileCatalogue   config.Settings `yaml:"FILE"`
 	TokenExchangeJWTKeySetURL string          `yaml:"TOKEN_EXCHANGE_JWK_KEY_SET_URL"`
 	TokenExchangeIssuer       string          `yaml:"TOKEN_EXCHANGE_ISSUER_URL"`
+	// FetchGRPCRequireJWT makes a valid DIMO JWT mandatory on the fetch gRPC port.
+	// The interceptor always rejects an *invalid* token; this flag controls
+	// whether a *missing* one is rejected too. Default false eases rollout (admit
+	// callers until they send a token); set true once callers are updated. Pair
+	// with the NetworkPolicy — the fetch RPCs return any subject's raw data.
+	FetchGRPCRequireJWT bool `yaml:"FETCH_GRPC_REQUIRE_JWT"`
 	// S3 storage (cloud events)
 	CloudEventBucket     string `yaml:"CLOUDEVENT_BUCKET"`
 	EphemeralBucket      string `yaml:"EPHEMERAL_BUCKET"`

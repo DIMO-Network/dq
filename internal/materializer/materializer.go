@@ -367,6 +367,17 @@ func (r *Runner) convertJobs(ctx context.Context, dec *decodedBatch, jobs []*clo
 	conv.SetLimit(r.cfg.Workers)
 	for i, raw := range jobs {
 		conv.Go(func() error {
+			// The materializer is the single writer: a panic in a vendor decode
+			// module on one malformed payload would crash the process and then
+			// crash-loop on the same row. Contain it — count a decode failure and
+			// drop the row instead.
+			defer func() {
+				if p := recover(); p != nil {
+					r.log.Error().Interface("panic", p).Str("source", raw.Source).Str("id", raw.ID).
+						Msg("recovered panic during decode; skipping event")
+					results[i] = convResult{failed: 1}
+				}
+			}()
 			switch routeType(raw) {
 			case cloudevent.TypeStatus:
 				rows, failed := r.convertSignals(convCtx, raw)
