@@ -12,6 +12,7 @@ import (
 	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"golang.org/x/sync/errgroup"
 )
 
 // errOrClauseUnsupported is returned when an advanced filter contains an Or
@@ -285,11 +286,21 @@ func (l *LakeEventService) resolvePayload(ctx context.Context, ev cloudevent.Sto
 	return raw, nil
 }
 
+// indexBlobConcurrency bounds the parallel blob resolution in
+// ListCloudEventsFromIndexes.
+const indexBlobConcurrency = 25
+
+// BatchesAllIndexes is true for the lake backend: ListCloudEventsFromIndexes
+// groups any index by subject and issues one query per subject, so internal/fetch
+// routes every index through it (a 1000-key single-subject fetch is one query,
+// not 1000 per-key queries).
+func (l *LakeEventService) BatchesAllIndexes() bool { return true }
+
 // ListCloudEventsFromIndexes fetches the payload for each index entry, in input
 // order. It groups the requested ids by subject and issues one query per
 // subject instead of one per index (SR-4) — a list of N indexes for one vehicle
-// is a single raw_events query, not N. Blob payloads are still resolved per
-// event (each needs its own bytes). A requested index with no row is ErrNotFound,
+// is a single raw_events query, not N. Blob payloads are resolved concurrently
+// (each needs its own bytes). A requested index with no row is ErrNotFound,
 // matching the old per-index path.
 func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, indexes []cloudevent.CloudEvent[eventrepo.ObjectInfo], _ string) ([]cloudevent.RawEvent, error) {
 	if len(indexes) == 0 {
@@ -313,17 +324,32 @@ func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, index
 		}
 	}
 
-	out := make([]cloudevent.RawEvent, 0, len(indexes))
+	// Order the matched rows; a missing index is ErrNotFound (before launching any
+	// resolution, so no goroutine leaks on the error path).
+	evs := make([]cloudevent.StoredEvent, len(indexes))
 	for i := range indexes {
 		ev, ok := found[key{indexes[i].Subject, indexes[i].ID}]
 		if !ok {
 			return nil, ErrNotFound
 		}
-		raw, err := l.resolvePayload(ctx, ev)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, raw)
+		evs[i] = ev
+	}
+
+	out := make([]cloudevent.RawEvent, len(indexes))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(indexBlobConcurrency)
+	for i := range evs {
+		g.Go(func() error {
+			raw, err := l.resolvePayload(gctx, evs[i])
+			if err != nil {
+				return err
+			}
+			out[i] = raw
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

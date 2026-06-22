@@ -55,6 +55,8 @@ func (f *fakeEventService) GetLatestIndex(_ context.Context, _ *grpc.SearchOptio
 	return f.latestIndexResult, f.errLatestIndex
 }
 
+func (f *fakeEventService) BatchesAllIndexes() bool { return false }
+
 func (f *fakeEventService) GetCloudEventFromIndex(_ context.Context, _ *cloudevent.CloudEvent[eventrepo.ObjectInfo], _ string) (cloudevent.RawEvent, error) {
 	return cloudevent.RawEvent{}, nil
 }

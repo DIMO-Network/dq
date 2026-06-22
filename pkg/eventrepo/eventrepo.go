@@ -294,6 +294,10 @@ func (s *Service) GetLatestCloudEventAdvanced(ctx context.Context, bucketName st
 // fetchConcurrency is the maximum number of concurrent S3 fetches.
 const fetchConcurrency = 50
 
+// BatchesAllIndexes is false for ClickHouse: only parquet refs are batched here;
+// other index keys are individual S3 objects fetched per key by internal/fetch.
+func (s *Service) BatchesAllIndexes() bool { return false }
+
 // ListCloudEventsFromIndexes fetches and returns the cloud events for the given index.
 // Parquet refs sharing the same object key are grouped so they share one S3ReaderAt
 // (avoiding duplicate downloads). Groups and JSON fetches run concurrently.

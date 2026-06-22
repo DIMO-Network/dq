@@ -25,6 +25,14 @@ type EventService interface {
 	GetCloudEventFromIndex(ctx context.Context, index *cloudevent.CloudEvent[ObjectInfo], bucketName string) (cloudevent.RawEvent, error)
 	ListCloudEventsFromIndexes(ctx context.Context, indexes []cloudevent.CloudEvent[ObjectInfo], bucketName string) ([]cloudevent.RawEvent, error)
 
+	// BatchesAllIndexes reports whether ListCloudEventsFromIndexes resolves ANY
+	// index efficiently in one batched call (e.g. the lake backend groups by
+	// subject → one query per subject). When true, internal/fetch routes every
+	// index through it instead of the per-key fallback. The ClickHouse backend
+	// returns false: its ListCloudEventsFromIndexes only batches parquet refs, and
+	// other keys are individual S3 objects fetched per key.
+	BatchesAllIndexes() bool
+
 	// Blob payloads served as presigned URLs.
 	PresignBlobURL(ctx context.Context, key string) (string, error)
 }

@@ -84,6 +84,9 @@ func (s *ShadowEventService) Wait() {
 	s.wg.Wait()
 }
 
+// BatchesAllIndexes follows the primary, since payloads are served from it.
+func (s *ShadowEventService) BatchesAllIndexes() bool { return s.primary.BatchesAllIndexes() }
+
 // shadow fires call against the secondary in a goroutine and compares its
 // result to primaryRes. When primaryErr is non-nil the shadow is skipped.
 // Slots are bounded by the semaphore; when saturated the call is dropped.

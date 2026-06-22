@@ -35,6 +35,7 @@ func (emptyEventService) ListIndexesAdvanced(context.Context, int, *grpc.Advance
 func (emptyEventService) GetCloudEventTypeSummariesAdvanced(context.Context, *grpc.AdvancedSearchOptions) ([]eventrepo.CloudEventTypeSummary, error) {
 	return nil, nil
 }
+func (emptyEventService) BatchesAllIndexes() bool { return false }
 func (emptyEventService) GetCloudEventFromIndex(context.Context, *cloudevent.CloudEvent[eventrepo.ObjectInfo], string) (cloudevent.RawEvent, error) {
 	return cloudevent.RawEvent{}, sql.ErrNoRows
 }

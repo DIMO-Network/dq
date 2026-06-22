@@ -54,6 +54,8 @@ func (f *fakeWhiteBoxService) GetLatestIndex(_ context.Context, _ *grpc.SearchOp
 	return f.latestResult, f.latestErr
 }
 
+func (f *fakeWhiteBoxService) BatchesAllIndexes() bool { return false }
+
 func (f *fakeWhiteBoxService) GetCloudEventFromIndex(_ context.Context, _ *cloudevent.CloudEvent[ObjectInfo], _ string) (cloudevent.RawEvent, error) {
 	return cloudevent.RawEvent{}, nil
 }

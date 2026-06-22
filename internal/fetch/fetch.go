@@ -25,6 +25,13 @@ func ListCloudEventsFromIndexes(ctx context.Context, evtSvc eventrepo.EventServi
 		return nil, nil
 	}
 
+	// Backends that batch any index (the lake backend groups by subject) resolve
+	// the whole list in one query per subject — route everything through them
+	// instead of the per-key fallback below (which would issue one query per key).
+	if evtSvc.BatchesAllIndexes() {
+		return evtSvc.ListCloudEventsFromIndexes(ctx, indexKeys, "")
+	}
+
 	events := make([]cloudevent.RawEvent, len(indexKeys))
 
 	// Split into parquet and JSON indexes, preserving original positions.
