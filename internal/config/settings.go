@@ -33,7 +33,8 @@ type Settings struct {
 	// Identity API for device→vehicle DID resolution
 	IdentityAPIURL string `yaml:"IDENTITY_API_URL"`
 	// QueryBackend selects the signal/event query backend: clickhouse (default),
-	// duckdb, or shadow (serve from clickhouse, mirror to duckdb and compare).
+	// duckdb, ducklake (the shared DuckLake catalog — the cutover target), or
+	// shadow (serve from clickhouse, mirror to the lake and compare).
 	QueryBackend string `yaml:"QUERY_BACKEND"`
 	// DuckLakeCatalogDSN is the shared DuckLake catalog (Postgres DSN in
 	// prod, a catalog file path for single-node). Required when

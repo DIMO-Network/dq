@@ -284,6 +284,9 @@ func (s *Service) GetSignalSummaries(ctx context.Context, subject string, filter
 		}
 		signalSummaries = append(signalSummaries, &signalSummary)
 	}
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("clickhouse row error: %w", rows.Err())
+	}
 	return signalSummaries, nil
 }
 

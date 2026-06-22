@@ -37,8 +37,14 @@ const defaultFetchScanWindow = 400 * 24 * time.Hour
 // immune to.
 const maxLakeQueryLimit = 1000
 
-// lakeRawColumns matches rawColumns and scanStoredEvent's scan order.
-const lakeRawColumns = "subject, time, type, id, source, producer, data_content_type, data_version, extras, data, data_base64, data_index_key, voids_id"
+// RawEventColumns is the raw_events SELECT projection in din's DDL column order
+// (matching scanStoredEvent / scanRawEvent's scan order). Single source of truth
+// for the fetch path, the legacy raw reader (raw.go), and the materializer
+// change-feed reader (materializer/ducklake.go), which previously hand-kept three
+// identical copies. "time" is quoted (a DuckDB keyword); the quoted form is valid
+// in every projection context.
+const RawEventColumns = `subject, "time", type, id, source, producer, ` +
+	`data_content_type, data_version, extras, data, data_base64, data_index_key, voids_id`
 
 // voidingClause builds the tombstone-exclusion predicate for raw_events: drop
 // tombstones (voids_id set) and any event a same-subject tombstone voids. ref is
@@ -110,7 +116,7 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 			"PARTITION BY e.subject, date_trunc('second', e.time), e.type, e.source, e.id "+
 			"ORDER BY e.time) = 1 "+
 			"ORDER BY e.time %s LIMIT %d",
-		lakeRawColumns, lakeRawEvents, where, voiding, order, limit)
+		RawEventColumns, lakeRawEvents, where, voiding, order, limit)
 
 	rows, err := l.svc.DB().QueryContext(ctx, q, args...)
 	if err != nil {

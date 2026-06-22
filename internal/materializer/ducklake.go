@@ -15,6 +15,7 @@ import (
 	"github.com/DIMO-Network/dq/internal/service/duck"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/errgroup"
 )
 
 // DuckLakeMaterializer decodes din's raw layer entirely through the shared
@@ -43,6 +44,11 @@ type DuckLakeMaterializer struct {
 	// memory-bounded chunks instead of materializing the entire (cur, head]
 	// delta at once and OOM-killing the single writer. <= 0 means unbounded.
 	maxSnapshotSpan int64
+	// lastProgressReport / lastReportedSnapshot throttle the per-batch
+	// expiry-floor heartbeat (see maybeReportProgress) and track what was last
+	// published so the tail is flushed exactly once on catch-up.
+	lastProgressReport   time.Time
+	lastReportedSnapshot int64
 }
 
 // snapshotCursorPartition is the single ingest_progress key holding the last
@@ -53,10 +59,6 @@ const snapshotCursorPartition = "lake.raw_events#snapshot"
 // up to 128 MiB, so this bounds the per-pass working set; the Run loop re-polls
 // immediately while a batch was processed, so a backlog still drains continuously.
 const defaultMaxSnapshotSpan = 16
-
-// rawEventCols is the lake.raw_events projection, matching din's DDL order.
-const rawEventCols = `subject, "time", type, id, source, producer, ` +
-	`data_content_type, data_version, extras, data, data_base64, data_index_key, voids_id`
 
 // NewDuckLakeMaterializer ensures the decoded tables + cursor row exist and
 // returns a materializer over db (which must have the shared catalog attached
@@ -198,7 +200,8 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 	cursorSnapshotID.Set(float64(cur))
 	headSnapshotID.Set(float64(head))
 	if head <= cur {
-		observeLakeLag(nil) // caught up: no decode lag
+		observeLakeLag(nil)           // caught up: no decode lag
+		m.reportProgressNow(ctx, cur) // flush any throttled tail (no-op if already reported)
 		return 0, nil
 	}
 
@@ -209,7 +212,6 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 	// exactly-once; Run re-polls immediately while processed>0, so the backlog
 	// still drains continuously. The loop only iterates past the first chunk to
 	// skip empty sub-spans (windows of this decoder's own snapshots).
-	advanced := false // whether this pass advanced the cursor over empty sub-spans
 	for {
 		to := head
 		if m.maxSnapshotSpan > 0 && to-cur > m.maxSnapshotSpan {
@@ -244,10 +246,11 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 			rowsTotal.WithLabelValues("events").Add(float64(decoded.eventCount))
 			errorsTotal.Add(float64(decoded.errorCount))
 			cursorSnapshotID.Set(float64(to))
-			// Report progress to din's snapshot-expiry floor. Best-effort: the
-			// batch is already durable, and a failed report only holds expiry
-			// back (conservative, not unsafe).
-			m.reportProgress(ctx, to)
+			// Report progress to din's snapshot-expiry floor. Throttled: the batch
+			// is already durable, and din only needs the floor within its retention
+			// window — a lagging report just holds expiry back slightly (conservative,
+			// never unsafe), so it needn't be a catalog txn on every batch.
+			m.maybeReportProgress(ctx, to)
 			return len(events), nil
 		}
 
@@ -256,12 +259,8 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 		// next pass re-reads the empty range cheaply and moves once real data
 		// arrives.
 		if to >= head {
-			observeLakeLag(nil) // no pending raw events: no decode lag
-			if advanced {
-				// Report the final skipped position once (not per empty sub-span)
-				// so din's expiry floor reflects the drain without N tiny txns.
-				m.reportProgress(ctx, cur)
-			}
+			observeLakeLag(nil)           // no pending raw events: no decode lag
+			m.reportProgressNow(ctx, cur) // flush the drained position once (no-op if unchanged)
 			return 0, nil
 		}
 		// Empty sub-span below head (only this decoder's own snapshots in the
@@ -274,7 +273,6 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 			return 0, err
 		}
 		cur = to
-		advanced = true
 	}
 }
 
@@ -326,7 +324,7 @@ func (m *DuckLakeMaterializer) maybeRecoverExpired(ctx context.Context, cur int6
 	}
 	// The reset path skips the normal commit's progress report; do it here so
 	// din's expiry floor reflects the post-gap position instead of staying stale.
-	m.reportProgress(ctx, skipTo)
+	m.reportProgressNow(ctx, skipTo)
 	return 0, true, nil
 }
 
@@ -347,6 +345,38 @@ func (m *DuckLakeMaterializer) oldestSnapshot(ctx context.Context) (int64, error
 // din takes MIN(snapshot_id) over live consumers as the expiry floor; all dq
 // replicas share one logical cursor, so they all report under this name.
 const consumerName = "dq"
+
+// progressReportInterval throttles the per-batch expiry-floor heartbeat. din
+// reads the floor at coarse (≤1h) granularity, so reporting every few seconds is
+// ample and avoids a second catalog transaction on every committed batch.
+const progressReportInterval = 5 * time.Second
+
+// reportProgressNow publishes snapshotID immediately (and records it, resetting
+// the throttle). A no-op if that id was already the last reported. Used where the
+// floor must be current: catch-up and expiry-reset.
+func (m *DuckLakeMaterializer) reportProgressNow(ctx context.Context, snapshotID int64) {
+	if snapshotID == m.lastReportedSnapshot {
+		return
+	}
+	m.reportProgress(ctx, snapshotID)
+	m.lastProgressReport = time.Now()
+	m.lastReportedSnapshot = snapshotID
+}
+
+// maybeReportProgress reports at most once per progressReportInterval on the hot
+// path; the unreported tail is flushed by reportProgressNow when the decoder
+// catches up, so din's floor is never left stale while idle.
+func (m *DuckLakeMaterializer) maybeReportProgress(ctx context.Context, snapshotID int64) {
+	if snapshotID == m.lastReportedSnapshot {
+		return
+	}
+	if !m.lastProgressReport.IsZero() && time.Since(m.lastProgressReport) < progressReportInterval {
+		return
+	}
+	m.reportProgress(ctx, snapshotID)
+	m.lastProgressReport = time.Now()
+	m.lastReportedSnapshot = snapshotID
+}
 
 // reportProgress upserts dq's processed snapshot id into din's consumer-floor
 // table so the maintainer never expires snapshots dq hasn't read.
@@ -407,7 +437,7 @@ func (m *DuckLakeMaterializer) headSnapshot(ctx context.Context) (int64, error) 
 func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([]cloudevent.RawEvent, error) {
 	q := fmt.Sprintf(
 		"SELECT %s FROM ducklake_table_changes('lake', 'main', 'raw_events', %d, %d) WHERE change_type = 'insert'",
-		rawEventCols, from+1, to)
+		duck.RawEventColumns, from+1, to)
 	rows, err := m.db.QueryContext(ctx, q)
 	if err != nil {
 		// Don't classify here — RunOnce decides expired-vs-transient on retention.
@@ -415,30 +445,76 @@ func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([
 	}
 	defer rows.Close() //nolint:errcheck
 
+	// Phase 1: scan every row + its blob key (no network in this loop).
 	var out []cloudevent.RawEvent
+	var blobKeys []string
 	for rows.Next() {
 		ev, blobKey, err := scanRawEvent(rows)
 		if err != nil {
 			return nil, err
 		}
-		if err := m.resolveBlob(ctx, &ev, blobKey); err != nil {
-			if eventrepo.IsObjectNotFound(err) {
-				// The externalized payload is permanently gone (S3 404). Blocking
-				// the whole delta on it forever helps nobody — skip this one row,
-				// count it, and let the cursor advance past it. A transient fetch
-				// error (timeout/throttle/5xx) still aborts the pass for retry; a
-				// missing object store (misconfig) is not a NotFound, so it still
-				// surfaces loudly rather than silently dropping every blob row.
-				blobMissingTotal.Inc()
-				m.log.Error().Err(err).Str("id", ev.ID).Str("blob", blobKey).
-					Msg("raw_events blob payload permanently missing; skipping row")
-				continue
-			}
-			return nil, err
-		}
 		out = append(out, ev)
+		blobKeys = append(blobKeys, blobKey)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Phase 2: resolve externalized payloads concurrently — serial S3 GETs here
+	// would block the single writer on N round-trips (blob-heavy batches are also
+	// the largest to decode, so the latency stacks).
+	return m.resolveBlobs(ctx, out, blobKeys)
+}
+
+// blobFetchConcurrency bounds the parallel blob downloads in resolveBlobs.
+const blobFetchConcurrency = 16
+
+// resolveBlobs fetches the externalized payloads for the rows that need them,
+// concurrently and bounded, then drops any row whose blob is permanently missing
+// (S3 404) — a transient fetch error still aborts the pass for retry, and a
+// missing object store surfaces loudly (not a NotFound). Rows with inline
+// payloads or no blob reference are untouched.
+func (m *DuckLakeMaterializer) resolveBlobs(ctx context.Context, events []cloudevent.RawEvent, blobKeys []string) ([]cloudevent.RawEvent, error) {
+	var fetch []int
+	for i := range events {
+		if len(events[i].Data) == 0 && events[i].DataBase64 == "" && strings.HasPrefix(blobKeys[i], eventrepo.BlobKeyPrefix) {
+			fetch = append(fetch, i)
+		}
+	}
+	if len(fetch) == 0 {
+		return events, nil
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(blobFetchConcurrency)
+	missing := make([]bool, len(events))
+	for _, idx := range fetch {
+		g.Go(func() error {
+			if err := m.resolveBlob(gctx, &events[idx], blobKeys[idx]); err != nil {
+				if eventrepo.IsObjectNotFound(err) {
+					blobMissingTotal.Inc()
+					m.log.Error().Err(err).Str("id", events[idx].ID).Str("blob", blobKeys[idx]).
+						Msg("raw_events blob payload permanently missing; skipping row")
+					missing[idx] = true
+					return nil
+				}
+				return err
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	// Compact out the permanently-missing rows, preserving order (in place: the
+	// write index never overtakes the read index).
+	kept := events[:0]
+	for i := range events {
+		if !missing[i] {
+			kept = append(kept, events[i])
+		}
+	}
+	return kept, nil
 }
 
 // resolveBlob populates ev.Data from S3 when ev carries no inline payload but a

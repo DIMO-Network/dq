@@ -75,10 +75,11 @@ type RawFilter struct {
 // directly with DuckDB — the replacement for the ClickHouse cloud_event
 // index plus per-row parquet seeks. Data comes back inline.
 //
-// TODO(voids): tombstone voiding (the CH voids_id column) is not applied
-// yet; the voided id lives inside tombstone payloads, not in a parquet
-// column. Readers see both the attestation and its tombstone until a
-// voiding pass lands here or in compaction.
+// Raw is the legacy bucket/hive raw-event reader (QUERY_BACKEND=duckdb), retired
+// in favor of LakeEventService. It does NOT apply tombstone voiding; the live
+// DuckLake fetch path does (lake_fetch.go voidingClause). Reads here see both an
+// attestation and its tombstone — acceptable only because this path is unused in
+// ducklake mode and slated for deletion post-cutover.
 type Raw struct {
 	svc       *Service
 	bucket    string
@@ -93,8 +94,8 @@ func NewRaw(svc *Service, bucket, rawPrefix string) *Raw {
 	return &Raw{svc: svc, bucket: bucket, rawPrefix: rawPrefix}
 }
 
-// rawColumns matches cloudevent/parquet.ParquetRow.
-const rawColumns = "subject, time, type, id, source, producer, data_content_type, data_version, extras, data, data_base64, data_index_key, voids_id"
+// raw_events projection is shared via RawEventColumns (lake_fetch.go), the single
+// source of truth that also matches cloudevent/parquet.ParquetRow's field order.
 
 // ListCloudEvents returns events matching filter, newest first, capped at
 // limit. Duplicate rows (at-least-once ingest, compaction grace window)
@@ -331,7 +332,7 @@ func (r *Raw) query(ctx context.Context, globs []string, filter RawFilter, limit
 	where, args := whereClause(filter)
 	// Over-fetch headroom so duplicate collapse still fills the limit.
 	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY time DESC LIMIT %d",
-		rawColumns, ReadParquetSQL(globs), where, limit*2)
+		RawEventColumns, ReadParquetSQL(globs), where, limit*2)
 
 	rows, err := r.svc.DB().QueryContext(ctx, query, args...)
 	if err != nil {
