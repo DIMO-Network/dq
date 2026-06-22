@@ -602,6 +602,12 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 			return err
 		}
 		cleanup = append(cleanup, tmp)
+		// Merge the rollup BEFORE inserting the batch, so its new-row count probes
+		// lake.signals in its pre-batch state. Both advance atomically in this
+		// transaction, so the rollup stays consistent with the base rows (CHD-3).
+		if err := m.refreshRollup(ctx, tx, tmp, dec.signals); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp)); err != nil {
 			return fmt.Errorf("insert signals: %w", err)
 		}
@@ -614,14 +620,6 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		cleanup = append(cleanup, tmp)
 		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp)); err != nil {
 			return fmt.Errorf("insert events: %w", err)
-		}
-	}
-
-	// Refresh the latest/summary rollup for the subjects this batch touched, in
-	// the same transaction so it advances atomically with the base rows (CHD-3).
-	if len(dec.signals) > 0 {
-		if err := m.refreshRollup(ctx, tx, dec.signals); err != nil {
-			return err
 		}
 	}
 
@@ -716,7 +714,19 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 // computed from the deduped base table, so the rollup is always a materialized
 // view of getAllLatestSignalsLake (no source filter). Bounded to the batch's
 // subjects, which prune by subject_bucket.
-func (m *DuckLakeMaterializer) refreshRollup(ctx context.Context, tx *sql.Tx, signals []SignalRow) error {
+// refreshRollup advances lake.signals_latest for the subjects this batch touched
+// by MERGING the batch's per-(subject,name) aggregate into the existing rollup
+// rows — O(batch + touched rollup rows), not O(history) as the old full recompute
+// was (SR-1). It must run BEFORE the batch is inserted into lake.signals so the
+// new-row count probes the pre-batch base. Correctness rests on two invariants,
+// both validated by TestRollup_IncrementalMatchesRecompute:
+//   - The rollup is maintained in lockstep with lake.signals from the first batch
+//     (the materializer writes both in this transaction). A rollup rebuilt over
+//     pre-existing history would undercount — use rollupRecomputeSQL for that.
+//   - The "latest" merge compares stored timestamps, which is exact because din
+//     and dq prune (0,0) origin coordinates, so a location signal's loc is always
+//     at its max timestamp (no later origin row shadows an earlier real fix).
+func (m *DuckLakeMaterializer) refreshRollup(ctx context.Context, tx *sql.Tx, tmpParquet string, signals []SignalRow) error {
 	subjects := distinctSubjects(signals)
 	if len(subjects) == 0 {
 		return nil
@@ -727,22 +737,78 @@ func (m *DuckLakeMaterializer) refreshRollup(ctx context.Context, tx *sql.Tx, si
 	for i, s := range subjects {
 		args[i] = s
 	}
-	// Prune the rollup delete and the base recompute to the batch's hash buckets.
-	// signals_latest and lake.signals are PARTITIONED BY subject_bucket, so this
-	// skips every partition but the batch's (SR-6) — the recompute reads only the
-	// touched buckets' files, not the whole table. (The recompute is still
-	// O(history within those buckets); the SR-1 incremental-merge follow-up would
-	// make it O(batch), but that must replicate the (subject,name,timestamp)
-	// read-dedup exactly, so it is deferred over correctness risk.)
+	// Pruned by subject_bucket (SR-6): signals_latest is PARTITIONED BY
+	// subject_bucket, so the snapshot/delete touch only the batch's buckets.
 	buckets := distinctBucketClause(subjects)
+	// Snapshot the existing rollup rows for the touched subjects (small: one row
+	// per (subject,name)), then delete them and re-insert the merge of that
+	// snapshot with the batch aggregate.
+	if _, err := tx.ExecContext(ctx, "CREATE OR REPLACE TEMP TABLE _rollup_prev AS SELECT * FROM lake.signals_latest WHERE subject IN ("+ph+")"+buckets, args...); err != nil {
+		return fmt.Errorf("rollup snapshot: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest WHERE subject IN ("+ph+")"+buckets, args...); err != nil {
 		return fmt.Errorf("rollup delete: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest "+rollupSelectSQL(ph, buckets), args...); err != nil {
-		return fmt.Errorf("rollup insert: %w", err)
+	if _, err := tx.ExecContext(ctx, rollupMergeSQL(tmpParquet)); err != nil {
+		return fmt.Errorf("rollup merge: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DROP TABLE _rollup_prev"); err != nil {
+		return fmt.Errorf("rollup snapshot drop: %w", err)
 	}
 	rollupRefreshSeconds.Set(time.Since(start).Seconds())
 	return nil
+}
+
+// rollupMergeSQL merges the batch's per-(subject,name) aggregate (from the
+// just-written signal parquet) with the pre-batch rollup snapshot (_rollup_prev):
+// the latest value/location is whichever side has the newer timestamp; count adds
+// the batch's NEW distinct (subject,name,timestamp) rows (anti-joined against the
+// pre-batch base, matching the read-path dedup); first/last_seen take the min/max.
+func rollupMergeSQL(tmpParquet string) string {
+	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
+	tmp := sqlLit(tmpParquet)
+	// pick(col): take the batch's value when the batch row is at least as new as
+	// the snapshot (or there is no snapshot row), else keep the snapshot's.
+	pick := func(col string) string {
+		return fmt.Sprintf("CASE WHEN b.name IS NOT NULL AND (p.name IS NULL OR b.timestamp >= p.timestamp) THEN b.%[1]s ELSE p.%[1]s END AS %[1]s", col)
+	}
+	return fmt.Sprintf(`INSERT INTO lake.signals_latest
+WITH batch AS (
+  SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
+    max(timestamp) AS timestamp,
+    arg_max(value_number, timestamp) AS value_number,
+    arg_max(value_string, timestamp) AS value_string,
+    coalesce(arg_max(loc_lat, timestamp) FILTER (WHERE %[2]s), 0) AS loc_lat,
+    coalesce(arg_max(loc_lon, timestamp) FILTER (WHERE %[2]s), 0) AS loc_lon,
+    coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[2]s), 0) AS loc_hdop,
+    coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[2]s), 0) AS loc_heading,
+    min(timestamp) AS first_seen, max(timestamp) AS last_seen
+  FROM (SELECT * FROM read_parquet(%[1]s)
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1)
+  GROUP BY subject, name
+),
+newcount AS (
+  SELECT subject, name, CAST(count(*) AS BIGINT) AS new_count
+  FROM (SELECT DISTINCT subject, subject_bucket, name, timestamp FROM read_parquet(%[1]s)) src
+  WHERE NOT EXISTS (SELECT 1 FROM lake.signals t
+                    WHERE t.subject_bucket = src.subject_bucket AND t.name = src.name AND t.timestamp = src.timestamp)
+  GROUP BY subject, name
+)
+SELECT
+  coalesce(b.subject, p.subject) AS subject,
+  coalesce(b.subject_bucket, p.subject_bucket) AS subject_bucket,
+  coalesce(b.name, p.name) AS name,
+  CASE WHEN b.name IS NOT NULL AND (p.name IS NULL OR b.timestamp >= p.timestamp) THEN b.timestamp ELSE p.timestamp END AS timestamp,
+  %[3]s, %[4]s, %[5]s, %[6]s, %[7]s, %[8]s,
+  coalesce(p.count, 0) + coalesce(n.new_count, 0) AS count,
+  LEAST(coalesce(p.first_seen, b.first_seen), coalesce(b.first_seen, p.first_seen)) AS first_seen,
+  GREATEST(coalesce(p.last_seen, b.last_seen), coalesce(b.last_seen, p.last_seen)) AS last_seen
+FROM batch b
+FULL OUTER JOIN _rollup_prev p ON b.subject = p.subject AND b.name = p.name
+LEFT JOIN newcount n ON n.subject = b.subject AND n.name = b.name`,
+		tmp, locNonzero,
+		pick("value_number"), pick("value_string"),
+		pick("loc_lat"), pick("loc_lon"), pick("loc_hdop"), pick("loc_heading"))
 }
 
 // distinctBucketClause returns " AND subject_bucket IN (b1,b2,...)" for the hash
@@ -782,26 +848,41 @@ func distinctSubjects(signals []SignalRow) []string {
 	return out
 }
 
-// rollupSelectSQL builds the per-(subject,name) latest+summary SELECT over the
-// deduped base table for the subjects matched by ph. It mirrors
-// getAllLatestSignalsLake's aggregation exactly (max/arg_max + (0,0)-loc FILTER
-// + count/min/max), folding sources — the no-source-filter case the rollup
-// serves. The QUALIFY dedup matches the read path (CHD-2).
-func rollupSelectSQL(ph, bucketClause string) string {
+// RecomputeRollup rebuilds lake.signals_latest from scratch over the entire
+// lake.signals base — the O(history) full recompute. The materializer maintains
+// the rollup incrementally per batch (refreshRollup); use this only to rebuild
+// after the rollup table was dropped/corrupted, or as the correctness oracle in
+// tests. Mirrors getAllLatestSignalsLake's aggregation exactly (max/arg_max +
+// (0,0)-loc FILTER + count/min/max over the (subject,name,timestamp)-deduped
+// base). Runs in its own transaction.
+func (m *DuckLakeMaterializer) RecomputeRollup(ctx context.Context) error {
 	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
-	return fmt.Sprintf(`SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
-		max(timestamp) AS timestamp,
-		arg_max(value_number, timestamp) AS value_number,
-		arg_max(value_string, timestamp) AS value_string,
-		coalesce(arg_max(loc_lat, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lat,
-		coalesce(arg_max(loc_lon, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lon,
-		coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
-		coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading,
-		CAST(count(*) AS BIGINT) AS count,
-		min(timestamp) AS first_seen, max(timestamp) AS last_seen
-	FROM (SELECT * FROM lake.signals WHERE subject IN (%[2]s)%[3]s
-	      QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1)
-	GROUP BY subject, name`, locNonzero, ph, bucketClause)
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest"); err != nil {
+		return fmt.Errorf("rollup recompute delete: %w", err)
+	}
+	insert := fmt.Sprintf(`INSERT INTO lake.signals_latest
+SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
+  max(timestamp) AS timestamp,
+  arg_max(value_number, timestamp) AS value_number,
+  arg_max(value_string, timestamp) AS value_string,
+  coalesce(arg_max(loc_lat, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lat,
+  coalesce(arg_max(loc_lon, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lon,
+  coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
+  coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading,
+  CAST(count(*) AS BIGINT) AS count,
+  min(timestamp) AS first_seen, max(timestamp) AS last_seen
+FROM (SELECT * FROM lake.signals
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1)
+GROUP BY subject, name`, locNonzero)
+	if _, err := tx.ExecContext(ctx, insert); err != nil {
+		return fmt.Errorf("rollup recompute insert: %w", err)
+	}
+	return tx.Commit()
 }
 
 // antiJoinInsert builds the idempotent INSERT for a decoded table: it skips any
