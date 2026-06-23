@@ -93,6 +93,12 @@ type Config struct {
 	// read-only reader role. Empty reads the primary CatalogDSN. Ignored when
 	// ReadOnly is false.
 	CatalogReadDSN string `yaml:"DUCKLAKE_CATALOG_READ_DSN"`
+
+	// LoadSpatial loads the spatial extension (for the ST_* geofence filters in
+	// aggregations.go) on every connection. Read/query connections only: spatial's
+	// RTreeIndexScanOptimizer hooks the planner and crashes (INTERNAL Error) on the
+	// materializer's DuckLake delta read, so the materializer leaves this false.
+	LoadSpatial bool `yaml:"DUCKDB_LOAD_SPATIAL"`
 }
 
 // effectiveCatalogDSN is the catalog DSN this role connects to: the read

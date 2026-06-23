@@ -424,3 +424,23 @@ func TestExactAggExpr_Exact(t *testing.T) {
 	require.Equal(t, "mode(value_string)", stringAggExpr(model.StringAggregationTop),
 		"TOP must be exact mode()")
 }
+
+// TestLocationFilterSQL_AxisOrder pins the spatial-extension axis order. DuckDB's
+// ST_Point is (x=longitude, y=latitude) — the opposite of lat/lon intuition; calling
+// it the "natural" way yields 12-32% wrong distances that still pass non-boundary
+// geofence tests. This catches an accidental swap.
+func TestLocationFilterSQL_AxisOrder(t *testing.T) {
+	circle := locationFilterSQL("s.loc_lat", "s.loc_lon", &model.SignalLocationFilter{
+		InCircle: &model.InCircleFilter{Center: &model.FilterLocation{Latitude: 60, Longitude: 5}, Radius: 10},
+	})
+	// Point and center must both be ST_Point(lon, lat); radius is km→metres.
+	assert.Contains(t, circle, "ST_Point(s.loc_lon, s.loc_lat)", "point must be ST_Point(lon, lat)")
+	assert.Contains(t, circle, "ST_Point((5), (60))", "center must be ST_Point(lon=5, lat=60)")
+	assert.Contains(t, circle, "<= (10000)", "radius must be km*1000 metres")
+
+	poly := locationFilterSQL("s.loc_lat", "s.loc_lon", &model.SignalLocationFilter{
+		InPolygon: []*model.FilterLocation{{Latitude: 1, Longitude: 2}, {Latitude: 1, Longitude: 3}, {Latitude: 2, Longitude: 3}},
+	})
+	assert.Contains(t, poly, "ST_Point(s.loc_lon, s.loc_lat)", "point must be ST_Point(lon, lat)")
+	assert.Contains(t, poly, "POLYGON((2 1, 3 1, 3 2, 2 1))", "WKT must be 'lon lat' pairs with a closed ring")
+}

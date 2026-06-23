@@ -109,6 +109,14 @@ func bootstrapQueries(cfg Config) []string {
 		queries = append(queries, fmt.Sprintf("SET extension_directory = %s", sqlString(cfg.DuckDBExtensionDir)))
 	}
 
+	// spatial backs the geofencing location filters (ST_Distance_Sphere / ST_Contains
+	// in aggregations.go). Read/query connections only — its RTreeIndexScanOptimizer
+	// crashes the materializer's DuckLake delta read (see Config.LoadSpatial). Baked
+	// into the image by installext; INSTALL is a no-op when present, LOAD per-connection.
+	if cfg.LoadSpatial {
+		queries = append(queries, "INSTALL spatial", "LOAD spatial")
+	}
+
 	if cfg.S3Enabled {
 		queries = append(queries,
 			"INSTALL httpfs",

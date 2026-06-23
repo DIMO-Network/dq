@@ -160,6 +160,6 @@ func writeEventsFixture(t *testing.T, svc *Service, root, day string, rows []eve
 func newQueriesHarness(t *testing.T) (string, *Service, *Queries) {
 	t.Helper()
 	root := t.TempDir()
-	svc := newLocalService(t, Config{Bucket: root})
+	svc := newLocalService(t, Config{Bucket: root, LoadSpatial: true}) // ST_* geofence filters
 	return root, svc, NewQueries(svc, root)
 }

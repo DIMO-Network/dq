@@ -47,13 +47,17 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		// DuckLake is the only backend — always attach the catalog.
 		DuckLakeEnabled: true,
 		CatalogDSN:      settings.DuckLakeCatalogDSN,
-		CatalogReadDSN: settings.DuckLakeCatalogReadDSN,
-		DataPath:       settings.DuckLakeDataPath,
+		CatalogReadDSN:  settings.DuckLakeCatalogReadDSN,
+		DataPath:        settings.DuckLakeDataPath,
 		// Only the single-writer materializer writes the lake. Any other role
 		// (query fleet, shadow comparison) attaches read-only when asked, which
 		// also lets it read from a Postgres read replica. Force read-only off
 		// for the materializer so the writer can never come up read-only.
 		ReadOnly: settings.DuckLakeReadOnly && !settings.MaterializerEnabled,
+		// Load spatial for the ST_* geofence filters. Default on for the query path;
+		// the materializer overrides it off (its delta read crashes under spatial's
+		// RTree optimizer) — see startDuckLakeMaterializer.
+		LoadSpatial: true,
 	}
 }
 
@@ -166,6 +170,9 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	}
 	cfg := duckConfigFromSettings(settings)
 	cfg.DuckLakeEnabled = true
+	// The materializer reads the DuckLake delta (ducklake_table_changes); spatial's
+	// RTreeIndexScanOptimizer crashes the planner on that read, so never load it here.
+	cfg.LoadSpatial = false
 	duckSvc, err := duck.NewService(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating DuckLake service: %w", err)

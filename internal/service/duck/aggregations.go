@@ -184,11 +184,9 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 }
 
 // locationFilterSQL renders a WGS-84 spatial predicate over latCol/lonCol for a
-// location signal filter, or "" when there is none. Pure SQL — no spatial
-// extension dependency: inCircle is a haversine great-circle distance (km) and
-// inPolygon is an even-odd ray cast unrolled over the request's vertices (fixed
-// at query-build time). Replaces the old "not supported" rejection and provides
-// geodesic distance / point-in-polygon filtering (SR review #10). InCircle takes
+// location signal filter, or "" when there is none, using the DuckDB spatial
+// extension (loaded in the bootstrap): inCircle is a spherical great-circle
+// distance and inPolygon a point-in-ring containment test. InCircle takes
 // precedence when both are set.
 func locationFilterSQL(latCol, lonCol string, f *model.SignalLocationFilter) string {
 	if f == nil {
@@ -203,38 +201,29 @@ func locationFilterSQL(latCol, lonCol string, f *model.SignalLocationFilter) str
 	return ""
 }
 
-// haversineWithinSQL constrains the great-circle distance (km, mean Earth radius
-// 6371) from (latCol,lonCol) to the
-// center to be within radiusKm.
+// haversineWithinSQL constrains the spherical great-circle distance from
+// (latCol,lonCol) to the center to be within radiusKm, via the spatial extension's
+// ST_Distance_Sphere (metres on the WGS-84 sphere). ST_Point takes (x=lon, y=lat).
 func haversineWithinSQL(latCol, lonCol string, clat, clon, radiusKm float64) string {
 	return fmt.Sprintf(
-		"(2 * 6371 * asin(sqrt("+
-			"pow(sin(radians((%[1]s - %[3]s) / 2)), 2) + "+
-			"cos(radians(%[3]s)) * cos(radians(%[1]s)) * "+
-			"pow(sin(radians((%[2]s - %[4]s) / 2)), 2))) <= %[5]s)",
-		latCol, lonCol, floatLit(clat), floatLit(clon), floatLit(radiusKm))
+		"(ST_Distance_Sphere(ST_Point(%[1]s, %[2]s), ST_Point(%[3]s, %[4]s)) <= %[5]s)",
+		lonCol, latCol, floatLit(clon), floatLit(clat), floatLit(radiusKm*1000))
 }
 
-// pointInPolygonSQL renders an even-odd ray cast: the point (lonCol=px,
-// latCol=py) is inside when an odd number of polygon edges straddle its latitude
-// to the west. The ring closes by wrapping the last vertex to the first. A
-// horizontal edge (yi == yj) makes the straddle guard false and the slope a NaN
-// whose comparison is also false, so it contributes zero — no divide-by-zero.
-// Vertices are inlined as DOUBLE literals (fixed by the request), so there is no
-// bound parameter and no injection surface.
+// pointInPolygonSQL tests ring containment via the spatial extension's ST_Contains
+// over a closed WGS-84 polygon. Vertices are inlined as "lon lat" pairs (fixed by
+// the request — numeric literals only, no bound parameter or injection surface); the
+// ring is closed by repeating the first vertex.
 func pointInPolygonSQL(latCol, lonCol string, poly []*model.FilterLocation) string {
-	terms := make([]string, 0, len(poly))
-	for i := range poly {
-		j := (i + 1) % len(poly)
-		yi, xi := floatLit(poly[i].Latitude), floatLit(poly[i].Longitude)
-		yj, xj := floatLit(poly[j].Latitude), floatLit(poly[j].Longitude)
-		terms = append(terms, fmt.Sprintf(
-			"CASE WHEN ((%[3]s > %[1]s) <> (%[4]s > %[1]s)) AND "+
-				"(%[2]s < (%[6]s - %[5]s) * (%[1]s - %[3]s) / (%[4]s - %[3]s) + %[5]s) "+
-				"THEN 1 ELSE 0 END",
-			latCol, lonCol, yi, yj, xi, xj))
+	// WKT needs bare numeric coords ("lon lat"), not floatLit's paren-wrapped form.
+	coord := func(f float64) string { return strconv.FormatFloat(f, 'g', -1, 64) }
+	verts := make([]string, 0, len(poly)+1)
+	for _, p := range poly {
+		verts = append(verts, coord(p.Longitude)+" "+coord(p.Latitude))
 	}
-	return "((" + strings.Join(terms, " + ") + ") % 2 = 1)"
+	verts = append(verts, coord(poly[0].Longitude)+" "+coord(poly[0].Latitude)) // close the ring
+	return fmt.Sprintf("ST_Contains(ST_GeomFromText('POLYGON((%s))'), ST_Point(%s, %s))",
+		strings.Join(verts, ", "), lonCol, latCol)
 }
 
 // floatLit formats f as a parenthesized DuckDB DOUBLE literal (parens keep a
