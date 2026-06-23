@@ -132,6 +132,22 @@ func noDataLocation() *model.Location {
 	return &model.Location{Latitude: 0, Longitude: 0, Hdop: 0}
 }
 
+// gapFillLocation returns loc when it is already set; otherwise the nearest fix at
+// or before ts from the lake backend (when it supports the lookup), or nil if none.
+// Callers apply noDataLocation() for the final nil → (0,0). Shared by GetSegments
+// and GetDailyActivity (the windowed aggregate → prior-fix → (0,0) fallback chain).
+func (r *Repository) gapFillLocation(ctx context.Context, subject string, loc *model.Location, ts time.Time) *model.Location {
+	if loc != nil {
+		return loc
+	}
+	if las, ok := r.query.(LocationAtSource); ok {
+		if got, err := las.LocationAt(ctx, subject, ts); err == nil && got != nil {
+			return got
+		}
+	}
+	return loc // nil
+}
+
 func mergeSegmentSignalRequests(defaultSet []*model.SegmentSignalRequest, clientRequests []*model.SegmentSignalRequest) []*model.SegmentSignalRequest {
 	key := func(r *model.SegmentSignalRequest) string {
 		if r == nil {
@@ -255,10 +271,6 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 		aggsBySeg = scatterAggsByIndex(batchAggs)
 	}
 
-	// locAt (lake backend only) gap-fills a trip's start/end location from the
-	// nearest fix before the boundary when no GPS fix landed inside the window.
-	locAt, hasLocAt := r.query.(LocationAtSource)
-
 	for i, seg := range segments {
 		if wantSummary {
 			var eventCounts []*qtypes.EventCount
@@ -289,26 +301,17 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 				seg.End.Value = summary.EndLocation
 			}
 		}
-		// Gap-fill a still-missing location from the nearest fix before the boundary
-		// (lake backend only) — strictly additive, only when the windowed aggregate
-		// found nothing in the trip window.
-		if hasLocAt {
-			if seg.Start.Value == nil {
-				if loc, err := locAt.LocationAt(ctx, did, seg.Start.Timestamp); err == nil && loc != nil {
-					seg.Start.Value = loc
-				}
-			}
-			if seg.End != nil && seg.End.Value == nil {
-				if loc, err := locAt.LocationAt(ctx, did, seg.End.Timestamp); err == nil && loc != nil {
-					seg.End.Value = loc
-				}
-			}
-		}
+		// Gap-fill a still-missing start/end location from the nearest fix before the
+		// boundary (lake backend only), then fall back to (0,0).
+		seg.Start.Value = r.gapFillLocation(ctx, did, seg.Start.Value, seg.Start.Timestamp)
 		if seg.Start.Value == nil {
 			seg.Start.Value = noDataLocation()
 		}
-		if seg.End != nil && seg.End.Value == nil {
-			seg.End.Value = noDataLocation()
+		if seg.End != nil {
+			seg.End.Value = r.gapFillLocation(ctx, did, seg.End.Value, seg.End.Timestamp)
+			if seg.End.Value == nil {
+				seg.End.Value = noDataLocation()
+			}
 		}
 	}
 
@@ -547,18 +550,8 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 		}
 		// Gap-fill the day's start/end location from the nearest prior fix (lake
 		// backend only) when neither a segment nor the windowed aggregate supplied one.
-		if las, ok := r.query.(LocationAtSource); ok {
-			if startLoc == nil {
-				if loc, err := las.LocationAt(ctx, did, dayStartUTC); err == nil && loc != nil {
-					startLoc = loc
-				}
-			}
-			if endLoc == nil {
-				if loc, err := las.LocationAt(ctx, did, dayEndUTC); err == nil && loc != nil {
-					endLoc = loc
-				}
-			}
-		}
+		startLoc = r.gapFillLocation(ctx, did, startLoc, dayStartUTC)
+		endLoc = r.gapFillLocation(ctx, did, endLoc, dayEndUTC)
 		if startLoc == nil {
 			startLoc = noDataLocation()
 		}
