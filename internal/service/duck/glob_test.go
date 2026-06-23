@@ -1,12 +1,10 @@
 package duck
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -18,76 +16,9 @@ func date(y int, m time.Month, d int) time.Time {
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
-func TestNewPathBuilder(t *testing.T) {
-	tests := []struct {
-		name   string
-		bucket string
-		want   string
-	}{
-		{name: "bare bucket name", bucket: "my-bucket", want: "s3://my-bucket/raw"},
-		{name: "s3 url", bucket: "s3://my-bucket", want: "s3://my-bucket/raw"},
-		{name: "s3 url trailing slash", bucket: "s3://my-bucket/", want: "s3://my-bucket/raw"},
-		{name: "file url", bucket: "file:///tmp/data", want: "/tmp/data/raw"},
-		{name: "absolute dir", bucket: "/tmp/data", want: "/tmp/data/raw"},
-		{name: "relative dir", bucket: "./data", want: "./data/raw"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, NewPathBuilder(tt.bucket).Join("raw"))
-		})
-	}
-}
-
-func TestRawGlobs(t *testing.T) {
-	from := time.Date(2026, time.June, 1, 10, 30, 0, 0, time.UTC)
-	to := time.Date(2026, time.June, 3, 1, 0, 0, 0, time.UTC)
-
-	globs := RawGlobs("my-bucket", "raw", []string{"dimo.status", "dimo.event"}, from, to)
-	want := []string{
-		"s3://my-bucket/raw/type=dimo.status/date=2026-06-01/*.parquet",
-		"s3://my-bucket/raw/type=dimo.event/date=2026-06-01/*.parquet",
-		"s3://my-bucket/raw/type=dimo.status/date=2026-06-02/*.parquet",
-		"s3://my-bucket/raw/type=dimo.event/date=2026-06-02/*.parquet",
-		"s3://my-bucket/raw/type=dimo.status/date=2026-06-03/*.parquet",
-		"s3://my-bucket/raw/type=dimo.event/date=2026-06-03/*.parquet",
-	}
-	assert.Equal(t, want, globs)
-}
-
-func TestRawGlobsSingleDay(t *testing.T) {
-	// Same calendar day with different times still yields the day's glob.
-	from := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
-	to := time.Date(2026, time.June, 1, 23, 59, 59, 0, time.UTC)
-
-	globs := RawGlobs("/data", "raw", []string{"dimo.status"}, from, to)
-	assert.Equal(t, []string{"/data/raw/type=dimo.status/date=2026-06-01/*.parquet"}, globs)
-}
-
-func TestRawGlobsNonUTCInput(t *testing.T) {
-	// 2026-06-02 01:00 +03:00 is 2026-06-01 22:00 UTC; days resolve in UTC.
-	loc := time.FixedZone("UTC+3", 3*60*60)
-	from := time.Date(2026, time.June, 2, 1, 0, 0, 0, loc)
-	globs := RawGlobs("b", "raw", []string{"t"}, from, from)
-	assert.Equal(t, []string{"s3://b/raw/type=t/date=2026-06-01/*.parquet"}, globs)
-}
-
-func TestRawGlobsEmptyRange(t *testing.T) {
-	assert.Empty(t, RawGlobs("b", "raw", []string{"t"}, date(2026, time.June, 2), date(2026, time.June, 1)))
-	assert.Empty(t, RawGlobs("b", "raw", nil, date(2026, time.June, 1), date(2026, time.June, 2)))
-}
-
-func TestDecodedSignalGlobs(t *testing.T) {
-	globs := DecodedSignalGlobs("my-bucket", "decoded/v1", date(2026, time.May, 31), date(2026, time.June, 1))
-	want := []string{
-		"s3://my-bucket/decoded/v1/signals/date=2026-05-31/*.parquet",
-		"s3://my-bucket/decoded/v1/signals/date=2026-06-01/*.parquet",
-	}
-	assert.Equal(t, want, globs)
-}
-
 func TestHashBucket(t *testing.T) {
 	// Hardcoded FNV-1a 32-bit reference values. These pin the on-disk
-	// bucket layout contract shared with the materializer — do not change.
+	// subject_bucket layout contract shared with the materializer — do not change.
 	assert.Equal(t, 197, HashBucket(""))
 	assert.Equal(t, 219, HashBucket(testSubject1))
 	assert.Equal(t, 110, HashBucket(testSubject2))
@@ -101,35 +32,11 @@ func TestHashBucket(t *testing.T) {
 	}
 }
 
-func TestLatestBucketPath(t *testing.T) {
-	got := LatestBucketPaths("my-bucket", "decoded/v1", testSubject1)[0]
-	assert.Equal(t, "s3://my-bucket/decoded/v1/latest/bucket=219/latest.parquet", got)
-
-	local := LatestBucketPaths("/data", "decoded/v1", testSubject2)[0]
-	assert.Equal(t, "/data/decoded/v1/latest/bucket=110/latest.parquet", local)
-}
-
-func TestReadParquetSQL(t *testing.T) {
-	got := ReadParquetSQL([]string{"s3://b/raw/type=t/date=2026-06-01/*.parquet", "/local/o'brien.parquet"})
-	want := "read_parquet(['s3://b/raw/type=t/date=2026-06-01/*.parquet', '/local/o''brien.parquet'], hive_partitioning=true, union_by_name=true)"
-	require.Equal(t, want, got)
-}
-
-// TestLatestBucketPath_ZeroPadded pins the %03d format: the materializer
-// writes bucket=042-style directories, so a %d reader would miss every
-// bucket below 100. Regression for a real reader/writer drift.
-func TestLatestBucketPath_ZeroPadded(t *testing.T) {
-	subject := ""
-	for i := range 100000 {
-		s := fmt.Sprintf("did:erc721:137:0xPad:%d", i)
-		if HashBucket(s) < 10 {
-			subject = s
-			break
-		}
-	}
-	require.NotEmpty(t, subject, "expected to find a low-bucket subject")
-	for _, path := range LatestBucketPaths("b", "decoded/v1", subject) {
-		assert.Contains(t, path, fmt.Sprintf("bucket=%03d/", HashBucket(subject)))
-		assert.Regexp(t, `bucket=00\d/`, path)
-	}
+// TestSubjectBucketPredicate pins the inlined partition-pruning predicate the
+// lake queries pair with the subject filter: "<prefix>subject_bucket = N" where
+// N = HashBucket(subject). The decoded tables are PARTITIONED BY subject_bucket
+// (CHD-1), so a drift here would silently stop pruning.
+func TestSubjectBucketPredicate(t *testing.T) {
+	assert.Equal(t, "subject_bucket = 219", subjectBucketPredicate("", testSubject1))
+	assert.Equal(t, "s.subject_bucket = 110", subjectBucketPredicate("s.", testSubject2))
 }

@@ -1,7 +1,6 @@
 package duck
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -16,16 +15,10 @@ import (
 // gRPC layer uses to map absence to codes.NotFound.
 var ErrNotFound = fmt.Errorf("cloud event not found: %w", sql.ErrNoRows)
 
-// DefaultRawScanWindowDays bounds date-unbounded raw queries. Older data is
-// reachable with explicit time bounds; LatestCloudEvent walks past it.
-const DefaultRawScanWindowDays = 90
-
-// latestWalkMaxDays caps the newest-first partition walk for latest-event
-// queries so a never-seen subject cannot trigger an unbounded scan.
-const latestWalkMaxDays = 400
-
 // RawFilter narrows a raw cloudevent scan. Zero values mean "no filter".
-// The eventrepo facade translates grpc.SearchOptions into this.
+// The eventrepo facade translates grpc.SearchOptions into this; the live
+// DuckLake fetch path (lake_fetch.go) builds its WHERE clause from it via
+// whereClauseQ.
 //
 // Field semantics:
 //   - Subject / Subjects: single equality vs. multi-value IN (Subjects takes
@@ -68,154 +61,6 @@ type RawFilter struct {
 	// oldest-first (ASC); false or unset means newest-first (DESC). Mirrors
 	// eventrepo.ListIndexesAdvanced's GetTimestampAsc decision.
 	TimestampAsc bool
-}
-
-// Raw queries raw cloudevent bundles (raw/type=T/date=D hive layout)
-// directly with DuckDB — the replacement for the former cloud_event
-// index plus per-row parquet seeks. Data comes back inline.
-//
-// Raw is the legacy bucket/hive raw-event reader (QUERY_BACKEND=duckdb), retired
-// in favor of LakeEventService. It does NOT apply tombstone voiding; the live
-// DuckLake fetch path does (lake_fetch.go voidingClause). Reads here see both an
-// attestation and its tombstone — acceptable only because this path is unused in
-// ducklake mode and slated for deletion post-cutover.
-type Raw struct {
-	svc       *Service
-	bucket    string
-	rawPrefix string
-}
-
-// NewRaw builds a Raw query service over the given bucket and prefix.
-func NewRaw(svc *Service, bucket, rawPrefix string) *Raw {
-	if rawPrefix == "" {
-		rawPrefix = "raw"
-	}
-	return &Raw{svc: svc, bucket: bucket, rawPrefix: rawPrefix}
-}
-
-// raw_events projection is shared via RawEventColumns (lake_fetch.go), the single
-// source of truth that also matches cloudevent/parquet.ParquetRow's field order.
-
-// ListCloudEvents returns events matching filter, newest first, capped at
-// limit. Duplicate rows (at-least-once ingest, compaction grace window)
-// collapse on the header uniqueness key.
-func (r *Raw) ListCloudEvents(ctx context.Context, filter RawFilter, limit int) ([]cloudevent.StoredEvent, error) {
-	from, to := r.scanWindow(filter)
-	globs, err := r.existingGlobs(ctx, filter.Types, from, to)
-	if err != nil || len(globs) == 0 {
-		return nil, err
-	}
-	return r.query(ctx, globs, filter, limit)
-}
-
-// LatestCloudEvent walks date partitions newest-first in week chunks and
-// returns the most recent matching event within latestWalkMaxDays.
-func (r *Raw) LatestCloudEvent(ctx context.Context, filter RawFilter) (cloudevent.StoredEvent, error) {
-	to := time.Now().UTC()
-	if !filter.Before.IsZero() {
-		to = filter.Before
-	}
-	floor := to.AddDate(0, 0, -latestWalkMaxDays)
-	if !filter.After.IsZero() && filter.After.After(floor) {
-		floor = filter.After
-	}
-
-	// >= floor (not >): a zero-width window (After == Before on one day)
-	// must still scan that day's partition.
-	for chunkEnd := to; !chunkEnd.Before(floor); chunkEnd = chunkEnd.AddDate(0, 0, -7) {
-		chunkStart := chunkEnd.AddDate(0, 0, -7)
-		if chunkStart.Before(floor) {
-			chunkStart = floor
-		}
-		globs, err := r.existingGlobs(ctx, filter.Types, chunkStart, chunkEnd)
-		if err != nil {
-			return cloudevent.StoredEvent{}, err
-		}
-		if len(globs) == 0 {
-			continue
-		}
-		events, err := r.query(ctx, globs, filter, 1)
-		if err != nil {
-			return cloudevent.StoredEvent{}, err
-		}
-		if len(events) > 0 {
-			return events[0], nil
-		}
-	}
-	return cloudevent.StoredEvent{}, fmt.Errorf("no cloud event found for subject %q within %d days: %w", filter.Subject, latestWalkMaxDays, ErrNotFound)
-}
-
-// AvailableCloudEventTypes returns the distinct event types present for a
-// subject in the window.
-func (r *Raw) AvailableCloudEventTypes(ctx context.Context, subject string, from, to time.Time) ([]string, error) {
-	filter := RawFilter{Subject: subject, After: from, Before: to}
-	winFrom, winTo := r.scanWindow(filter)
-	globs, err := r.existingGlobs(ctx, nil, winFrom, winTo)
-	if err != nil || len(globs) == 0 {
-		return nil, err
-	}
-
-	where, args := whereClause(filter)
-	query := fmt.Sprintf("SELECT DISTINCT type FROM %s WHERE %s ORDER BY type", ReadParquetSQL(globs), where)
-	rows, err := r.svc.DB().QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("querying available types: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var types []string
-	for rows.Next() {
-		var t string
-		if err := rows.Scan(&t); err != nil {
-			return nil, fmt.Errorf("scanning type: %w", err)
-		}
-		types = append(types, t)
-	}
-	return types, rows.Err()
-}
-
-// scanWindow applies the default lookback when the caller gave no bounds.
-func (r *Raw) scanWindow(filter RawFilter) (time.Time, time.Time) {
-	to := time.Now().UTC()
-	if !filter.Before.IsZero() {
-		to = filter.Before
-	}
-	from := to.AddDate(0, 0, -DefaultRawScanWindowDays)
-	if !filter.After.IsZero() {
-		from = filter.After
-	}
-	return from, to
-}
-
-// existingGlobs expands per-day/per-type patterns through DuckDB's glob()
-// so read_parquet never sees a zero-match pattern (which errors). An empty
-// type list scans every type= partition for the window.
-func (r *Raw) existingGlobs(ctx context.Context, types []string, from, to time.Time) ([]string, error) {
-	if len(types) == 0 {
-		types = []string{"*"}
-	}
-	patterns := RawGlobs(r.bucket, r.rawPrefix, types, from, to)
-	if len(patterns) == 0 {
-		return nil, nil
-	}
-	parts := make([]string, len(patterns))
-	for i, p := range patterns {
-		parts[i] = "SELECT file FROM glob(" + sqlString(p) + ")"
-	}
-	stmt := strings.Join(parts, " UNION ALL ")
-	rows, err := r.svc.DB().QueryContext(ctx, stmt)
-	if err != nil {
-		return nil, fmt.Errorf("expanding raw globs: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var files []string
-	for rows.Next() {
-		var f string
-		if err := rows.Scan(&f); err != nil {
-			return nil, fmt.Errorf("scanning glob result: %w", err)
-		}
-		files = append(files, f)
-	}
-	return files, rows.Err()
 }
 
 // whereClause builds a WHERE fragment for filter with unqualified column names.
@@ -315,8 +160,6 @@ func whereClauseQ(filter RawFilter, prefix string) (string, []any) {
 
 	if !filter.After.IsZero() {
 		// Strict greater-than (timestamp > ?) for After-boundary semantics.
-		// NOTE: the legacy hive Raw path shares this function; it is being
-		// retired, so the strict-boundary semantics take precedence.
 		conds = append(conds, col("time")+" > ?")
 		args = append(args, filter.After.UTC())
 	}
@@ -325,38 +168,6 @@ func whereClauseQ(filter RawFilter, prefix string) (string, []any) {
 		args = append(args, filter.Before.UTC())
 	}
 	return strings.Join(conds, " AND "), args
-}
-
-func (r *Raw) query(ctx context.Context, globs []string, filter RawFilter, limit int) ([]cloudevent.StoredEvent, error) {
-	where, args := whereClause(filter)
-	// Over-fetch headroom so duplicate collapse still fills the limit.
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY time DESC LIMIT %d",
-		RawEventColumns, ReadParquetSQL(globs), where, limit*2)
-
-	rows, err := r.svc.DB().QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("querying raw cloudevents: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-
-	seen := map[string]struct{}{}
-	var events []cloudevent.StoredEvent
-	for rows.Next() && len(events) < limit {
-		ev, err := scanStoredEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		key := ev.Key()
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		events = append(events, ev)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return events, nil
 }
 
 // rowScanner abstracts *sql.Rows for scanStoredEvent.

@@ -1,8 +1,9 @@
 // segments_graphql_test.go covers the telemetry-api segments query surface
 // through REAL gqlgen execution: the segments and dailyActivity queries run
-// against a Repository composed of the real DuckDB backend (materialized
-// decoded parquet, exactly as the parse-on-read pipeline produces it) and a
-// recording fake SegmentsBackend that returns canned segment windows.
+// against a Repository composed of the real DuckLake backend (lake.signals,
+// decoded by the DuckLake materializer exactly as the parse-on-read pipeline
+// produces it) and a recording fake SegmentsBackend that returns canned segment
+// windows.
 //
 // Segment DETECTION is supplied by the recording fake here;
 // everything around it — argument validation, config plumbing, default
@@ -129,14 +130,11 @@ func cannedOngoing(start time.Time, duration int) *model.Segment {
 }
 
 // newSegmentsGraphQLClient mirrors newGraphQLClient (dis_parity_test.go) but
-// composes the real DuckDB backend with the provided SegmentsBackend fake.
-func newSegmentsGraphQLClient(t *testing.T, root string, segs repositories.SegmentsBackend) *client.Client {
+// composes the real DuckLake backend (lake.signals on svc) with the provided
+// SegmentsBackend fake.
+func newSegmentsGraphQLClient(t *testing.T, svc *duck.Service, segs repositories.SegmentsBackend) *client.Client {
 	t.Helper()
-	svc, err := duck.NewService(duck.Config{S3Enabled: false})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = svc.Close() })
-
-	repo, err := repositories.NewRepository(repositories.ComposeBackend(duck.NewQueries(svc, root), segs))
+	repo, err := repositories.NewRepository(repositories.ComposeBackend(duck.NewLakeQueries(svc), segs))
 	require.NoError(t, err)
 
 	cfg := graph.Config{Resolvers: &graph.Resolver{SignalRepo: repo}}
@@ -152,39 +150,43 @@ func newSegmentsGraphQLClient(t *testing.T, root string, segs repositories.Segme
 	return client.New(srv)
 }
 
-// buildSegmentsFixture materializes decoded data for segmentsVehicle: raw
-// dimo.status bundles → materializer → decoded parquet under a fresh root,
-// the same invocation pattern as TestPipelineEndToEnd.
-func buildSegmentsFixture(t *testing.T) string {
+// emptySegmentsService returns a DuckLake service with the empty raw_events
+// table — for tests that never reach the signal backend (validation,
+// config-plumb-through, future-to clamp).
+func emptySegmentsService(t *testing.T) *duck.Service {
+	t.Helper()
+	return newLakeService(t, t.TempDir())
+}
+
+// buildSegmentsFixture materializes decoded speed signals for segmentsVehicle:
+// the SAME dimo.status events as before are seeded into lake.raw_events and the
+// DuckLake materializer decodes them into lake.signals (mirrors
+// tests/ducklake_query_test.go), so the per-segment aggregations run over
+// lake-sourced data identical to the bucket fixture's.
+func buildSegmentsFixture(t *testing.T) *duck.Service {
 	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
-	store := newFSStore(t, root)
+	svc := newLakeService(t, t.TempDir())
+	db := svc.DB()
 
-	writeRawBundle(t, store, segDay, 1,
-		deviceStatus("seg-drive", segmentsVehicle, driveStart.Add(5*time.Minute),
-			speedAt(driveStart.Add(5*time.Minute), 40),
-			speedAt(driveStart.Add(10*time.Minute), 80),
-			speedAt(driveStart.Add(20*time.Minute), 65)),
-		deviceStatus("seg-short", segmentsVehicle, shortStart.Add(5*time.Minute),
-			speedAt(shortStart.Add(5*time.Minute), 55)),
-		deviceStatus("seg-idle", segmentsVehicle, idleStart.Add(2*time.Minute),
-			speedAt(idleStart.Add(2*time.Minute), 0),
-			speedAt(idleStart.Add(5*time.Minute), 0)),
-	)
+	seedRawStatus(t, db, "seg-drive", segmentsVehicle, driveStart.Add(5*time.Minute),
+		speedAt(driveStart.Add(5*time.Minute), 40),
+		speedAt(driveStart.Add(10*time.Minute), 80),
+		speedAt(driveStart.Add(20*time.Minute), 65))
+	seedRawStatus(t, db, "seg-short", segmentsVehicle, shortStart.Add(5*time.Minute),
+		speedAt(shortStart.Add(5*time.Minute), 55))
+	seedRawStatus(t, db, "seg-idle", segmentsVehicle, idleStart.Add(2*time.Minute),
+		speedAt(idleStart.Add(2*time.Minute), 0),
+		speedAt(idleStart.Add(5*time.Minute), 0))
 
+	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
+	require.NoError(t, err)
 	runner := materializer.New(materializer.Config{
 		ChainID:           137,
 		VehicleNFTAddress: vehicleNFT,
-	}, store, zerolog.Nop())
-	processed, err := runner.RunOnce(ctx)
-	require.NoError(t, err)
-	require.Positive(t, processed)
-	for processed != 0 {
-		processed, err = runner.RunOnce(ctx)
-		require.NoError(t, err)
-	}
-	return root
+	}, nil, zerolog.Nop()).WithDuckLake(mat)
+	require.Positive(t, drainRunner(t, ctx, runner))
+	return svc
 }
 
 const segmentsQuery = `query Segments($subject: String!, $from: Time!, $to: Time!, $mechanism: DetectionMechanism!, $config: SegmentConfig, $signalRequests: [SegmentSignalRequest!], $eventRequests: [SegmentEventRequest!], $limit: Int, $after: Time) {
@@ -270,7 +272,7 @@ func parseGQLTime(t *testing.T, s string) time.Time {
 // materialized signals (hand-computed expectations above). IDLING
 // additionally exercises the >0-speed segment filter.
 func TestSegmentsGraphQL_AllMechanisms(t *testing.T) {
-	root := buildSegmentsFixture(t)
+	svc := buildSegmentsFixture(t)
 
 	drivingCanned := func() []*model.Segment {
 		return []*model.Segment{
@@ -325,7 +327,7 @@ func TestSegmentsGraphQL_AllMechanisms(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(string(tc.mechanism), func(t *testing.T) {
 			fake := &fakeSegments{canned: tc.canned}
-			gql := newSegmentsGraphQLClient(t, root, fake)
+			gql := newSegmentsGraphQLClient(t, svc, fake)
 
 			var resp segmentsResp
 			gql.MustPost(segmentsQuery, &resp,
@@ -380,11 +382,11 @@ func TestSegmentsGraphQL_AllMechanisms(t *testing.T) {
 // plus a duplicate of the default speed MAX, asserting the extra aggregation
 // is computed alongside the defaults and the duplicate is not doubled.
 func TestSegmentsGraphQL_SignalRequestsMerge(t *testing.T) {
-	root := buildSegmentsFixture(t)
+	svc := buildSegmentsFixture(t)
 	fake := &fakeSegments{canned: []*model.Segment{
 		cannedComplete(driveStart, driveEnd, driveLocStart, driveLocEnd, false),
 	}}
-	gql := newSegmentsGraphQLClient(t, root, fake)
+	gql := newSegmentsGraphQLClient(t, svc, fake)
 
 	var resp segmentsResp
 	gql.MustPost(segmentsQuery, &resp,
@@ -410,11 +412,11 @@ func TestSegmentsGraphQL_SignalRequestsMerge(t *testing.T) {
 // materialized events: buildEventSummary returns one entry per requested
 // name with count 0.
 func TestSegmentsGraphQL_EventRequests(t *testing.T) {
-	root := buildSegmentsFixture(t)
+	svc := buildSegmentsFixture(t)
 	fake := &fakeSegments{canned: []*model.Segment{
 		cannedComplete(driveStart, driveEnd, driveLocStart, driveLocEnd, false),
 	}}
-	gql := newSegmentsGraphQLClient(t, root, fake)
+	gql := newSegmentsGraphQLClient(t, svc, fake)
 
 	var resp segmentsResp
 	gql.MustPost(segmentsQuery, &resp,
@@ -448,7 +450,7 @@ func TestSegmentsGraphQL_ConfigPlumbThrough(t *testing.T) {
 	} {
 		t.Run(string(mechanism), func(t *testing.T) {
 			fake := &fakeSegments{}
-			gql := newSegmentsGraphQLClient(t, t.TempDir(), fake)
+			gql := newSegmentsGraphQLClient(t, emptySegmentsService(t), fake)
 
 			var resp segmentsResp
 			gql.MustPost(segmentsQuery, &resp,
@@ -543,7 +545,7 @@ func TestSegmentsGraphQL_ValidationErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeSegments{}
-			gql := newSegmentsGraphQLClient(t, t.TempDir(), fake)
+			gql := newSegmentsGraphQLClient(t, emptySegmentsService(t), fake)
 
 			opts := []client.Option{
 				client.Var("subject", segmentsVehicle),
@@ -572,7 +574,7 @@ func TestSegmentsGraphQL_ValidationErrors(t *testing.T) {
 // backend receives to ≈ now.
 func TestSegmentsGraphQL_FutureToClampedToNow(t *testing.T) {
 	fake := &fakeSegments{}
-	gql := newSegmentsGraphQLClient(t, t.TempDir(), fake)
+	gql := newSegmentsGraphQLClient(t, emptySegmentsService(t), fake)
 
 	from := time.Now().UTC().Add(-2 * time.Hour)
 	futureTo := time.Now().UTC().Add(48 * time.Hour)
@@ -596,7 +598,7 @@ func TestSegmentsGraphQL_FutureToClampedToNow(t *testing.T) {
 // 2 → first 2 returned, each still summary-enriched) and after-cursor
 // pagination (the backend receives from advanced to after+1ns).
 func TestSegmentsGraphQL_LimitAndAfter(t *testing.T) {
-	root := buildSegmentsFixture(t)
+	svc := buildSegmentsFixture(t)
 
 	t.Run("limit truncates", func(t *testing.T) {
 		fake := &fakeSegments{canned: []*model.Segment{
@@ -604,7 +606,7 @@ func TestSegmentsGraphQL_LimitAndAfter(t *testing.T) {
 			cannedComplete(shortStart, shortEnd, nil, nil, false),
 			cannedComplete(idleStart, idleEnd, nil, nil, false),
 		}}
-		gql := newSegmentsGraphQLClient(t, root, fake)
+		gql := newSegmentsGraphQLClient(t, svc, fake)
 
 		var resp segmentsResp
 		gql.MustPost(segmentsQuery, &resp,
@@ -627,7 +629,7 @@ func TestSegmentsGraphQL_LimitAndAfter(t *testing.T) {
 
 	t.Run("after advances from", func(t *testing.T) {
 		fake := &fakeSegments{}
-		gql := newSegmentsGraphQLClient(t, root, fake)
+		gql := newSegmentsGraphQLClient(t, svc, fake)
 
 		var resp segmentsResp
 		gql.MustPost(segmentsQuery, &resp,
@@ -651,7 +653,7 @@ func TestSegmentsGraphQL_LimitAndAfter(t *testing.T) {
 // overlap duration from the canned segments, real DuckDB day-level signal
 // aggregates, and day-boundary start/end timestamps.
 func TestDailyActivityGraphQL_AllowedMechanisms(t *testing.T) {
-	root := buildSegmentsFixture(t)
+	svc := buildSegmentsFixture(t)
 
 	for _, mechanism := range []model.DetectionMechanism{
 		model.DetectionMechanismIgnitionDetection,
@@ -663,7 +665,7 @@ func TestDailyActivityGraphQL_AllowedMechanisms(t *testing.T) {
 				cannedComplete(driveStart, driveEnd, driveLocStart, driveLocEnd, false), // 1800s
 				cannedComplete(idleStart, idleEnd, nil, nil, false),                     // 600s
 			}}
-			gql := newSegmentsGraphQLClient(t, root, fake)
+			gql := newSegmentsGraphQLClient(t, svc, fake)
 
 			var resp dailyActivityResp
 			gql.MustPost(dailyActivityQuery, &resp,
@@ -714,7 +716,7 @@ func TestDailyActivityGraphQL_Rejections(t *testing.T) {
 	} {
 		t.Run(string(mechanism), func(t *testing.T) {
 			fake := &fakeSegments{}
-			gql := newSegmentsGraphQLClient(t, t.TempDir(), fake)
+			gql := newSegmentsGraphQLClient(t, emptySegmentsService(t), fake)
 
 			var resp dailyActivityResp
 			err := gql.Post(dailyActivityQuery, &resp,
@@ -731,7 +733,7 @@ func TestDailyActivityGraphQL_Rejections(t *testing.T) {
 
 	t.Run("invalid timezone", func(t *testing.T) {
 		fake := &fakeSegments{}
-		gql := newSegmentsGraphQLClient(t, t.TempDir(), fake)
+		gql := newSegmentsGraphQLClient(t, emptySegmentsService(t), fake)
 
 		var resp dailyActivityResp
 		err := gql.Post(dailyActivityQuery, &resp,
@@ -754,12 +756,12 @@ func TestDailyActivityGraphQL_Rejections(t *testing.T) {
 // timestamp is the zone's midnight, not UTC's) and segment overlap math
 // still works.
 func TestDailyActivityGraphQL_Timezone(t *testing.T) {
-	root := buildSegmentsFixture(t)
+	svc := buildSegmentsFixture(t)
 	fake := &fakeSegments{canned: []*model.Segment{
 		cannedComplete(driveStart, driveEnd, driveLocStart, driveLocEnd, false),
 		cannedComplete(idleStart, idleEnd, nil, nil, false),
 	}}
-	gql := newSegmentsGraphQLClient(t, root, fake)
+	gql := newSegmentsGraphQLClient(t, svc, fake)
 
 	var resp dailyActivityResp
 	gql.MustPost(dailyActivityQuery, &resp,

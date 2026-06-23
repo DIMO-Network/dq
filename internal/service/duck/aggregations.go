@@ -58,9 +58,7 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 		"s.subject = ?",
 		"s.timestamp >= " + tsMicroLiteral(aggArgs.FromTS),
 		"s.timestamp < " + tsMicroLiteral(aggArgs.ToTS),
-	}
-	if q.lake {
-		conds = append(conds, subjectBucketPredicate("s.", subject)) // partition pruning (CHD-1)
+		subjectBucketPredicate("s.", subject), // partition pruning (CHD-1)
 	}
 	args := []any{subject}
 	if srcCond, srcArgs := signalSourceCond("s.source", aggArgs.Filter); srcCond != "" {
@@ -137,10 +135,7 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 		return result, nil
 	}
 
-	bucketSQL := ""
-	if q.lake {
-		bucketSQL = " AND " + subjectBucketPredicate("s.", subject) // partition pruning (CHD-1)
-	}
+	bucketSQL := " AND " + subjectBucketPredicate("s.", subject) // partition pruning (CHD-1)
 	inner := "SELECT " + segmentIndexCaseSQL("s.timestamp", ranges) + " AS seg_idx, " + signalSrcColumns +
 		" FROM " + table + " AS s JOIN " + aggValuesTable(floatArgs, nil, locationArgs) +
 		" ON s.name = agg_table.name" +

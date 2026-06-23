@@ -10,58 +10,28 @@ import (
 	"github.com/DIMO-Network/dq/internal/graph/model"
 )
 
-// Queries answers the signal/latest/summary/event queries served by
-// the query layer from parquet files written by
-// the materializer:
-//
-//   - decoded/v1/signals/date=YYYY-MM-DD/*.parquet  (full-history signals)
-//   - decoded/v1/latest/bucket=NN/latest.parquet    (per-(subject,source,name) latest)
-//   - decoded/v1/summary/bucket=NN/summary.parquet  (per-(subject,source,name) counts)
-//   - decoded/v1/events/date=YYYY-MM-DD/*.parquet   (full-history events)
+// Queries answers the signal/latest/summary/event queries served by the query
+// layer from the DuckLake catalog tables (lake.signals / lake.events) attached
+// on the service. Latest/summary are computed from the base table (or the
+// signals_latest rollup); there are no precomputed bucket files.
 //
 // Method signatures mirror ch.Service so the repository layer can swap
 // implementations. Segment detection and cloudevent queries are out of scope.
 type Queries struct {
-	svc           *Service
-	bucket        string
-	decodedPrefix string
-	// lake routes reads at the DuckLake catalog tables lake.signals /
-	// lake.events instead of bucket parquet globs. Latest/summary are then
-	// computed from the base table (no precomputed bucket files).
-	lake bool
-}
-
-// NewQueries creates a query layer over the given DuckDB service and parquet
-// bucket. An empty bucket falls back to the service config's Bucket.
-func NewQueries(svc *Service, bucket string) *Queries {
-	cfg := svc.Config()
-	if bucket == "" {
-		bucket = cfg.Bucket
-	}
-	return &Queries{
-		svc:           svc,
-		bucket:        bucket,
-		decodedPrefix: cfg.DecodedPrefix,
-	}
+	svc *Service
 }
 
 // NewLakeQueries creates a query layer that reads the DuckLake catalog tables
-// (lake.signals / lake.events) attached on svc. The same SQL builders serve
-// both modes; only the FROM source and the latest/summary computation differ.
+// (lake.signals / lake.events) attached on svc.
 func NewLakeQueries(svc *Service) *Queries {
-	return &Queries{svc: svc, lake: true}
+	return &Queries{svc: svc}
 }
 
-// signalTable returns the FROM source for signal reads over [from, to]:
-// the DuckLake table in lake mode, else a read_parquet over decoded globs.
-// In bucket mode "" means no matching files (caller returns empty).
-func (q *Queries) signalTable(ctx context.Context, from, to time.Time) (string, error) {
-	if q.lake {
-		// Aggregations read through the deduped source (CHD-2); the caller
-		// aliases it ("AS s"), so it must be a bare parenthesized subquery.
-		return lakeSignalsDeduped, nil
-	}
-	return q.tableExpr(ctx, q.signalGlobs(from, to))
+// signalTable returns the FROM source for signal reads: the deduped DuckLake
+// signals source. Aggregations read through it (CHD-2); the caller aliases it
+// ("AS s"), so it must be a bare parenthesized subquery.
+func (q *Queries) signalTable(_ context.Context, _, _ time.Time) (string, error) {
+	return lakeSignalsDeduped, nil
 }
 
 // lakeEventsDeduped is the canonical DuckLake decoded-event source: lake.events
@@ -76,113 +46,11 @@ func (q *Queries) signalTable(ctx context.Context, from, to time.Time) (string, 
 const lakeEventsDeduped = `(SELECT * FROM lake.events ` +
 	`QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, timestamp, name, source ORDER BY cloud_event_id) = 1)`
 
-// eventTable is signalTable for the decoded events source. A zero from/to
-// means all-time (event summaries): the whole lake.events table, or the
-// all-dates glob in bucket mode.
-func (q *Queries) eventTable(ctx context.Context, from, to time.Time) (string, error) {
-	if q.lake {
-		// Deduped like the signal path; the caller aliases it, so it must be a
-		// bare parenthesized subquery.
-		return lakeEventsDeduped, nil
-	}
-	if from.IsZero() && to.IsZero() {
-		return q.tableExpr(ctx, []string{AllEventsGlob(q.bucket, q.decodedPrefix)})
-	}
-	return q.tableExpr(ctx, q.eventGlobs(from, to))
-}
-
-// SummaryBucketPaths returns the summary parquet patterns for a subject —
-// single-replica path plus the sharded namespace; sum/min/max aggregations
-// merge shard files natively.
-func SummaryBucketPaths(bucket, decodedPrefix, subjectDID string) []string {
-	pb := NewPathBuilder(bucket)
-	b := fmt.Sprintf("bucket=%03d", HashBucket(subjectDID))
-	return []string{
-		pb.Join(decodedPrefix, "summary", b, "summary.parquet"),
-		pb.Join(decodedPrefix, "summary", "shard=*", b, "summary.parquet"),
-	}
-}
-
-// EventGlobs returns explicit per-day parquet globs for decoded events:
-// <root>/<decodedPrefix>/events/date=<YYYY-MM-DD>/*.parquet.
-// The day range [from, to] is inclusive in UTC.
-func EventGlobs(bucket, decodedPrefix string, from, to time.Time) []string {
-	pb := NewPathBuilder(bucket)
-	days := daysBetween(from, to)
-	globs := make([]string, 0, len(days))
-	for _, day := range days {
-		globs = append(globs, pb.Join(decodedPrefix, "events", "date="+day, "*.parquet"))
-	}
-	return globs
-}
-
-// AllEventsGlob returns a glob matching decoded events across all dates,
-// for all-time queries like event summaries.
-func AllEventsGlob(bucket, decodedPrefix string) string {
-	pb := NewPathBuilder(bucket)
-	return pb.Join(decodedPrefix, "events", "date=*", "*.parquet")
-}
-
-func (q *Queries) latestPaths(subject string) []string {
-	return LatestBucketPaths(q.bucket, q.decodedPrefix, subject)
-}
-
-func (q *Queries) summaryPaths(subject string) []string {
-	return SummaryBucketPaths(q.bucket, q.decodedPrefix, subject)
-}
-
-func (q *Queries) signalGlobs(from, to time.Time) []string {
-	return DecodedSignalGlobs(q.bucket, q.decodedPrefix, from, to)
-}
-
-func (q *Queries) eventGlobs(from, to time.Time) []string {
-	return EventGlobs(q.bucket, q.decodedPrefix, from, to)
-}
-
-// expandGlobs resolves glob patterns to concrete files using DuckDB's glob()
-// table function. read_parquet errors out if ANY pattern in its list matches
-// zero files, so partitions with no data (missing days, absent latest buckets)
-// must be pruned before querying. glob() returns zero rows for a no-match
-// pattern instead of erroring, on both local filesystems and S3.
-func (q *Queries) expandGlobs(ctx context.Context, patterns []string) ([]string, error) {
-	if len(patterns) == 0 {
-		return nil, nil
-	}
-	parts := make([]string, len(patterns))
-	for i, p := range patterns {
-		parts[i] = "SELECT file FROM glob(" + sqlString(p) + ")"
-	}
-	stmt := strings.Join(parts, " UNION ALL ")
-	rows, err := q.svc.db.QueryContext(ctx, stmt)
-	if err != nil {
-		return nil, fmt.Errorf("failed expanding parquet globs: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var files []string
-	for rows.Next() {
-		var f string
-		if err := rows.Scan(&f); err != nil {
-			return nil, fmt.Errorf("failed scanning glob row: %w", err)
-		}
-		files = append(files, f)
-	}
-	if rows.Err() != nil {
-		return nil, fmt.Errorf("glob row error: %w", rows.Err())
-	}
-	return files, nil
-}
-
-// tableExpr returns a read_parquet table expression over all files matched by
-// the patterns, or "" when no files exist (callers return empty results).
-func (q *Queries) tableExpr(ctx context.Context, patterns []string) (string, error) {
-	files, err := q.expandGlobs(ctx, patterns)
-	if err != nil {
-		return "", err
-	}
-	if len(files) == 0 {
-		return "", nil
-	}
-	return ReadParquetSQL(files), nil
+// eventTable is signalTable for the decoded events source: the deduped
+// lake.events. Deduped like the signal path; the caller aliases it, so it must
+// be a bare parenthesized subquery.
+func (q *Queries) eventTable(_ context.Context, _, _ time.Time) (string, error) {
+	return lakeEventsDeduped, nil
 }
 
 // tsMicroLiteral formats a time.Time as a DuckDB TIMESTAMP literal with

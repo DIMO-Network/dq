@@ -7,9 +7,9 @@
 // decoded values (speed 31.24609375, powertrainType "COMBUSTION", oil level
 // "LOW", tire pressures, …) are hand-verified in model-garage and are
 // exactly what dis persisted and served through dq's GraphQL
-// API. Here the same payload flows through the NEW pipeline — raw parquet →
-// materializer → DuckDB — and a real gqlgen execution of signalsLatest must
-// return those exact numbers.
+// API. Here the same payload flows through the NEW pipeline — raw events seeded
+// into the DuckLake catalog → DuckLake materializer → lake.signals — and a real
+// gqlgen execution of signalsLatest must return those exact numbers.
 package tests
 
 import (
@@ -112,6 +112,17 @@ func loadRuptelaFixture(t *testing.T) cloudevent.StoredEvent {
 	}}
 }
 
+// seedRawEvent inserts one raw cloudevent into lake.raw_events exactly as din's
+// sink writes it (empty strings, not NULL, for absent header columns).
+func seedRawEvent(t *testing.T, svc *duck.Service, ev cloudevent.StoredEvent) {
+	t.Helper()
+	_, err := svc.DB().ExecContext(context.Background(),
+		`INSERT INTO lake.raw_events (subject, "time", type, id, source, producer, data_content_type, data_version, extras, data)
+		 VALUES (?, ?, ?, ?, ?, ?, '', ?, '{}', ?)`,
+		ev.Subject, ev.Time.UTC(), ev.Type, ev.ID, ev.Source, ev.Producer, ev.DataVersion, string(ev.Data))
+	require.NoError(t, err)
+}
+
 // passDirective lets every directive through: auth is exercised by dq's
 // own middleware tests, parity here is about data values.
 func passDirective(ctx context.Context, _ any, next graphql.Resolver) (any, error) {
@@ -122,13 +133,12 @@ func passPrivilegeDirective(ctx context.Context, _ any, next graphql.Resolver, _
 	return next(ctx)
 }
 
-func newGraphQLClient(t *testing.T, root string) *client.Client {
+// newGraphQLClient composes the real DuckLake-backed Repository (lake.signals /
+// lake.events on svc) into a gqlgen executable schema, mirroring the production
+// wiring (newQueryBackend → duck.NewLakeQueries).
+func newGraphQLClient(t *testing.T, svc *duck.Service) *client.Client {
 	t.Helper()
-	svc, err := duck.NewService(duck.Config{S3Enabled: false})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = svc.Close() })
-
-	repo, err := repositories.NewRepository(repositories.ComposeBackend(duck.NewQueries(svc, root), nil))
+	repo, err := repositories.NewRepository(repositories.ComposeBackend(duck.NewLakeQueries(svc), nil))
 	require.NoError(t, err)
 
 	cfg := graph.Config{Resolvers: &graph.Resolver{SignalRepo: repo}}
@@ -144,32 +154,34 @@ func newGraphQLClient(t *testing.T, root string) *client.Client {
 	return client.New(srv)
 }
 
-func TestDISParity_RuptelaPayloadThroughGraphQL(t *testing.T) {
+// materializeRuptela seeds the Ruptela payload into lake.raw_events and runs the
+// DuckLake materializer (real Ruptela decode module) so lake.signals holds the
+// decoded values dis produced.
+func materializeRuptela(t *testing.T) *duck.Service {
+	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
-	store := newFSStore(t, root)
+	svc := newLakeService(t, t.TempDir())
 
-	// Stage 1: the real device payload lands as a raw bundle, exactly as
-	// din's sink writes it.
-	fixture := loadRuptelaFixture(t)
-	writeRawBundle(t, store, fixture.Time, 1, fixture)
+	seedRawEvent(t, svc, loadRuptelaFixture(t))
 
-	// Stage 2: materializer decodes post fact with the real Ruptela module.
 	materializer.RegisterVendorModules(materializer.VendorConfig{
 		ChainID:           137,
 		VehicleNFTAddress: vehicleNFT,
 	})
-	runner := materializer.New(materializer.Config{
-		ChainID:           137,
-		VehicleNFTAddress: vehicleNFT,
-	}, store, zerolog.Nop())
-	processed, err := runner.RunOnce(ctx)
+	mat, err := materializer.NewDuckLakeMaterializer(ctx, svc.DB(), zerolog.Nop())
 	require.NoError(t, err)
-	require.Positive(t, processed)
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
+		WithDuckLake(mat)
+	require.Positive(t, drainRunner(t, ctx, runner))
+	return svc
+}
 
-	// Stage 3: a REAL gqlgen execution of signalsLatest must return the
-	// exact values dis produced for this payload.
-	gql := newGraphQLClient(t, root)
+func TestDISParity_RuptelaPayloadThroughGraphQL(t *testing.T) {
+	svc := materializeRuptela(t)
+
+	// A REAL gqlgen execution of signalsLatest must return the exact values dis
+	// produced for this payload.
+	gql := newGraphQLClient(t, svc)
 
 	var resp struct {
 		SignalsLatest struct {
@@ -264,19 +276,9 @@ func TestDISParity_RuptelaPayloadThroughGraphQL(t *testing.T) {
 // payload's GPS block must surface through the decoded location columns
 // with the exact lat/lon/hdop dis produced.
 func TestDISParity_LocationSignals(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	store := newFSStore(t, root)
+	svc := materializeRuptela(t)
 
-	fixture := loadRuptelaFixture(t)
-	writeRawBundle(t, store, fixture.Time, 1, fixture)
-
-	materializer.RegisterVendorModules(materializer.VendorConfig{ChainID: 137, VehicleNFTAddress: vehicleNFT})
-	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, store, zerolog.Nop())
-	_, err := runner.RunOnce(ctx)
-	require.NoError(t, err)
-
-	gql := newGraphQLClient(t, root)
+	gql := newGraphQLClient(t, svc)
 	var resp struct {
 		SignalsLatest struct {
 			CurrentLocationCoordinates struct {
