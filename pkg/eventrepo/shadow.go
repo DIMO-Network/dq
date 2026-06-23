@@ -50,6 +50,10 @@ const (
 	fetchShadowDiffSampleLen         = 512
 )
 
+// timeType is the reflect.Type of time.Time, hoisted out of diffEventValues so the
+// deeply-recursive value walk doesn't recompute it at every node.
+var timeType = reflect.TypeOf(time.Time{})
+
 // ShadowEventService serves fetch from a ClickHouse primary while replaying
 // the three index/summary methods against a lake secondary and counting
 // metadata mismatches. Payload methods (GetCloudEventFromIndex,
@@ -200,7 +204,6 @@ func diffEventValues(a, b reflect.Value, path string) (string, bool) {
 		return fmt.Sprintf("%s: type mismatch (%s vs %s)", path, a.Type(), b.Type()), false
 	}
 
-	var timeType = reflect.TypeOf(time.Time{})
 	if a.Type() == timeType && a.CanInterface() {
 		ta, tb := a.Interface().(time.Time), b.Interface().(time.Time)
 		if !ta.Equal(tb) {

@@ -3,6 +3,7 @@ package fetch
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/DIMO-Network/cloudevent"
@@ -16,19 +17,19 @@ import (
 type recordingService struct {
 	eventrepo.EventService
 	batches     bool
-	listCalls   int
-	perKeyCalls int
+	listCalls   atomic.Int64 // the non-batching path fans GetCloudEventFromIndex out concurrently
+	perKeyCalls atomic.Int64
 }
 
 func (r *recordingService) BatchesAllIndexes() bool { return r.batches }
 
 func (r *recordingService) ListCloudEventsFromIndexes(_ context.Context, indexes []cloudevent.CloudEvent[eventrepo.ObjectInfo], _ string) ([]cloudevent.RawEvent, error) {
-	r.listCalls++
+	r.listCalls.Add(1)
 	return make([]cloudevent.RawEvent, len(indexes)), nil
 }
 
 func (r *recordingService) GetCloudEventFromIndex(_ context.Context, _ *cloudevent.CloudEvent[eventrepo.ObjectInfo], _ string) (cloudevent.RawEvent, error) {
-	r.perKeyCalls++
+	r.perKeyCalls.Add(1)
 	return cloudevent.RawEvent{}, nil
 }
 
@@ -45,12 +46,12 @@ func TestListCloudEventsFromIndexes_Routing(t *testing.T) {
 	batched := &recordingService{batches: true}
 	_, err := ListCloudEventsFromIndexes(context.Background(), batched, idx, []string{"b"})
 	require.NoError(t, err)
-	require.Equal(t, 1, batched.listCalls, "a batching backend resolves all indexes in one call")
-	require.Equal(t, 0, batched.perKeyCalls, "no per-key fallback for a batching backend")
+	require.Equal(t, int64(1), batched.listCalls.Load(), "a batching backend resolves all indexes in one call")
+	require.Equal(t, int64(0), batched.perKeyCalls.Load(), "no per-key fallback for a batching backend")
 
 	perKey := &recordingService{batches: false}
 	_, err = ListCloudEventsFromIndexes(context.Background(), perKey, idx, []string{"b"})
 	require.NoError(t, err)
-	require.Equal(t, 0, perKey.listCalls, "non-parquet keys don't hit the batched path on a non-batching backend")
-	require.Equal(t, len(idx), perKey.perKeyCalls, "a non-batching backend fetches one key at a time")
+	require.Equal(t, int64(0), perKey.listCalls.Load(), "non-parquet keys don't hit the batched path on a non-batching backend")
+	require.Equal(t, int64(len(idx)), perKey.perKeyCalls.Load(), "a non-batching backend fetches one key at a time")
 }
