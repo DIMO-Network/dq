@@ -402,3 +402,42 @@ func TestLakeSignalSource_IdleRuns(t *testing.T) {
 	assert.Equal(t, at(140), runs[2].Start)
 	assert.Equal(t, at(140), runs[2].End)
 }
+
+// TestLakeQueries_LocationAt verifies the nearest-fix-at-or-before lookup that
+// gap-fills trip start/end locations: it returns the latest non-origin fix at or
+// before ts (skipping (0,0)), and nil when there is no prior fix.
+func TestLakeQueries_LocationAt(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeServiceForTest(t)
+	q := NewLakeQueries(svc)
+	subject := testSubject1
+	const loc = "currentLocationCoordinates"
+	base := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
+	at := func(m int) time.Time { return base.Add(time.Duration(m) * time.Minute) }
+
+	insertLoc := func(ceID string, ts time.Time, lat, lon float64) {
+		_, err := svc.db.ExecContext(ctx,
+			`INSERT INTO lake.signals (subject, subject_bucket, name, timestamp, source, producer, cloud_event_id, value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading)
+			 VALUES (?, ?, ?, ?, 'src', 'prod', ?, 0.0, '', ?, ?, 1.5, 0.0)`,
+			subject, HashBucket(subject), loc, ts.UTC(), ceID, lat, lon)
+		require.NoError(t, err)
+	}
+	insertLoc("l1", at(0), 40.0, -75.0)
+	insertLoc("l2", at(10), 41.0, -76.0)
+	insertLoc("origin", at(20), 0.0, 0.0) // (0,0) must be skipped
+
+	got, err := q.LocationAt(ctx, subject, at(15)) // between l2 and origin
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 41.0, got.Latitude)
+	assert.Equal(t, -76.0, got.Longitude)
+
+	got, err = q.LocationAt(ctx, subject, at(25)) // after origin → still l2 (origin skipped)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 41.0, got.Latitude)
+
+	got, err = q.LocationAt(ctx, subject, at(-10)) // before any fix
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}

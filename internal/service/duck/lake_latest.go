@@ -2,8 +2,11 @@ package duck
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
@@ -182,4 +185,30 @@ func (q *Queries) getSignalSummariesLake(ctx context.Context, subject string, fi
 		summaries = append(summaries, s)
 	}
 	return summaries, rows.Err()
+}
+
+// LocationAt returns the nearest non-origin currentLocationCoordinates fix at or
+// before ts — a point lookup that reaches back before any window, deterministic on
+// ties (lowest cloud_event_id, matching the read-path dedup). nil means the vehicle
+// has no known fix at/before ts. The segment enrichment uses it to gap-fill a trip's
+// start/end location when no GPS fix landed inside the (often short) trip window — a
+// correctness win ClickHouse's window-bounded argMin/argMax structurally cannot do.
+func (q *Queries) LocationAt(ctx context.Context, subject string, ts time.Time) (*model.Location, error) {
+	query := fmt.Sprintf(`
+SELECT loc_lat, loc_lon, loc_hdop FROM lake.signals
+WHERE subject = ? AND %[2]s AND name = ? AND %[1]s
+  AND timestamp <= make_timestamp(%[3]d)
+ORDER BY timestamp DESC, cloud_event_id ASC LIMIT 1`,
+		lakeNonZeroLoc, subjectBucketPredicate("", subject), ts.UTC().UnixMicro())
+
+	var loc model.Location
+	err := q.svc.db.QueryRowContext(ctx, query, subject, vss.FieldCurrentLocationCoordinates).
+		Scan(&loc.Latitude, &loc.Longitude, &loc.Hdop)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lake location at %s: %w", ts, err)
+	}
+	return &loc, nil
 }
