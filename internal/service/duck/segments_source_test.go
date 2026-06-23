@@ -272,8 +272,8 @@ func TestLakeSignalSource_IgnitionStateChanges_NoSeed(t *testing.T) {
 	changes, err := src.IgnitionStateChanges(ctx, subject, from, to)
 	require.NoError(t, err)
 
-	// First row in the window is treated as a transition (prev=-1, new=1 → transition),
-	// and second is ON→OFF. No pre-from seed.
+	// No prior reading at all → the first window row seeds prev=0 (off), so 0→1 is a
+	// genuine transition, and the second is ON→OFF. No pre-from seed.
 	require.Len(t, changes, 2, "expected 2 in-range transitions, no seed")
 	assert.Equal(t, from.Add(10*time.Minute), changes[0].TS)
 	assert.Equal(t, 1.0, changes[0].NewState)
@@ -281,9 +281,12 @@ func TestLakeSignalSource_IgnitionStateChanges_NoSeed(t *testing.T) {
 	assert.Equal(t, 0.0, changes[1].NewState)
 }
 
-// TestLakeSignalSource_IgnitionStateChanges_OldSeedIgnored verifies that a
-// transition older than 30 days is NOT returned as a seed row.
-func TestLakeSignalSource_IgnitionStateChanges_OldSeedIgnored(t *testing.T) {
+// TestLakeSignalSource_IgnitionStateChanges_ContinuouslyOn verifies a vehicle ON
+// since before the lookback (no in-window state change) still surfaces its
+// in-progress trip: the true prior state seeds ON so no lag-transition fires, and
+// the source emits a synthetic ON at the earliest reading so the detector reports
+// the ongoing trip (an ongoing trip must show as ongoing).
+func TestLakeSignalSource_IgnitionStateChanges_ContinuouslyOn(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeServiceForTest(t)
 	src := NewLakeSignalSource(svc)
@@ -292,22 +295,45 @@ func TestLakeSignalSource_IgnitionStateChanges_OldSeedIgnored(t *testing.T) {
 	from := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
 	to := from.Add(time.Hour)
 
-	// Seed candidate older than 30 days — must be excluded by lookback cap.
-	tooOld := from.AddDate(0, 0, -31)
-	insertSignal(t, svc, subject, "isIgnitionOn", "ce-old", tooOld, 1.0)
-
-	// One in-range ON: with the old row excluded by the lookback, this is the
-	// first row in the window, so prev_state seeds to 0 (CH-aligned) and 0->1 is a
-	// genuine transition. If the old row leaked in, it would poison this row's LAG
-	// to 1 (1->1, not a transition) and the result would be empty — so Len 1 proves
-	// the lookback cap excluded it.
+	// ON before the lookback and still ON in range, no OFF — a trip ongoing since
+	// before the queryable window.
+	insertSignal(t, svc, subject, "isIgnitionOn", "ce-old", from.AddDate(0, 0, -31), 1.0)
 	insertSignal(t, svc, subject, "isIgnitionOn", "ce-r1", from.Add(10*time.Minute), 1.0)
 
 	changes, err := src.IgnitionStateChanges(ctx, subject, from, to)
 	require.NoError(t, err)
 
-	require.Len(t, changes, 1)
-	assert.Equal(t, from.Add(10*time.Minute), changes[0].TS)
+	require.Len(t, changes, 1, "synthetic ON surfaces the in-progress trip")
+	assert.Equal(t, from.Add(10*time.Minute), changes[0].TS, "synthetic ON at the earliest in-window reading")
+	assert.Equal(t, 1.0, changes[0].NewState, "ON")
+}
+
+// TestLakeSignalSource_IgnitionStateChanges_PriorOnNoFabrication locks in the
+// parity fix: a vehicle already ON entering the window that turns OFF in range
+// must NOT fabricate a phantom trip. With prev_state seeded from the true prior ON,
+// the in-window ON reading is not a transition; only the OFF is emitted, and the
+// detector (OFF with no open segment) produces no segment — matching ClickHouse,
+// not the old hardcoded-0 seed that invented one.
+func TestLakeSignalSource_IgnitionStateChanges_PriorOnNoFabrication(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeServiceForTest(t)
+	src := NewLakeSignalSource(svc)
+
+	subject := testSubject1
+	from := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
+	to := from.Add(2 * time.Hour)
+
+	insertSignal(t, svc, subject, "isIgnitionOn", "ce-old", from.AddDate(0, 0, -31), 1.0)  // before lookback: ON (true seed)
+	insertSignal(t, svc, subject, "isIgnitionOn", "ce-lb", from.Add(-5*24*time.Hour), 1.0) // in lookback: still ON
+	insertSignal(t, svc, subject, "isIgnitionOn", "ce-off", from.Add(30*time.Minute), 0.0) // in range: OFF
+
+	changes, err := src.IgnitionStateChanges(ctx, subject, from, to)
+	require.NoError(t, err)
+
+	require.Len(t, changes, 1, "only the OFF; the entered-ON reading is not a fabricated transition")
+	assert.Equal(t, from.Add(30*time.Minute), changes[0].TS)
+	assert.Equal(t, 0.0, changes[0].NewState, "OFF")
+	assert.Equal(t, 1.0, changes[0].PrevState, "prev was ON (true prior state)")
 }
 
 // TestLakeSignalSource_IgnitionStateChanges_NullValueDoesNotPoison verifies

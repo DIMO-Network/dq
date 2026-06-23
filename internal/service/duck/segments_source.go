@@ -2,6 +2,7 @@ package duck
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -134,32 +135,28 @@ func (s *LakeSignalSource) IgnitionStateChanges(ctx context.Context, subject str
 	toUS := to.UTC().UnixMicro()
 	lookbackUS := lookback.UTC().UnixMicro()
 
-	// Build transitions over the full lookback+range window, then split into
-	// two arms identical to the CH UNION ALL structure:
-	//   1. seed: last transition strictly before from (ORDER BY ts DESC LIMIT 1)
-	//   2. range: all transitions in [from, to)
-	// Both arms draw from the same CTE to avoid duplicating the LAG computation.
+	// Build transitions over the lookback+range window, split into the CH UNION ALL
+	// structure: (1) seed = last transition strictly before from; (2) range = all
+	// transitions in [from, to). value_number is 0.0/1.0; a transition is new!=prev.
+	// `value_number IS NOT NULL` drops missing readings (a NULL never compares true
+	// and would poison the next row's LAG).
 	//
-	// Note: value_number for isIgnitionOn is 0.0 or 1.0 (numeric bool).
-	// A transition is a row where new_state != prev_state.
-	// `value_number IS NOT NULL` in the deduped CTE drops missing readings: a NULL
-	// would be silently excluded from transitions (NULL != x is NULL, not true)
-	// AND would poison the next row's LAG (prev_state coalesces to -1), wrongly
-	// emitting an unchanged reading as a spurious transition.
-	// coalesce(lag(...), 0): if a vehicle has been ON continuously for MORE than
-	// the 30-day lookback (no OFF event in the window), this LAG yields NULL for
-	// the very first row. Coalesce maps it to 0 — matching CH's pre-materialized
-	// signal_state_changes, which seeds prev_state=0 for an ongoing segment — so
-	// the first ON row IS emitted as a transition and the in-progress segment is
-	// reported, exactly as CH does (segments parity at cutover; the previous -1
-	// seed suppressed that segment for duck only).
+	// prev_state for the window's FIRST row seeds from the TRUE last isIgnitionOn
+	// value strictly before the window — reconstructing CH's unbounded
+	// signal_last_state — rather than a hardcoded 0. Without it, a vehicle that was
+	// already ON entering the window has its first ON reading fabricated into a
+	// transition, inventing a phantom trip (the parity divergence the ongoing-trip
+	// work surfaced). No prior reading at all (brand-new vehicle) falls back to 0
+	// (off), so a first-ever ON is a genuine trip start. The seed lookup is a single
+	// subject_bucket-pruned LIMIT-1 row, evaluated once.
+	bucket := subjectBucketPredicate("", subject)
 	q := fmt.Sprintf(`
 WITH deduped AS (
   SELECT timestamp, value_number
   FROM lake.signals
-  WHERE subject = ? AND `+subjectBucketPredicate("", subject)+` AND name = 'isIgnitionOn'
+  WHERE subject = ? AND `+bucket+` AND name = 'isIgnitionOn'
     AND value_number IS NOT NULL
-    AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
+    AND timestamp >= make_timestamp(%[1]d) AND timestamp < make_timestamp(%[2]d)
   `+signalDedupQualify+`
 ),
 transitions AS (
@@ -168,24 +165,28 @@ transitions AS (
     value_number AS new_state,
     coalesce(
       lag(value_number) OVER (ORDER BY timestamp),
+      (SELECT value_number FROM lake.signals
+       WHERE subject = ? AND `+bucket+` AND name = 'isIgnitionOn' AND value_number IS NOT NULL
+         AND timestamp < make_timestamp(%[1]d)
+       ORDER BY timestamp DESC LIMIT 1),
       0
     ) AS prev_state
   FROM deduped
 )
 SELECT timestamp, new_state, prev_state FROM transitions
-WHERE new_state != prev_state AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
+WHERE new_state != prev_state AND timestamp >= make_timestamp(%[3]d) AND timestamp < make_timestamp(%[2]d)
 UNION ALL
 SELECT timestamp, new_state, prev_state FROM (
   SELECT timestamp, new_state, prev_state
   FROM transitions
-  WHERE new_state != prev_state AND timestamp < make_timestamp(%d)
+  WHERE new_state != prev_state AND timestamp < make_timestamp(%[3]d)
   ORDER BY timestamp DESC
   LIMIT 1
 )
 ORDER BY timestamp`,
-		lookbackUS, toUS, fromUS, toUS, fromUS)
+		lookbackUS, toUS, fromUS)
 
-	rows, err := s.svc.db.QueryContext(ctx, q, subject)
+	rows, err := s.svc.db.QueryContext(ctx, q, subject, subject)
 	if err != nil {
 		return nil, fmt.Errorf("lake ignition state changes: %w", err)
 	}
@@ -199,5 +200,30 @@ ORDER BY timestamp`,
 		sc.TS = sc.TS.UTC()
 		out = append(out, sc)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Continuously-ON trip: no transition fired (the value never changed from the
+	// true prior state), but a trip ongoing since before the lookback would
+	// otherwise be invisible. If the latest reading is ON, surface the in-progress
+	// trip as a synthetic ON at the earliest known reading so the detector reports
+	// it (the product choice: an ongoing trip must show as ongoing).
+	if len(out) == 0 {
+		var firstTS sql.NullTime
+		var latest sql.NullFloat64
+		err := s.svc.db.QueryRowContext(ctx, fmt.Sprintf(`
+SELECT min(timestamp), arg_max(value_number, timestamp)
+FROM lake.signals
+WHERE subject = ? AND `+bucket+` AND name = 'isIgnitionOn' AND value_number IS NOT NULL
+  AND timestamp >= make_timestamp(%[1]d) AND timestamp < make_timestamp(%[2]d)`, lookbackUS, toUS),
+			subject).Scan(&firstTS, &latest)
+		if err != nil {
+			return nil, fmt.Errorf("lake ignition current state: %w", err)
+		}
+		if latest.Valid && latest.Float64 == 1 && firstTS.Valid {
+			out = append(out, segments.StateChange{TS: firstTS.Time.UTC(), NewState: 1, PrevState: 0})
+		}
+	}
+	return out, nil
 }
