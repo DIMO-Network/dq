@@ -371,3 +371,34 @@ func TestLakeSignalSource_IgnitionStateChanges_NullValueDoesNotPoison(t *testing
 	assert.Equal(t, t1, changes[0].TS)
 	assert.Equal(t, 1.0, changes[0].NewState)
 }
+
+// TestLakeSignalSource_IdleRuns verifies the SQL gaps-and-islands run detection
+// matches the Go findIdleRpmRanges semantics on the tricky cases: a non-idle reading
+// breaks a run, and a gap > maxGap between consecutive idle readings splits a run.
+func TestLakeSignalSource_IdleRuns(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeServiceForTest(t)
+	src := NewLakeSignalSource(svc)
+	subject := testSubject1
+	const rpm = "powertrainCombustionEngineSpeed"
+	base := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
+	at := func(sec int) time.Time { return base.Add(time.Duration(sec) * time.Second) }
+
+	insertSignal(t, svc, subject, rpm, "i1", at(0), 800)
+	insertSignal(t, svc, subject, rpm, "i2", at(10), 900)
+	insertSignal(t, svc, subject, rpm, "i3", at(30), 850)
+	insertSignal(t, svc, subject, rpm, "n1", at(40), 2000) // non-idle (>maxIdle) breaks run 1
+	insertSignal(t, svc, subject, rpm, "i4", at(50), 800)
+	insertSignal(t, svc, subject, rpm, "i5", at(70), 700)
+	insertSignal(t, svc, subject, rpm, "i6", at(140), 600) // 70s gap > 60s maxGap splits run 3
+
+	runs, err := src.IdleRuns(ctx, subject, rpm, at(-100), at(200), 1000, 60)
+	require.NoError(t, err)
+	require.Len(t, runs, 3, "non-idle break + gap split → three runs")
+	assert.Equal(t, at(0), runs[0].Start)
+	assert.Equal(t, at(30), runs[0].End)
+	assert.Equal(t, at(50), runs[1].Start)
+	assert.Equal(t, at(70), runs[1].End)
+	assert.Equal(t, at(140), runs[2].Start)
+	assert.Equal(t, at(140), runs[2].End)
+}

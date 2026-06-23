@@ -42,16 +42,29 @@ func (d *IdlingDetector) DetectSegments(
 	}
 
 	lookbackFrom := from.Add(-time.Duration(maxGap) * time.Second)
-	// Single query: RPM samples (returned sorted)
-	samples, err := d.src.LevelSamples(ctx, subject, vss.FieldPowertrainCombustionEngineSpeed, lookbackFrom, to)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query RPM samples: %w", err)
-	}
-	if len(samples) == 0 {
-		return []*model.Segment{}, nil
-	}
 
-	ranges := findIdleRpmRanges(samples, maxIdleRpm, maxGap, minDuration, from, to)
+	var ranges []timeRange
+	if irs, ok := d.src.(IdleRunSource); ok {
+		// Backend can find idle runs in-store (lake): fetch only the runs, then apply
+		// the SAME clip + minDuration as the Go path — output is identical.
+		runs, err := irs.IdleRuns(ctx, subject, vss.FieldPowertrainCombustionEngineSpeed, lookbackFrom, to, maxIdleRpm, maxGap)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query idle runs: %w", err)
+		}
+		for _, r := range runs {
+			appendIdleRange(r.Start, r.End, minDuration, from, to, &ranges)
+		}
+	} else {
+		// Fallback (ClickHouse): stream RPM samples and find runs in Go.
+		samples, err := d.src.LevelSamples(ctx, subject, vss.FieldPowertrainCombustionEngineSpeed, lookbackFrom, to)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query RPM samples: %w", err)
+		}
+		if len(samples) == 0 {
+			return []*model.Segment{}, nil
+		}
+		ranges = findIdleRpmRanges(samples, maxIdleRpm, maxGap, minDuration, from, to)
+	}
 	return timeRangesToSegments(ranges, from), nil
 }
 

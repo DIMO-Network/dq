@@ -49,3 +49,22 @@ type SignalSource interface {
 	// by timestamp ascending. Lookback for the seed is capped at 30 days.
 	IgnitionStateChanges(ctx context.Context, subject string, from, to time.Time) ([]StateChange, error)
 }
+
+// TimeRange is a [Start, End] interval of raw signal readings (e.g. an idle run),
+// before any [from, to] clipping or minDuration filtering — the detector applies
+// those. Both bounds are inclusive sample timestamps.
+type TimeRange struct {
+	Start time.Time
+	End   time.Time
+}
+
+// IdleRunSource is an OPTIONAL capability: a backend that can compute idle-RPM runs
+// in the store (window functions / gaps-and-islands) instead of streaming every RPM
+// sample to Go. The lake backend implements it; ClickHouse does not, so the idling
+// detector falls back to LevelSamples + findIdleRpmRanges. Runs are the raw
+// contiguous idle intervals over [from, to) — a run breaks on a non-idle reading or
+// a gap > maxGapSeconds between consecutive idle readings (matching the Go logic);
+// the detector clips and minDuration-filters them.
+type IdleRunSource interface {
+	IdleRuns(ctx context.Context, subject, name string, from, to time.Time, maxIdleRpm, maxGapSeconds int) ([]TimeRange, error)
+}

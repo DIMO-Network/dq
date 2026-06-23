@@ -230,3 +230,60 @@ WHERE subject = ? AND `+bucket+` AND name = 'isIgnitionOn' AND value_number IS N
 	}
 	return out, nil
 }
+
+// IdleRuns computes contiguous idle-RPM runs in SQL via gaps-and-islands, instead of
+// streaming every RPM sample to Go (segments.IdleRunSource). A run is a maximal
+// sequence of idle readings (0 < value <= maxIdleRpm) with no non-idle reading
+// between them (a non-idle reading breaks the run) and no gap > maxGapSeconds between
+// consecutive idle readings — matching findIdleRpmRanges exactly. Returns the raw
+// runs; the detector clips them to [from, to] and applies minDuration. The CH backend
+// has no equivalent and falls back to LevelSamples + the Go scan.
+func (s *LakeSignalSource) IdleRuns(ctx context.Context, subject, name string, from, to time.Time, maxIdleRpm, maxGapSeconds int) ([]segments.TimeRange, error) {
+	fromUS := from.UTC().UnixMicro()
+	toUS := to.UTC().UnixMicro()
+	maxGapUS := int64(maxGapSeconds) * 1_000_000
+	bucket := subjectBucketPredicate("", subject)
+	// A new island opens at an idle reading whose immediately-prior reading is not an
+	// idle reading within maxGap: the first row (prev NULL), a non-idle predecessor
+	// (NOT prev_idle), or a too-large gap. Non-idle rows carry an island id but are
+	// dropped by WHERE idle, so a non-idle reading between two idle ones still splits
+	// the run (the next idle row sees a non-idle predecessor).
+	q := fmt.Sprintf(`
+WITH s AS (
+  SELECT timestamp, (value_number > 0 AND value_number <= %[4]d) AS idle
+  FROM lake.signals
+  WHERE subject = ? AND `+bucket+` AND name = ? AND value_number IS NOT NULL
+    AND timestamp >= make_timestamp(%[1]d) AND timestamp < make_timestamp(%[2]d)
+  `+signalDedupQualify+`
+),
+m AS (
+  SELECT timestamp, idle,
+    lag(idle) OVER w AS prev_idle, lag(timestamp) OVER w AS prev_ts
+  FROM s WINDOW w AS (ORDER BY timestamp)
+),
+isl AS (
+  SELECT timestamp, idle,
+    sum(CASE WHEN idle AND (prev_idle IS NULL OR NOT prev_idle
+              OR epoch_us(timestamp) - epoch_us(prev_ts) > %[3]d) THEN 1 ELSE 0 END)
+      OVER (ORDER BY timestamp) AS island
+  FROM m
+)
+SELECT min(timestamp), max(timestamp) FROM isl WHERE idle GROUP BY island ORDER BY 1`,
+		fromUS, toUS, maxGapUS, maxIdleRpm)
+
+	rows, err := s.svc.db.QueryContext(ctx, q, subject, name)
+	if err != nil {
+		return nil, fmt.Errorf("lake idle runs: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []segments.TimeRange
+	for rows.Next() {
+		var r segments.TimeRange
+		if err := rows.Scan(&r.Start, &r.End); err != nil {
+			return nil, fmt.Errorf("scanning idle run: %w", err)
+		}
+		r.Start, r.End = r.Start.UTC(), r.End.UTC()
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
