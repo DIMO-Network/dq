@@ -7,10 +7,6 @@ import (
 
 // Default values applied by Config.withDefaults.
 const (
-	// DefaultRawPrefix is the default key prefix for raw cloudevent parquet files.
-	DefaultRawPrefix = "raw"
-	// DefaultDecodedPrefix is the default key prefix for decoded parquet files.
-	DefaultDecodedPrefix = "decoded/v1"
 	// DefaultMaxConns is the default maximum number of open DuckDB connections.
 	DefaultMaxConns = 6
 	// DefaultConnMaxLifetime caps how long a pooled DuckDB connection lives
@@ -59,14 +55,6 @@ type Config struct {
 	// S3Endpoint is a custom S3 endpoint (e.g. MinIO). May include an
 	// http:// or https:// scheme; http disables SSL. When set, url_style=path is used.
 	S3Endpoint string `yaml:"S3_ENDPOINT"`
-
-	// Bucket is the parquet bucket. Plain names are treated as s3://<name>;
-	// file:// URLs and absolute paths are treated as local directories (tests).
-	Bucket string `yaml:"PARQUET_BUCKET"`
-	// RawPrefix is the key prefix for raw cloudevents. Empty means DefaultRawPrefix.
-	RawPrefix string `yaml:"RAW_PREFIX"`
-	// DecodedPrefix is the key prefix for decoded signals/events/latest. Empty means DefaultDecodedPrefix.
-	DecodedPrefix string `yaml:"DECODED_PREFIX"`
 
 	// DuckLakeEnabled attaches a DuckLake catalog as schema "lake" on every
 	// connection. The decoded layer then lives as DuckLake tables
@@ -160,18 +148,6 @@ func (c Config) MetaAttachOpts() string {
 
 // withDefaults returns a copy of the config with zero values replaced by defaults.
 func (c Config) withDefaults() Config {
-	if c.RawPrefix == "" {
-		c.RawPrefix = DefaultRawPrefix
-	}
-	if c.DecodedPrefix == "" {
-		c.DecodedPrefix = DefaultDecodedPrefix
-	}
-	// The materializer normalizes its prefixes WITH a trailing slash; the
-	// path builders here join with "/" themselves. Trim so an operator
-	// setting "decoded/v1/" doesn't build double-slash keys that match
-	// nothing.
-	c.RawPrefix = strings.TrimSuffix(c.RawPrefix, "/")
-	c.DecodedPrefix = strings.TrimSuffix(c.DecodedPrefix, "/")
 	if c.MaxConns <= 0 {
 		c.MaxConns = DefaultMaxConns
 	}

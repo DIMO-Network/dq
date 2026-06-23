@@ -50,18 +50,10 @@ type Settings struct {
 	DuckDBMaxConns      int    `yaml:"DUCKDB_MAX_CONNS"`
 	// DuckDBS3Endpoint is a custom S3 endpoint for DuckDB's httpfs (e.g. MinIO).
 	DuckDBS3Endpoint string `yaml:"DUCKDB_S3_ENDPOINT"`
-	// RawPrefix is the key prefix for raw cloudevent parquet files in ParquetBucket.
-	RawPrefix string `yaml:"RAW_PREFIX"`
-	// DecodedPrefix is the key prefix for decoded signal/event/latest/summary parquet files.
-	DecodedPrefix string `yaml:"DECODED_PREFIX"`
-	// Materializer (post-fact decode loop raw -> decoded parquet).
+	// Materializer (post-fact decode loop: din raw_events -> decoded lake tables).
 	MaterializerEnabled      bool   `yaml:"MATERIALIZER_ENABLED"`
 	MaterializerPollInterval string `yaml:"MATERIALIZER_POLL_INTERVAL"`
 	MaterializerWorkers      int    `yaml:"MATERIALIZER_WORKERS"`
-	MaterializerBatchFiles   int    `yaml:"MATERIALIZER_BATCH_FILES"`
-	MaterializerBatchBytes   int64  `yaml:"MATERIALIZER_BATCH_BYTES"`
-	CompactIntervalSeconds   int    `yaml:"COMPACT_INTERVAL_SECONDS"`
-	CompactMinFiles          int    `yaml:"COMPACT_MIN_FILES"`
 	// LakeDecodedRetention is a Go duration (e.g. "8760h"); decoded rows older
 	// than this are pruned from lake.signals/events (CHD-38). Empty disables it.
 	LakeDecodedRetention string `yaml:"LAKE_DECODED_RETENTION"`
@@ -71,8 +63,11 @@ type Settings struct {
 	// it is O(history) and unnecessary in steady state. Set it for one boot to
 	// repair, then unset.
 	LakeRebuildRollupOnBoot bool `yaml:"LAKE_REBUILD_ROLLUP_ON_BOOT"`
-	MaterializerShardIndex  int  `yaml:"MATERIALIZER_SHARD_INDEX"`
-	MaterializerShardCount  int  `yaml:"MATERIALIZER_SHARD_COUNT"`
+	// MaterializerShardCount is read only to REJECT sharding: the DuckLake path's
+	// single global ingest_progress cursor allows exactly one materializer, so a
+	// value > 1 is refused (run a single replicaCount=1 release). See
+	// startDuckLakeMaterializer.
+	MaterializerShardCount int `yaml:"MATERIALIZER_SHARD_COUNT"`
 	// DIMO registry chain settings for vendor module DID construction.
 	DIMORegistryChainID   uint64 `yaml:"DIMO_REGISTRY_CHAIN_ID"`
 	VehicleNFTAddress     string `yaml:"VEHICLE_NFT_ADDRESS"`

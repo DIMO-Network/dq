@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/config"
-	"github.com/DIMO-Network/dq/internal/fsstore"
 	"github.com/DIMO-Network/dq/internal/materializer"
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/dq/internal/service/duck"
@@ -41,9 +40,6 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		S3AWSAccessKeyID:     settings.S3AWSAccessKeyID,
 		S3AWSSecretAccessKey: settings.S3AWSSecretAccessKey,
 		S3Endpoint:           settings.DuckDBS3Endpoint,
-		Bucket:               bucket,
-		RawPrefix:            settings.RawPrefix,
-		DecodedPrefix:        settings.DecodedPrefix,
 		// DuckLake is the only backend — always attach the catalog.
 		DuckLakeEnabled: true,
 		CatalogDSN:      settings.DuckLakeCatalogDSN,
@@ -118,39 +114,15 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 		SyntheticNFTAddress:   common.HexToAddress(settings.SyntheticNFTAddress),
 	})
 
-	// DuckLake mode: decode din's raw_events through the shared catalog
-	// (no S3 store, no bucket layout). Selected by DUCKLAKE_CATALOG_DSN.
-	if settings.DuckLakeCatalogDSN != "" {
-		return startDuckLakeMaterializer(settings, pollInterval, logger)
+	// DuckLake is the only backend: the materializer decodes din's raw_events
+	// through the shared catalog (no S3 store, no bucket layout). The catalog DSN
+	// is the same one the query backend requires, so it is always present in
+	// practice; guard it so an enabled materializer fails loudly rather than
+	// coming up wired to nothing.
+	if settings.DuckLakeCatalogDSN == "" {
+		return nil, fmt.Errorf("materializer enabled but DUCKLAKE_CATALOG_DSN is empty: the DuckLake catalog is required")
 	}
-
-	// Local path → filesystem store (single-node); bucket name → S3.
-	var store materializer.ObjectStore
-	if isLocalBucket(settings.ParquetBucket) {
-		var err error
-		store, err = fsstore.New(strings.TrimPrefix(settings.ParquetBucket, "file://"))
-		if err != nil {
-			return nil, fmt.Errorf("creating filesystem store: %w", err)
-		}
-	} else {
-		store = newS3ObjectStore(s3ClientFromSettings(settings), settings.ParquetBucket)
-	}
-	runner := materializer.New(materializer.Config{
-		RawPrefix:         settings.RawPrefix,
-		DecodedPrefix:     settings.DecodedPrefix,
-		PollInterval:      pollInterval,
-		ChainID:           settings.DIMORegistryChainID,
-		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
-		Workers:           settings.MaterializerWorkers,
-		BatchMaxFiles:     settings.MaterializerBatchFiles,
-		BatchMaxBytes:     settings.MaterializerBatchBytes,
-		CompactInterval:   time.Duration(settings.CompactIntervalSeconds) * time.Second,
-		CompactMinFiles:   settings.CompactMinFiles,
-		ShardIndex:        settings.MaterializerShardIndex,
-		ShardCount:        settings.MaterializerShardCount,
-	}, store, logger)
-
-	return runMaterializerLoop(runner, nil, false, logger), nil // bucket mode: no DuckLake rollup to rebuild
+	return startDuckLakeMaterializer(settings, pollInterval, logger)
 }
 
 // startDuckLakeMaterializer wires the materializer to read din's raw_events
@@ -202,7 +174,7 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
 		Workers:           settings.MaterializerWorkers,
 		DecodedRetention:  decodedRetention,
-	}, nil, logger).WithDuckLake(mat)
+	}, logger).WithDuckLake(mat)
 
 	// rebuildRollup is the opt-in disaster-recovery rebuild (LAKE_REBUILD_ROLLUP_ON_BOOT):
 	// the per-batch recompute only touches a batch's subjects, so a dropped/truncated

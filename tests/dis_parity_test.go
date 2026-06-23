@@ -170,7 +170,7 @@ func materializeRuptela(t *testing.T) *duck.Service {
 	})
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, svc.DB(), zerolog.Nop())
 	require.NoError(t, err)
-	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Positive(t, drainRunner(t, ctx, runner))
 	return svc

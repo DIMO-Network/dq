@@ -29,7 +29,7 @@ func TestDuckLake_DecodedRowsCarrySubjectBucket(t *testing.T) {
 
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
-	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 1, drainRunner(t, ctx, runner))
 
@@ -61,7 +61,7 @@ func TestDuckLake_SubjectBucketPredicateIsPushedToScan(t *testing.T) {
 
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
-	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 2, drainRunner(t, ctx, runner))
 

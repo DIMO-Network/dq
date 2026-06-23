@@ -43,11 +43,9 @@ func TestNewServiceAppliesPragmas(t *testing.T) {
 }
 
 func TestNewServiceDefaults(t *testing.T) {
+	// A zero-value config must still bootstrap a usable service (defaults
+	// applied) and answer a query.
 	svc := newLocalService(t, Config{})
-	cfg := svc.Config()
-	assert.Equal(t, DefaultRawPrefix, cfg.RawPrefix)
-	assert.Equal(t, DefaultDecodedPrefix, cfg.DecodedPrefix)
-	assert.Equal(t, DefaultMaxConns, cfg.MaxConns)
 
 	var one int
 	require.NoError(t, svc.DB().QueryRow("SELECT 1").Scan(&one))

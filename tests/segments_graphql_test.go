@@ -184,7 +184,7 @@ func buildSegmentsFixture(t *testing.T) *duck.Service {
 	runner := materializer.New(materializer.Config{
 		ChainID:           137,
 		VehicleNFTAddress: vehicleNFT,
-	}, nil, zerolog.Nop()).WithDuckLake(mat)
+	}, zerolog.Nop()).WithDuckLake(mat)
 	require.Positive(t, drainRunner(t, ctx, runner))
 	return svc
 }
