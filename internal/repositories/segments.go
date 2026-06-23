@@ -328,7 +328,7 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 
 func segmentMaxSpeed(signals []*model.SignalAggregationValue) float64 {
 	for _, s := range signals {
-		if s != nil && s.Name == vss.FieldSpeed && s.Agg == "MAX" {
+		if s != nil && s.Name == vss.FieldSpeed && s.Agg == string(model.FloatAggregationMax) {
 			return s.Value
 		}
 	}

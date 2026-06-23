@@ -32,14 +32,14 @@ type RawFilter struct {
 	Subject  string
 	Subjects []string // multi-value IN filter on the subject column
 
-	Types         []string
-	TypesNotIn    []string
-	Sources       []string
-	SourcesNotIn  []string
-	Producers     []string
-	ProducersNotIn []string
-	IDs           []string
-	IDsNotIn      []string
+	Types             []string
+	TypesNotIn        []string
+	Sources           []string
+	SourcesNotIn      []string
+	Producers         []string
+	ProducersNotIn    []string
+	IDs               []string
+	IDsNotIn          []string
 	DataVersions      []string
 	DataVersionsNotIn []string
 
@@ -50,11 +50,11 @@ type RawFilter struct {
 	TagsNotContainAll []string // NOT list_has_all (NotContainsAll)
 
 	// Extras column (raw text) IN / NOT IN.
-	Extras       []string
-	ExtrasNotIn  []string
+	Extras      []string
+	ExtrasNotIn []string
 
-	After  time.Time
-	Before time.Time
+	After         time.Time
+	Before        time.Time
 	ExcludeVoided bool // hide events voided by a tombstone (voids_id anti-join)
 
 	// TimestampAsc controls ORDER BY direction. When true, results are returned
@@ -125,7 +125,7 @@ func whereClauseQ(filter RawFilter, prefix string) (string, []any) {
 
 	// Tags array filters — extras is a JSON text column; tags live at $.tags.
 	// try_cast parses the JSON array element as VARCHAR[] for DuckDB list functions.
-	// All conditions are ANDed, matching how CH eventrepo applies arrayFilterMods.
+	// All conditions are ANDed.
 	tagsExpr := func() string {
 		return fmt.Sprintf("COALESCE(try_cast(json_extract(%sextras, '$.tags') AS VARCHAR[]), [])", prefix)
 	}

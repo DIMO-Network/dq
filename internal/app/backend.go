@@ -49,10 +49,10 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		CatalogDSN:      settings.DuckLakeCatalogDSN,
 		CatalogReadDSN:  settings.DuckLakeCatalogReadDSN,
 		DataPath:        settings.DuckLakeDataPath,
-		// Only the single-writer materializer writes the lake. Any other role
-		// (query fleet, shadow comparison) attaches read-only when asked, which
-		// also lets it read from a Postgres read replica. Force read-only off
-		// for the materializer so the writer can never come up read-only.
+		// Only the single-writer materializer writes the lake. The read/query
+		// fleet attaches read-only when asked, which also lets it read from a
+		// Postgres read replica. Force read-only off for the materializer so the
+		// writer can never come up read-only.
 		ReadOnly: settings.DuckLakeReadOnly && !settings.MaterializerEnabled,
 		// Load spatial for the ST_* geofence filters. Default on for the query path;
 		// the materializer overrides it off (its delta read crashes under spatial's

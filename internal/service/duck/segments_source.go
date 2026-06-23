@@ -11,7 +11,7 @@ import (
 
 // LakeSignalSource implements segments.SignalSource over the DuckLake
 // lake.signals table. Detection logic lives in internal/segments; this only
-// fetches data, mirroring ch.chSignalSource one-for-one.
+// fetches data.
 type LakeSignalSource struct {
 	svc *Service
 }
@@ -45,9 +45,9 @@ func (s *LakeSignalSource) WindowedSignalCounts(ctx context.Context, subject str
 	winUS := int64(win) * 1_000_000
 	fromUS := from.UTC().UnixMicro()
 	toUS := to.UTC().UnixMicro()
-	// Epoch-aligned bucket: floor(epoch_us(ts), winUS).
-	// This matches CH toStartOfInterval which also uses epoch as origin.
-	// Do NOT subtract fromUS here — that was the parity bug (from-aligned != epoch-aligned).
+	// Epoch-aligned bucket: floor(epoch_us(ts), winUS), with the Unix epoch as
+	// the bucketing origin.
+	// Do NOT subtract fromUS here — that was the bug (from-aligned != epoch-aligned).
 	bucketExpr := fmt.Sprintf("make_timestamp((epoch_us(timestamp) // CAST(%d AS BIGINT)) * CAST(%d AS BIGINT))",
 		winUS, winUS)
 	// CAST(%d AS BIGINT): winUS is the window size in microseconds (int64); the
@@ -116,15 +116,15 @@ ORDER BY timestamp`,
 }
 
 // ignitionLookbackDays limits how far back we search for a prior ignition
-// state change, matching ch.chSignalSource (maxLookbackDays = 30).
+// state change (maxLookbackDays = 30).
 const ignitionLookbackDays = 30
 
 // IgnitionStateChanges returns isIgnitionOn transitions in [from, to) plus
 // exactly one pre-from seed row (the last transition before from, within a
 // 30-day lookback window), ordered by timestamp ascending.
 //
-// This matches ch.stateChangesQueryWithLookback exactly: one seed row from a
-// DESC LIMIT 1 arm, plus all transitions in [from, to).
+// The query is one seed row from a DESC LIMIT 1 arm, plus all transitions in
+// [from, to).
 //
 // Transition detection uses LAG() over value_number within the lookback window,
 // filtering to rows where the value differs from its predecessor. The seed arm
@@ -135,18 +135,18 @@ func (s *LakeSignalSource) IgnitionStateChanges(ctx context.Context, subject str
 	toUS := to.UTC().UnixMicro()
 	lookbackUS := lookback.UTC().UnixMicro()
 
-	// Build transitions over the lookback+range window, split into the CH UNION ALL
-	// structure: (1) seed = last transition strictly before from; (2) range = all
+	// Build transitions over the lookback+range window, split into a UNION ALL of
+	// two arms: (1) seed = last transition strictly before from; (2) range = all
 	// transitions in [from, to). value_number is 0.0/1.0; a transition is new!=prev.
 	// `value_number IS NOT NULL` drops missing readings (a NULL never compares true
 	// and would poison the next row's LAG).
 	//
 	// prev_state for the window's FIRST row seeds from the TRUE last isIgnitionOn
-	// value strictly before the window — reconstructing CH's unbounded
-	// signal_last_state — rather than a hardcoded 0. Without it, a vehicle that was
-	// already ON entering the window has its first ON reading fabricated into a
-	// transition, inventing a phantom trip (the parity divergence the ongoing-trip
-	// work surfaced). No prior reading at all (brand-new vehicle) falls back to 0
+	// value strictly before the window — the unbounded prior state — rather than a
+	// hardcoded 0. Without it, a vehicle that was already ON entering the window has
+	// its first ON reading fabricated into a transition, inventing a phantom trip
+	// (the divergence the ongoing-trip work surfaced). No prior reading at all
+	// (brand-new vehicle) falls back to 0
 	// (off), so a first-ever ON is a genuine trip start. The seed lookup is a single
 	// subject_bucket-pruned LIMIT-1 row, evaluated once.
 	bucket := subjectBucketPredicate("", subject)
@@ -236,8 +236,7 @@ WHERE subject = ? AND `+bucket+` AND name = 'isIgnitionOn' AND value_number IS N
 // sequence of idle readings (0 < value <= maxIdleRpm) with no non-idle reading
 // between them (a non-idle reading breaks the run) and no gap > maxGapSeconds between
 // consecutive idle readings — matching findIdleRpmRanges exactly. Returns the raw
-// runs; the detector clips them to [from, to] and applies minDuration. The CH backend
-// has no equivalent and falls back to LevelSamples + the Go scan.
+// runs; the detector clips them to [from, to] and applies minDuration.
 func (s *LakeSignalSource) IdleRuns(ctx context.Context, subject, name string, from, to time.Time, maxIdleRpm, maxGapSeconds int) ([]segments.TimeRange, error) {
 	fromUS := from.UTC().UnixMicro()
 	toUS := to.UTC().UnixMicro()

@@ -37,7 +37,7 @@ func TestLakeAggregations_EngineParity(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, med, 1)
-	assert.Equal(t, 20.0, med[0].ValueNumber, "median([10,20,30]) == CH median")
+	assert.Equal(t, 20.0, med[0].ValueNumber, "exact median([10,20,30]) == 20")
 
 	// A requested signal with no rows in the window yields no row (not a spurious
 	// coalesced 0), matching CH's GROUP BY: aggregating an absent name is empty.

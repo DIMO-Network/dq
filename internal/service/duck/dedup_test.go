@@ -36,7 +36,7 @@ func TestLakeQueries_DedupOverCount(t *testing.T) {
 	require.Len(t, sums, 1)
 	assert.EqualValues(t, 2, sums[0].NumberOfSignals, "duplicate reading collapses to one count")
 
-	// avg (aggregations → signalTable path) is over (60, 80), not (60, 60, 80).
+	// avg (aggregations → lakeSignalsDeduped path) is over (60, 80), not (60, 60, 80).
 	from := ts1.Add(-time.Minute)
 	to := ts2.Add(time.Minute)
 	agg, err := q.GetAggregatedSignals(ctx, subject, &model.AggregatedSignalArgs{

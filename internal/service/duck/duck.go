@@ -1,5 +1,6 @@
-// Package duck provides an embedded DuckDB query engine over parquet files
-// stored on S3 (or the local filesystem in tests).
+// Package duck provides an embedded DuckDB query engine that reads the DuckLake
+// catalog tables (lake.signals / lake.events / raw_events) attached on the
+// service.
 package duck
 
 import (

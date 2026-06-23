@@ -53,14 +53,13 @@ const signalDedupQualify = `QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, nam
 // still prune below the window.
 const lakeSignalsDeduped = `(SELECT * FROM lake.signals ` + signalDedupQualify + `)`
 
-// lakeNonZeroLoc is the on-the-fly (0,0)-exclusion over base location
-// columns, replacing the bucket layout's precomputed loc_*_nonzero columns.
+// lakeNonZeroLoc is the on-the-fly (0,0)-exclusion computed over the base
+// location columns of lake.signals.
 const lakeNonZeroLoc = "(loc_lat != 0 OR loc_lon != 0)"
 
-// getLatestSignalsLake computes latest values directly from lake.signals
-// (no precomputed latest buckets): arg_max by timestamp for plain values,
-// and arg_max over (0,0)-filtered base location columns, mirroring
-// ch.Service.GetLatestSignals.
+// getLatestSignalsLake computes latest values directly from lake.signals:
+// arg_max by timestamp for plain values, and arg_max over (0,0)-filtered base
+// location columns.
 func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error) {
 	if len(latestArgs.SignalNames) == 0 && len(latestArgs.LocationSignalNames) == 0 && !latestArgs.IncludeLastSeen {
 		return nil, nil
@@ -178,7 +177,7 @@ func (q *Queries) getAvailableSignalsLake(ctx context.Context, subject string, f
 }
 
 // getSignalSummariesLake counts per-name signals and first/last seen directly
-// from lake.signals (the bucket path sums precomputed summary rows).
+// from lake.signals.
 func (q *Queries) getSignalSummariesLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
 	srcCond, srcArgs := signalSourceCond("source", filter)
 	srcSQL := " AND " + subjectBucketPredicate("", subject) // partition pruning (CHD-1)

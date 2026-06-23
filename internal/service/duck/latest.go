@@ -10,7 +10,7 @@ import (
 )
 
 // GetLatestSignals returns the latest value for the requested signal names for
-// the subject, mirroring ch.Service.GetLatestSignals:
+// the subject:
 //
 //   - non-location names: max(timestamp), arg_max(value_*) over all sources
 //   - location names: arg_max excluding (0, 0) fixes
@@ -31,9 +31,9 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 }
 
 // GetAllLatestSignals returns the latest value for every signal name stored
-// for the subject, plus the virtual lastSeen row, mirroring
-// ch.Service.GetAllLatestSignals: the timestamp is the unconditional
-// max(timestamp) while the location value comes from the nonzero columns.
+// for the subject, plus the virtual lastSeen row: the timestamp is the
+// unconditional max(timestamp) while the location value comes from the nonzero
+// columns.
 func (q *Queries) GetAllLatestSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error) {
 	if noSourceFilter(filter) {
 		observeLakePath(true)
@@ -55,8 +55,7 @@ func (q *Queries) GetAvailableSignals(ctx context.Context, subject string, filte
 }
 
 // GetSignalSummaries returns per-name signal counts and first/last seen
-// timestamps for a subject, aggregated across sources, mirroring
-// ch.Service.GetSignalSummaries.
+// timestamps for a subject, aggregated across sources.
 func (q *Queries) GetSignalSummaries(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
 	if noSourceFilter(filter) {
 		observeLakePath(true)
@@ -81,7 +80,7 @@ func scanSignalSummary(rows rowScanner) (*model.SignalDataSummary, error) {
 
 // querySignals runs a signal-shaped query (name, ts, value_number,
 // value_string, loc_lat, loc_lon, loc_hdop, loc_heading) and scans rows into
-// vss.Signal values like ch's getSignals.
+// vss.Signal values.
 func (q *Queries) querySignals(ctx context.Context, stmt string, args []any) ([]*vss.Signal, error) {
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
 	if err != nil {

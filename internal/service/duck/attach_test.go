@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The reader role (query/shadow fleet) must attach the DuckLake catalog
+// The reader role (query fleet) must attach the DuckLake catalog
 // READ_ONLY so it can never write the shared catalog and can sit on a Postgres
 // read replica. The writer role (materializer) must attach read-write against
 // the primary. These are pure string builders, so assert the exact SQL.

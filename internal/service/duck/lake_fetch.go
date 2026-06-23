@@ -378,8 +378,8 @@ func (l *LakeEventService) PresignBlobURL(ctx context.Context, key string) (stri
 //
 // Or clauses (StringFilterOption.Or / ArrayFilterOption.Or) are not yet
 // supported. When present, errOrClauseUnsupported is returned so callers get a
-// clear failure rather than silently over-returning (which would break
-// shadow-mode correctness checks).
+// clear failure rather than silently over-returning (which would break the
+// read/query fleet's correctness).
 func filterFromAdvanced(opts *grpc.AdvancedSearchOptions) (RawFilter, error) {
 	f := RawFilter{ExcludeVoided: true}
 	if opts == nil {

@@ -14,8 +14,7 @@ import (
 )
 
 // Result row types (qtypes.AggSignal, qtypes.AggSignalForRange, qtypes.FieldType, ...)
-// are shared across backends so the repository layer can swap
-// implementations without translation.
+// live in qtypes so the repository layer consumes them without translation.
 
 // signalSrcColumns is the projection of the inner (pre-aggregation) select
 // shared by GetAggregatedSignals and GetAggregatedSignalsForRanges. rnd is a
@@ -45,14 +44,7 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 		return nil, errors.New("aggregation interval must be positive")
 	}
 
-	table, err := q.signalTable(ctx, aggArgs.FromTS, aggArgs.ToTS)
-	if err != nil {
-		return nil, err
-	}
 	signals := []*qtypes.AggSignal{}
-	if table == "" {
-		return signals, nil
-	}
 
 	conds := []string{
 		"s.subject = ?",
@@ -70,13 +62,17 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 	args = append(args, perSignalArgs...)
 
 	inner := "SELECT " + signalSrcColumns +
-		" FROM " + table + " AS s JOIN " + aggValuesTable(aggArgs.FloatArgs, aggArgs.StringArgs, aggArgs.LocationArgs) +
+		" FROM " + lakeSignalsDeduped + " AS s JOIN " + aggValuesTable(aggArgs.FloatArgs, aggArgs.StringArgs, aggArgs.LocationArgs) +
 		" ON s.name = agg_table.name WHERE " + strings.Join(conds, " AND ")
 
 	originUs := aggArgs.FromTS.UnixMicro()
 	bucketExpr := fmt.Sprintf("make_timestamp(((epoch_us(timestamp) - %d) // %d) * %d + %d)",
 		originUs, aggArgs.Interval, aggArgs.Interval, originUs)
 
+	// COLUMN CONTRACT: this projection's order — out_type, out_index, group_timestamp,
+	// <float>, <string>, agg_lat, agg_lon, agg_hdop, agg_heading — must stay in lockstep
+	// with the positional rows.Scan below. A reorder or an added location component
+	// silently mis-reads (an agg_lat↔agg_lon swap still passes value tests).
 	stmt := "SELECT CAST(signal_type AS UTINYINT) AS out_type, CAST(signal_index AS USMALLINT) AS out_index, " +
 		bucketExpr + " AS group_timestamp, " +
 		floatCaseSQL(aggArgs.FloatArgs) + ", " +
@@ -126,23 +122,19 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 		return []*qtypes.AggSignalForRange{}, nil
 	}
 
-	table, err := q.signalTable(ctx, globalFrom, globalTo)
-	if err != nil {
-		return nil, err
-	}
 	result := []*qtypes.AggSignalForRange{}
-	if table == "" {
-		return result, nil
-	}
 
 	bucketSQL := " AND " + subjectBucketPredicate("s.", subject) // partition pruning (CHD-1)
 	inner := "SELECT " + segmentIndexCaseSQL("s.timestamp", ranges) + " AS seg_idx, " + signalSrcColumns +
-		" FROM " + table + " AS s JOIN " + aggValuesTable(floatArgs, nil, locationArgs) +
+		" FROM " + lakeSignalsDeduped + " AS s JOIN " + aggValuesTable(floatArgs, nil, locationArgs) +
 		" ON s.name = agg_table.name" +
 		" WHERE s.subject = ?" + bucketSQL +
 		" AND s.timestamp >= " + tsMicroLiteral(globalFrom) +
 		" AND s.timestamp < " + tsMicroLiteral(globalTo)
 
+	// COLUMN CONTRACT: seg_idx, out_type, out_index, <float>, <string>, agg_lat,
+	// agg_lon, agg_hdop, agg_heading — must stay in lockstep with the positional
+	// rows.Scan below (see GetAggregatedSignals).
 	stmt := "SELECT CAST(seg_idx AS BIGINT) AS seg_idx, CAST(signal_type AS UTINYINT) AS out_type, CAST(signal_index AS USMALLINT) AS out_index, " +
 		floatCaseSQL(floatArgs) + ", " +
 		stringCaseSQL(nil) + ", " +
@@ -244,7 +236,7 @@ func aggValuesTable(floatArgs []model.FloatSignalArgs, stringArgs []model.String
 	return "(VALUES " + strings.Join(entries, ", ") + ") AS agg_table(signal_type, signal_index, name)"
 }
 
-// perSignalFilterSQL ports ch getAggQuery's perSignalFilters block:
+// perSignalFilterSQL builds the per-signal value-filter block:
 //
 //	(signal_type = 1 AND ((signal_index = 0 AND <float conds>) OR ...))
 //	OR signal_type = 2
@@ -286,7 +278,7 @@ func perSignalFilterSQL(aggArgs *model.AggregatedSignalArgs) (string, []any) {
 	return "(" + strings.Join(branches, " OR ") + ")", args
 }
 
-// segmentIndexCaseSQL ports ch's buildSegmentIndexMultiIf: rows falling in
+// segmentIndexCaseSQL builds the segment classifier: rows falling in
 // ranges[i] get segment index i, everything else -1. Range timestamps are
 // inlined with microsecond precision.
 func segmentIndexCaseSQL(tsCol string, ranges []qtypes.TimeRange) string {

@@ -1,7 +1,6 @@
 package duck
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -13,10 +12,10 @@ import (
 // Queries answers the signal/latest/summary/event queries served by the query
 // layer from the DuckLake catalog tables (lake.signals / lake.events) attached
 // on the service. Latest/summary are computed from the base table (or the
-// signals_latest rollup); there are no precomputed bucket files.
+// signals_latest rollup).
 //
-// Method signatures mirror ch.Service so the repository layer can swap
-// implementations. Segment detection and cloudevent queries are out of scope.
+// This is the query surface over the DuckLake catalog. Segment detection and
+// cloudevent queries are out of scope.
 type Queries struct {
 	svc *Service
 }
@@ -25,13 +24,6 @@ type Queries struct {
 // (lake.signals / lake.events) attached on svc.
 func NewLakeQueries(svc *Service) *Queries {
 	return &Queries{svc: svc}
-}
-
-// signalTable returns the FROM source for signal reads: the deduped DuckLake
-// signals source. Aggregations read through it (CHD-2); the caller aliases it
-// ("AS s"), so it must be a bare parenthesized subquery.
-func (q *Queries) signalTable(_ context.Context, _, _ time.Time) (string, error) {
-	return lakeSignalsDeduped, nil
 }
 
 // lakeEventsDeduped is the canonical DuckLake decoded-event source: lake.events
@@ -46,16 +38,9 @@ func (q *Queries) signalTable(_ context.Context, _, _ time.Time) (string, error)
 const lakeEventsDeduped = `(SELECT * FROM lake.events ` +
 	`QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, timestamp, name, source ORDER BY cloud_event_id) = 1)`
 
-// eventTable is signalTable for the decoded events source: the deduped
-// lake.events. Deduped like the signal path; the caller aliases it, so it must
-// be a bare parenthesized subquery.
-func (q *Queries) eventTable(_ context.Context, _, _ time.Time) (string, error) {
-	return lakeEventsDeduped, nil
-}
-
 // tsMicroLiteral formats a time.Time as a DuckDB TIMESTAMP literal with
-// microsecond precision. Timestamps are inlined (like ch's dateTime64Micro)
-// instead of bound, so sub-second precision can never be lost in binding.
+// microsecond precision. Timestamps are inlined instead of bound, so sub-second
+// precision can never be lost in binding.
 func tsMicroLiteral(t time.Time) string {
 	return fmt.Sprintf("make_timestamp(%d)", t.UnixMicro())
 }
@@ -73,8 +58,9 @@ func placeholders(n int) string {
 	return strings.Repeat("?, ", n-1) + "?"
 }
 
-// signalSourceCond ports ch's withSource: an ethr DID source filter is
-// reduced to its contract address hex before matching the source column.
+// signalSourceCond builds the source-column predicate: an ethr DID source
+// filter is reduced to its contract address hex before matching the source
+// column.
 func signalSourceCond(col string, filter *model.SignalFilter) (string, []any) {
 	if filter == nil || filter.Source == nil {
 		return "", nil
@@ -86,9 +72,9 @@ func signalSourceCond(col string, filter *model.SignalFilter) (string, []any) {
 	return col + " = ?", []any{source}
 }
 
-// floatFilterSQL ports ch's buildFloatConditionList: leaf conditions are
-// AND-joined, and the Or list becomes one additional AND-ed group of OR-ed
-// sub-filters: base1 AND base2 AND ((or1) OR (or2)).
+// floatFilterSQL builds a float value filter: leaf conditions are AND-joined,
+// and the Or list becomes one additional AND-ed group of OR-ed sub-filters:
+// base1 AND base2 AND ((or1) OR (or2)).
 func floatFilterSQL(col string, fil *model.SignalFloatFilter) (string, []any) {
 	if fil == nil {
 		return "", nil
@@ -239,8 +225,7 @@ func stringArrayFilterSQL(col string, fil *model.StringArrayFilter) (string, []a
 	return "(" + strings.Join(parts, " OR ") + ")", args
 }
 
-// escapeLikePrefix escapes LIKE metacharacters in a prefix and appends '%',
-// mirroring ch's escapeLikePrefix.
+// escapeLikePrefix escapes LIKE metacharacters in a prefix and appends '%'.
 func escapeLikePrefix(prefix string) string {
 	s := strings.ReplaceAll(prefix, `\`, `\\`)
 	s = strings.ReplaceAll(s, `%`, `\%`)

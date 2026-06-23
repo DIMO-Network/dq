@@ -81,7 +81,7 @@ type Config struct {
 	DataPath string `yaml:"DUCKLAKE_DATA_PATH"`
 	// ReadOnly attaches the DuckLake catalog (and its meta side database) in
 	// READ_ONLY mode. Only the single-writer materializer writes the lake; the
-	// query/shadow fleet never does, so it attaches read-only. Besides being
+	// read/query fleet never does, so it attaches read-only. Besides being
 	// defense-in-depth, a read-only attach lets the reader fleet point at a
 	// Postgres read replica (CatalogReadDSN) so the catalog read load of many
 	// query replicas never lands on the primary that din ingest, din

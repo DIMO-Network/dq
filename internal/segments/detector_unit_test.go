@@ -27,7 +27,7 @@ func TestMergeWindowsOngoingNearRealTime(t *testing.T) {
 
 	from := now.Add(-time.Hour)
 	to := now
-	maxGap := 300  // 5 minutes
+	maxGap := 300 // 5 minutes
 	minDuration := 60
 
 	// Window ends 1 minute ago — within the 5-min maxGap of `to`.
@@ -54,7 +54,7 @@ func TestMergeWindowsCompletedOutsideRealTimeGap(t *testing.T) {
 
 	from := now.Add(-time.Hour)
 	to := now
-	maxGap := 300  // 5 minutes
+	maxGap := 300 // 5 minutes
 	minDuration := 60
 
 	// Window ends 10 minutes ago — outside the 5-min maxGap.

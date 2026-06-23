@@ -12,17 +12,10 @@ import (
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
-// GetEvents returns events for a subject in [from, to), newest first,
-// mirroring ch.Service.GetEvents over the decoded event parquet files.
+// GetEvents returns events for a subject in [from, to), newest first, over the
+// deduped decoded events in the DuckLake catalog (lake.events).
 func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.Time, filter *model.EventFilter) ([]*vss.Event, error) {
-	table, err := q.eventTable(ctx, from, to)
-	if err != nil {
-		return nil, err
-	}
 	events := []*vss.Event{}
-	if table == "" {
-		return events, nil
-	}
 
 	conds := []string{
 		"subject = ?",
@@ -39,7 +32,7 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 	// limit/cursor, so a silent cap would lose data. The real
 	// blow-up risk — a fleet-wide scan — is removed by the subject_bucket prune
 	// above; a single vehicle's events over the window stay bounded by its activity.
-	stmt := "SELECT name, source, timestamp, duration_ns, metadata, CAST(to_json(tags) AS VARCHAR) FROM " + table +
+	stmt := "SELECT name, source, timestamp, duration_ns, metadata, CAST(to_json(tags) AS VARCHAR) FROM " + lakeEventsDeduped +
 		" WHERE " + strings.Join(conds, " AND ") + " ORDER BY timestamp DESC"
 
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
@@ -68,17 +61,9 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 }
 
 // GetEventCounts returns event counts by name for a subject in [from, to).
-// If eventNames is non-empty only those names are counted, mirroring
-// ch.Service.GetEventCounts.
+// If eventNames is non-empty only those names are counted.
 func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*qtypes.EventCount, error) {
-	table, err := q.eventTable(ctx, from, to)
-	if err != nil {
-		return nil, err
-	}
 	var result []*qtypes.EventCount
-	if table == "" {
-		return result, nil
-	}
 
 	conds := []string{
 		"subject = ?",
@@ -93,7 +78,7 @@ func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to t
 			args = append(args, n)
 		}
 	}
-	stmt := "SELECT name, CAST(count(*) AS BIGINT) AS count FROM " + table +
+	stmt := "SELECT name, CAST(count(*) AS BIGINT) AS count FROM " + lakeEventsDeduped +
 		" WHERE " + strings.Join(conds, " AND ") + " GROUP BY name ORDER BY name"
 
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
@@ -116,8 +101,8 @@ func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to t
 }
 
 // GetEventCountsForRanges returns event counts by name per segment index for
-// multiple [From, To) ranges in one query, mirroring
-// ch.Service.GetEventCountsForRanges (multiIf -> CASE).
+// multiple [From, To) ranges in one query, classifying each row's range with a
+// CASE chain.
 func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, ranges []qtypes.TimeRange, eventNames []string) ([]*qtypes.EventCountForRange, error) {
 	if len(ranges) == 0 {
 		return nil, nil
@@ -132,14 +117,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 		}
 	}
 
-	table, err := q.eventTable(ctx, globalFrom, globalTo)
-	if err != nil {
-		return nil, err
-	}
 	var result []*qtypes.EventCountForRange
-	if table == "" {
-		return result, nil
-	}
 
 	conds := []string{"subject = ?", subjectBucketPredicate("", subject)} // partition pruning (CHD-1)
 	args := []any{subject}
@@ -149,7 +127,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 			args = append(args, n)
 		}
 	}
-	inner := "SELECT " + segmentIndexCaseSQL("timestamp", ranges) + " AS seg_idx, name FROM " + table +
+	inner := "SELECT " + segmentIndexCaseSQL("timestamp", ranges) + " AS seg_idx, name FROM " + lakeEventsDeduped +
 		" WHERE " + strings.Join(conds, " AND ")
 	stmt := "SELECT CAST(seg_idx AS BIGINT), name, CAST(count(*) AS BIGINT) AS count FROM (" + inner + ")" +
 		" WHERE seg_idx >= 0 GROUP BY seg_idx, name ORDER BY seg_idx, name"
@@ -174,19 +152,12 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 }
 
 // GetEventSummaries returns per-event-name summaries (count, first/last seen)
-// for a subject over all time, mirroring ch.Service.GetEventSummaries. This
-// scans every event date partition for the subject.
+// for a subject over all time. This scans every event date partition for the
+// subject.
 func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
-	table, err := q.eventTable(ctx, time.Time{}, time.Time{})
-	if err != nil {
-		return nil, err
-	}
 	var result []*qtypes.EventSummary
-	if table == "" {
-		return result, nil
-	}
 
-	stmt := "SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM " + table +
+	stmt := "SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM " + lakeEventsDeduped +
 		" WHERE subject = ? AND " + subjectBucketPredicate("", subject) + // partition pruning (CHD-1): all-time scan must still prune to one bucket
 		" GROUP BY name ORDER BY name"
 
@@ -210,7 +181,7 @@ func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qty
 	return result, nil
 }
 
-// appendEventFilterConds ports ch's appendEventFilterMods: name and source
+// appendEventFilterConds builds the event filter predicates: name and source
 // use the string value filter, tags use the string array filter
 // (hasAny/hasAll -> list_has_any/list_has_all).
 func appendEventFilterConds(conds []string, args []any, filter *model.EventFilter) ([]string, []any) {

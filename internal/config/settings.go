@@ -34,7 +34,7 @@ type Settings struct {
 	// a local dir). Must match din's LAKE_DATA_PATH.
 	DuckLakeDataPath string `yaml:"DUCKLAKE_DATA_PATH"`
 	// DuckLakeReadOnly attaches the DuckLake catalog read-only. Set it on the
-	// query/shadow fleet (which never writes the lake — only the single-writer
+	// read/query fleet (which never writes the lake — only the single-writer
 	// materializer does) so the reader fleet can sit on a Postgres read replica
 	// and never opens the primary catalog read-write. Forced off when
 	// MaterializerEnabled so the writer can never come up read-only.

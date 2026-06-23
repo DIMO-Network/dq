@@ -124,7 +124,7 @@ func (s *Server) ListCloudEvents(ctx context.Context, req *grpc.ListCloudEventsR
 		return nil, status.Errorf(codes.Internal, "failed to get index keys: %v", err)
 	}
 	if len(metaList) == 0 {
-		return nil, status.Error(codes.NotFound, "no index keys found") // CH parity (CHD-22)
+		return nil, status.Error(codes.NotFound, "no index keys found") // CHD-22
 	}
 	data, err := fetch.ListCloudEventsFromIndexes(ctx, s.eventService, metaList, s.buckets)
 	if err != nil {
