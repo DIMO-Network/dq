@@ -735,10 +735,11 @@ func (m *DuckLakeMaterializer) refreshRollup(ctx context.Context, tx *sql.Tx, si
 	// make it O(batch), but that must replicate the (subject,name,timestamp)
 	// read-dedup exactly, so it is deferred over correctness risk.)
 	buckets := distinctBucketClause(subjects)
-	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest WHERE subject IN ("+ph+")"+buckets, args...); err != nil {
+	where := "WHERE subject IN (" + ph + ")" + buckets
+	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest "+where, args...); err != nil {
 		return fmt.Errorf("rollup delete: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest "+rollupSelectSQL(ph, buckets), args...); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest "+rollupSelectSQL(where), args...); err != nil {
 		return fmt.Errorf("rollup insert: %w", err)
 	}
 	rollupRefreshSeconds.Set(time.Since(start).Seconds())
@@ -783,11 +784,13 @@ func distinctSubjects(signals []SignalRow) []string {
 }
 
 // rollupSelectSQL builds the per-(subject,name) latest+summary SELECT over the
-// deduped base table for the subjects matched by ph. It mirrors
-// getAllLatestSignalsLake's aggregation exactly (max/arg_max + (0,0)-loc FILTER
-// + count/min/max), folding sources — the no-source-filter case the rollup
-// serves. The QUALIFY dedup matches the read path (CHD-2).
-func rollupSelectSQL(ph, bucketClause string) string {
+// deduped base table, restricted by whereClause (the full "WHERE …" string, or ""
+// for the whole table). It mirrors getAllLatestSignalsLake's aggregation exactly
+// (max/arg_max + (0,0)-loc FILTER + count/min/max), folding sources — the
+// no-source-filter case the rollup serves. The QUALIFY dedup matches the read
+// path (CHD-2). refreshRollup passes a subject-IN + bucket clause for the per-batch
+// recompute; RecomputeRollup passes "" for a full rebuild.
+func rollupSelectSQL(whereClause string) string {
 	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
 	return fmt.Sprintf(`SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
 		max(timestamp) AS timestamp,
@@ -799,9 +802,32 @@ func rollupSelectSQL(ph, bucketClause string) string {
 		coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading,
 		CAST(count(*) AS BIGINT) AS count,
 		min(timestamp) AS first_seen, max(timestamp) AS last_seen
-	FROM (SELECT * FROM lake.signals WHERE subject IN (%[2]s)%[3]s
+	FROM (SELECT * FROM lake.signals %[2]s
 	      QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1)
-	GROUP BY subject, name`, locNonzero, ph, bucketClause)
+	GROUP BY subject, name`, locNonzero, whereClause)
+}
+
+// RecomputeRollup rebuilds lake.signals_latest from scratch over the ENTIRE
+// lake.signals base in one transaction — the O(history) full recompute, byte-
+// identical to the per-batch refreshRollup but unrestricted. The per-batch path
+// only recomputes subjects present in a batch, so a rollup that was dropped or
+// truncated leaves dormant (no-longer-reporting) vehicles permanently missing from
+// the latest/summary reads. This is the disaster-recovery rebuild for that case;
+// it is opt-in (LAKE_REBUILD_ROLLUP_ON_BOOT) because over deep history it is
+// expensive. Safe to run while the single-writer materializer is offline.
+func (m *DuckLakeMaterializer) RecomputeRollup(ctx context.Context) error {
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest"); err != nil {
+		return fmt.Errorf("rollup rebuild delete: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest "+rollupSelectSQL("")); err != nil {
+		return fmt.Errorf("rollup rebuild insert: %w", err)
+	}
+	return tx.Commit()
 }
 
 // antiJoinInsert builds the idempotent INSERT for a decoded table: it skips any

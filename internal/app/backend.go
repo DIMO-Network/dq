@@ -271,6 +271,19 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 			return nil, fmt.Errorf("invalid LAKE_DECODED_RETENTION %q: %w", settings.LakeDecodedRetention, err)
 		}
 	}
+	// Disaster recovery: rebuild signals_latest from the full base before the loop
+	// starts. The per-batch recompute only touches subjects in a batch, so a
+	// dropped/truncated rollup leaves dormant vehicles missing until this runs.
+	// Opt-in (O(history)); set for one boot to repair, then unset.
+	if settings.LakeRebuildRollupOnBoot {
+		logger.Info().Msg("LAKE_REBUILD_ROLLUP_ON_BOOT set: rebuilding signals_latest from full base")
+		if err := mat.RecomputeRollup(context.Background()); err != nil {
+			_ = duckSvc.Close()
+			return nil, fmt.Errorf("rebuild rollup on boot: %w", err)
+		}
+		logger.Info().Msg("signals_latest rebuild complete")
+	}
+
 	runner := materializer.New(materializer.Config{
 		PollInterval:      pollInterval,
 		ChainID:           settings.DIMORegistryChainID,

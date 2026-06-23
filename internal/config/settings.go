@@ -74,9 +74,15 @@ type Settings struct {
 	CompactMinFiles          int    `yaml:"COMPACT_MIN_FILES"`
 	// LakeDecodedRetention is a Go duration (e.g. "8760h"); decoded rows older
 	// than this are pruned from lake.signals/events (CHD-38). Empty disables it.
-	LakeDecodedRetention   string `yaml:"LAKE_DECODED_RETENTION"`
-	MaterializerShardIndex int    `yaml:"MATERIALIZER_SHARD_INDEX"`
-	MaterializerShardCount int    `yaml:"MATERIALIZER_SHARD_COUNT"`
+	LakeDecodedRetention string `yaml:"LAKE_DECODED_RETENTION"`
+	// LakeRebuildRollupOnBoot, when true, rebuilds lake.signals_latest from the
+	// full base on materializer startup before the normal loop (RecomputeRollup) —
+	// the disaster-recovery path for a dropped/truncated rollup. Default false:
+	// it is O(history) and unnecessary in steady state. Set it for one boot to
+	// repair, then unset.
+	LakeRebuildRollupOnBoot bool `yaml:"LAKE_REBUILD_ROLLUP_ON_BOOT"`
+	MaterializerShardIndex  int  `yaml:"MATERIALIZER_SHARD_INDEX"`
+	MaterializerShardCount  int  `yaml:"MATERIALIZER_SHARD_COUNT"`
 	// DIMO registry chain settings for vendor module DID construction.
 	DIMORegistryChainID   uint64 `yaml:"DIMO_REGISTRY_CHAIN_ID"`
 	VehicleNFTAddress     string `yaml:"VEHICLE_NFT_ADDRESS"`
