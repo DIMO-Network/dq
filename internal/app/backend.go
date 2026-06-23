@@ -229,7 +229,7 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 		ShardCount:        settings.MaterializerShardCount,
 	}, store, logger)
 
-	return runMaterializerLoop(runner, logger), nil
+	return runMaterializerLoop(runner, nil, false, logger), nil // bucket mode: no DuckLake rollup to rebuild
 }
 
 // startDuckLakeMaterializer wires the materializer to read din's raw_events
@@ -272,19 +272,6 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 			return nil, fmt.Errorf("invalid LAKE_DECODED_RETENTION %q: %w", settings.LakeDecodedRetention, err)
 		}
 	}
-	// Disaster recovery: rebuild signals_latest from the full base before the loop
-	// starts. The per-batch recompute only touches subjects in a batch, so a
-	// dropped/truncated rollup leaves dormant vehicles missing until this runs.
-	// Opt-in (O(history)); set for one boot to repair, then unset.
-	if settings.LakeRebuildRollupOnBoot {
-		logger.Info().Msg("LAKE_REBUILD_ROLLUP_ON_BOOT set: rebuilding signals_latest from full base")
-		if err := mat.RecomputeRollup(context.Background()); err != nil {
-			_ = duckSvc.Close()
-			return nil, fmt.Errorf("rebuild rollup on boot: %w", err)
-		}
-		logger.Info().Msg("signals_latest rebuild complete")
-	}
-
 	runner := materializer.New(materializer.Config{
 		PollInterval:      pollInterval,
 		ChainID:           settings.DIMORegistryChainID,
@@ -293,7 +280,14 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 		DecodedRetention:  decodedRetention,
 	}, nil, logger).WithDuckLake(mat)
 
-	stop := runMaterializerLoop(runner, logger)
+	// rebuildRollup is the opt-in disaster-recovery rebuild (LAKE_REBUILD_ROLLUP_ON_BOOT):
+	// the per-batch recompute only touches a batch's subjects, so a dropped/truncated
+	// rollup leaves dormant vehicles missing until rebuilt from the full base. It runs
+	// in the loop goroutine BEFORE processing (never concurrently with it) — not
+	// synchronously at boot — so this O(history) scan can't outlast the liveness probe
+	// and CrashLoop the pod; a failure is logged and the loop proceeds (the per-batch
+	// recompute still heals active vehicles).
+	stop := runMaterializerLoop(runner, mat, settings.LakeRebuildRollupOnBoot, logger)
 	return func() {
 		stop()
 		_ = duckSvc.Close()
@@ -302,11 +296,21 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 
 // runMaterializerLoop runs runner.Run in a goroutine and returns a stop
 // function that cancels it and waits for exit.
-func runMaterializerLoop(runner *materializer.Runner, logger zerolog.Logger) func() {
+func runMaterializerLoop(runner *materializer.Runner, mat *materializer.DuckLakeMaterializer, rebuildRollup bool, logger zerolog.Logger) func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		if rebuildRollup {
+			logger.Info().Msg("LAKE_REBUILD_ROLLUP_ON_BOOT set: rebuilding signals_latest from full base (may take a while on deep history)")
+			if err := mat.RecomputeRollup(ctx); err != nil {
+				// Non-fatal: log and proceed — crashing here would CrashLoop the
+				// pod; the per-batch recompute still heals active vehicles.
+				logger.Error().Err(err).Msg("signals_latest rebuild failed; continuing with the normal loop")
+			} else {
+				logger.Info().Msg("signals_latest rebuild complete")
+			}
+		}
 		if err := runner.Run(ctx); err != nil {
 			logger.Error().Err(err).Msg("materializer exited with error")
 		}
