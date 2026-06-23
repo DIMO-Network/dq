@@ -206,12 +206,11 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 		return nil, handleDBError(ctx, err)
 	}
 	// For IDLING, the post-summary speed filter (below) drops moving segments, so
-	// truncating to `limit` here would under-return — and under cursor pagination
-	// permanently skip real idle segments past the cutoff. Defer idling's
-	// truncation until after that filter; other mechanisms truncate now to bound
-	// the per-segment summary fetch.
-	if limit != nil && mechanism != model.DetectionMechanismIdling && len(segments) > *limit {
-		segments = segments[:*limit]
+	// truncating here would under-return and, under cursor pagination, permanently
+	// skip real idle segments past the cutoff. Defer idling's truncation until after
+	// that filter; other mechanisms truncate now to bound the per-segment summary fetch.
+	if mechanism != model.DetectionMechanismIdling {
+		segments = truncateToLimit(segments, limit)
 	}
 
 	defaultReqs := defaultSegmentSignalSet(mechanism)
@@ -219,37 +218,12 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	wantSummary := len(signalReqs) > 0 || len(eventRequests) > 0
 	eventNames := eventNamesOf(eventRequests)
 
-	const summaryEndBuffer = 2 * time.Minute
 	extendSummaryEnd := mechanism == model.DetectionMechanismRefuel || mechanism == model.DetectionMechanismRecharge
 
 	var eventCountsBySeg map[int]map[string]int
 	var aggsBySeg map[int][]*qtypes.AggSignal
 	if wantSummary && len(segments) > 0 {
-		ranges := make([]qtypes.TimeRange, len(segments))
-		aggRanges := make([]qtypes.TimeRange, len(segments))
-		var globalFrom, globalTo time.Time
-		for i, seg := range segments {
-			segTo := to
-			if seg.End != nil {
-				segTo = seg.End.Timestamp
-			}
-			ranges[i] = qtypes.TimeRange{From: seg.Start.Timestamp, To: segTo}
-			summaryTo := segTo
-			if extendSummaryEnd {
-				summaryTo = segTo.Add(summaryEndBuffer)
-			}
-			aggRanges[i] = qtypes.TimeRange{From: seg.Start.Timestamp, To: summaryTo}
-			if i == 0 {
-				globalFrom, globalTo = seg.Start.Timestamp, summaryTo
-			} else {
-				if seg.Start.Timestamp.Before(globalFrom) {
-					globalFrom = seg.Start.Timestamp
-				}
-				if summaryTo.After(globalTo) {
-					globalTo = summaryTo
-				}
-			}
-		}
+		ranges, aggRanges, globalFrom, globalTo := buildSegmentRanges(segments, to, extendSummaryEnd)
 		floatArgs, locationArgs := buildAggArgs(signalReqs)
 		var batchCounts []*qtypes.EventCountForRange
 		var batchAggs []*qtypes.AggSignalForRange
@@ -272,8 +246,9 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	}
 
 	for i, seg := range segments {
+		var eventCounts []*qtypes.EventCount
+		var preFetchedAggs []*qtypes.AggSignal
 		if wantSummary {
-			var eventCounts []*qtypes.EventCount
 			if eventCountsBySeg != nil {
 				m := eventCountsBySeg[i]
 				eventCounts = make([]*qtypes.EventCount, 0, len(m))
@@ -281,49 +256,98 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 					eventCounts = append(eventCounts, &qtypes.EventCount{Name: name, Count: count})
 				}
 			}
-			var preFetchedAggs []*qtypes.AggSignal
 			if aggsBySeg != nil {
 				preFetchedAggs = aggsBySeg[i]
 				if preFetchedAggs == nil {
 					preFetchedAggs = []*qtypes.AggSignal{}
 				}
 			}
-			summary, err := r.segmentSummary(ctx, did, seg, to, signalReqs, eventNames, eventCounts, preFetchedAggs)
-			if err != nil {
-				return nil, err
-			}
-			seg.Signals = summary.Signals
-			seg.EventCounts = summary.EventCounts
-			if summary.StartLocation != nil {
-				seg.Start.Value = summary.StartLocation
-			}
-			if seg.End != nil && summary.EndLocation != nil {
-				seg.End.Value = summary.EndLocation
-			}
 		}
-		// Gap-fill a still-missing start/end location from the nearest fix before the
-		// boundary (lake backend only), then fall back to (0,0).
-		seg.Start.Value = r.gapFillLocation(ctx, did, seg.Start.Value, seg.Start.Timestamp)
-		if seg.Start.Value == nil {
-			seg.Start.Value = noDataLocation()
-		}
-		if seg.End != nil {
-			seg.End.Value = r.gapFillLocation(ctx, did, seg.End.Value, seg.End.Timestamp)
-			if seg.End.Value == nil {
-				seg.End.Value = noDataLocation()
-			}
+		if err := r.enrichSegment(ctx, did, seg, to, wantSummary, signalReqs, eventNames, eventCounts, preFetchedAggs); err != nil {
+			return nil, err
 		}
 	}
 
 	if mechanism == model.DetectionMechanismIdling {
 		segments = filterIdlingSegmentsBySpeed(segments, 0)
-		// Truncate to `limit` only now that moving segments are removed, so a page
-		// returns up to `limit` real idle segments (deferred from above).
-		if limit != nil && len(segments) > *limit {
-			segments = segments[:*limit]
-		}
+		// Truncate only now that moving segments are removed (deferred from above).
+		segments = truncateToLimit(segments, limit)
 	}
 	return segments, nil
+}
+
+// truncateToLimit caps segments at *limit (nil = no cap). For IDLING this must run
+// only AFTER the speed filter (see GetSegments) so a page returns up to `limit` real
+// idle segments instead of under-returning.
+func truncateToLimit(segments []*model.Segment, limit *int) []*model.Segment {
+	if limit != nil && len(segments) > *limit {
+		return segments[:*limit]
+	}
+	return segments
+}
+
+// buildSegmentRanges builds, for the batched summary fetch, each segment's
+// count range and agg range plus the global [from, to] envelope. aggRanges extend
+// the end by summaryEndBuffer for refuel/recharge, whose level signal can land just
+// after the trip ends.
+func buildSegmentRanges(segments []*model.Segment, to time.Time, extendSummaryEnd bool) (ranges, aggRanges []qtypes.TimeRange, globalFrom, globalTo time.Time) {
+	const summaryEndBuffer = 2 * time.Minute
+	ranges = make([]qtypes.TimeRange, len(segments))
+	aggRanges = make([]qtypes.TimeRange, len(segments))
+	for i, seg := range segments {
+		segTo := to
+		if seg.End != nil {
+			segTo = seg.End.Timestamp
+		}
+		ranges[i] = qtypes.TimeRange{From: seg.Start.Timestamp, To: segTo}
+		summaryTo := segTo
+		if extendSummaryEnd {
+			summaryTo = segTo.Add(summaryEndBuffer)
+		}
+		aggRanges[i] = qtypes.TimeRange{From: seg.Start.Timestamp, To: summaryTo}
+		if i == 0 {
+			globalFrom, globalTo = seg.Start.Timestamp, summaryTo
+			continue
+		}
+		if seg.Start.Timestamp.Before(globalFrom) {
+			globalFrom = seg.Start.Timestamp
+		}
+		if summaryTo.After(globalTo) {
+			globalTo = summaryTo
+		}
+	}
+	return ranges, aggRanges, globalFrom, globalTo
+}
+
+// enrichSegment fills a segment's signals/eventCounts (when wantSummary) and then
+// resolves its start/end location through the fallback chain: windowed aggregate →
+// nearest prior fix (lake backend) → (0,0).
+func (r *Repository) enrichSegment(ctx context.Context, did string, seg *model.Segment, to time.Time, wantSummary bool, signalReqs []*model.SegmentSignalRequest, eventNames []string, eventCounts []*qtypes.EventCount, preFetchedAggs []*qtypes.AggSignal) error {
+	if wantSummary {
+		summary, err := r.segmentSummary(ctx, did, seg, to, signalReqs, eventNames, eventCounts, preFetchedAggs)
+		if err != nil {
+			return err
+		}
+		seg.Signals = summary.Signals
+		seg.EventCounts = summary.EventCounts
+		if summary.StartLocation != nil {
+			seg.Start.Value = summary.StartLocation
+		}
+		if seg.End != nil && summary.EndLocation != nil {
+			seg.End.Value = summary.EndLocation
+		}
+	}
+	seg.Start.Value = r.gapFillLocation(ctx, did, seg.Start.Value, seg.Start.Timestamp)
+	if seg.Start.Value == nil {
+		seg.Start.Value = noDataLocation()
+	}
+	if seg.End != nil {
+		seg.End.Value = r.gapFillLocation(ctx, did, seg.End.Value, seg.End.Timestamp)
+		if seg.End.Value == nil {
+			seg.End.Value = noDataLocation()
+		}
+	}
+	return nil
 }
 
 func segmentMaxSpeed(signals []*model.SignalAggregationValue) float64 {
@@ -513,32 +537,7 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 		dayStartUTC := w.start
 		dayEndUTC := w.end
 
-		var segmentCount int
-		var totalActiveSeconds int
-		var firstSeg, lastSeg *model.Segment
-		for _, seg := range segments {
-			segEnd := dayEndUTC
-			if seg.End != nil && seg.End.Timestamp.Before(dayEndUTC) {
-				segEnd = seg.End.Timestamp
-			}
-			if seg.Start.Timestamp.After(dayEndUTC) || segEnd.Before(dayStartUTC) || !segEnd.After(seg.Start.Timestamp) {
-				continue
-			}
-			segmentCount++
-			overlapStart := seg.Start.Timestamp
-			if overlapStart.Before(dayStartUTC) {
-				overlapStart = dayStartUTC
-			}
-			overlapEnd := segEnd
-			if overlapEnd.After(dayEndUTC) {
-				overlapEnd = dayEndUTC
-			}
-			totalActiveSeconds += int(overlapEnd.Sub(overlapStart).Seconds())
-			if firstSeg == nil {
-				firstSeg = seg
-			}
-			lastSeg = seg
-		}
+		segmentCount, totalActiveSeconds, firstSeg, lastSeg := daySegmentStats(segments, dayStartUTC, dayEndUTC)
 
 		signalSummary, startLoc, endLoc := buildSummaryFromAggs(aggsByDay[i], floatArgs)
 		eventSummary := buildEventSummary(eventCountsByDay[i], eventNames)
@@ -574,6 +573,38 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 		out = []*model.DailyActivity{}
 	}
 	return out, nil
+}
+
+// daySegmentStats accounts one calendar day's [dayStart, dayEnd) window against all
+// segments: the count overlapping the day, the total active seconds (each segment's
+// overlap clamped to the day), and the first/last overlapping segment (which supply
+// the day's boundary locations). A segment touches the day only if it both starts
+// before dayEnd and has a positive-length overlap ending after dayStart.
+func daySegmentStats(segments []*model.Segment, dayStart, dayEnd time.Time) (count, activeSeconds int, first, last *model.Segment) {
+	for _, seg := range segments {
+		segEnd := dayEnd
+		if seg.End != nil && seg.End.Timestamp.Before(dayEnd) {
+			segEnd = seg.End.Timestamp
+		}
+		if seg.Start.Timestamp.After(dayEnd) || segEnd.Before(dayStart) || !segEnd.After(seg.Start.Timestamp) {
+			continue
+		}
+		count++
+		overlapStart := seg.Start.Timestamp
+		if overlapStart.Before(dayStart) {
+			overlapStart = dayStart
+		}
+		overlapEnd := segEnd
+		if overlapEnd.After(dayEnd) {
+			overlapEnd = dayEnd
+		}
+		activeSeconds += int(overlapEnd.Sub(overlapStart).Seconds())
+		if first == nil {
+			first = seg
+		}
+		last = seg
+	}
+	return count, activeSeconds, first, last
 }
 
 // dayWindow is one calendar day's UTC [start, end) bounds, in the order

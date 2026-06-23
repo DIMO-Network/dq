@@ -225,67 +225,80 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 	// still drains continuously. The loop only iterates past the first chunk to
 	// skip empty sub-spans (windows of this decoder's own snapshots).
 	for {
-		to := head
-		if m.maxSnapshotSpan > 0 && to-cur > m.maxSnapshotSpan {
-			to = cur + m.maxSnapshotSpan
+		processed, newCur, done, err := m.processChunk(ctx, cur, head, dec)
+		if done {
+			return processed, err
 		}
-
-		events, err := m.readDelta(ctx, cur, to)
-		if err != nil {
-			// Any feed-read failure might mean din's maintenance expired the
-			// cursor range. Decide on retention (the oldest retained snapshot),
-			// not on the error text — so a real expiry with unmatched wording
-			// can't wedge us forever, and a transient error that merely looks
-			// like expiry can't make us skip retained data.
-			if n, handled, rerr := m.maybeRecoverExpired(ctx, cur, err); handled {
-				return n, rerr
-			}
-			return 0, err
-		}
-
-		if len(events) > 0 {
-			observeLakeLag(events) // decode lag = age of the oldest pending event
-			decoded := dec.decodeEvents(ctx, events)
-			if err := m.commit(ctx, decoded, cur, to); err != nil {
-				if errors.Is(err, errSnapshotMoved) {
-					return 0, nil // another decoder won this range; retry next pass
-				}
-				return 0, err
-			}
-			// A batch committed: feed the freshness/throughput alerts (CHD-12).
-			batchesTotal.WithLabelValues(lakeMetricType).Inc()
-			rowsTotal.WithLabelValues("signals").Add(float64(decoded.signalCount))
-			rowsTotal.WithLabelValues("events").Add(float64(decoded.eventCount))
-			errorsTotal.Add(float64(decoded.errorCount))
-			cursorSnapshotID.Set(float64(to))
-			// Report progress to din's snapshot-expiry floor. Throttled: the batch
-			// is already durable, and din only needs the floor within its retention
-			// window — a lagging report just holds expiry back slightly (conservative,
-			// never unsafe), so it needn't be a catalog txn on every batch.
-			m.maybeReportProgress(ctx, to)
-			return len(events), nil
-		}
-
-		// Empty span. If it reached head, the decoder is caught up: head advanced
-		// only via this decoder's own writes. Don't burn a cursor-advance — the
-		// next pass re-reads the empty range cheaply and moves once real data
-		// arrives.
-		if to >= head {
-			observeLakeLag(nil)           // no pending raw events: no decode lag
-			m.reportProgressNow(ctx, cur) // flush the drained position once (no-op if unchanged)
-			return 0, nil
-		}
-		// Empty sub-span below head (only this decoder's own snapshots in the
-		// window): advance the cursor past it so the next chunk reaches the data
-		// beyond, then continue. CAS so a decoder that advanced first wins.
-		if err := m.advanceCursor(ctx, cur, to); err != nil {
-			if errors.Is(err, errSnapshotMoved) {
-				return 0, nil
-			}
-			return 0, err
-		}
-		cur = to
+		cur = newCur
 	}
+}
+
+// processChunk drains one memory-bounded snapshot-span chunk of the (cur, head]
+// backlog. done=true ends RunOnce: with processed>0 when a batch committed, or
+// processed=0 when caught up, when a peer won the range (errSnapshotMoved), or on
+// error. done=false returns newCur advanced past an empty sub-span (only this
+// decoder's own snapshots) for the caller to skip and retry. Every snapshot id is a
+// valid CAS target, so chunking preserves exactly-once.
+func (m *DuckLakeMaterializer) processChunk(ctx context.Context, cur, head int64, dec eventDecoder) (processed int, newCur int64, done bool, err error) {
+	to := head
+	if m.maxSnapshotSpan > 0 && to-cur > m.maxSnapshotSpan {
+		to = cur + m.maxSnapshotSpan
+	}
+
+	events, err := m.readDelta(ctx, cur, to)
+	if err != nil {
+		// Any feed-read failure might mean din's maintenance expired the cursor
+		// range. Decide on retention (the oldest retained snapshot), not on the
+		// error text — so a real expiry with unmatched wording can't wedge us
+		// forever, and a transient error that merely looks like expiry can't make
+		// us skip retained data.
+		if n, handled, rerr := m.maybeRecoverExpired(ctx, cur, err); handled {
+			return n, cur, true, rerr
+		}
+		return 0, cur, true, err
+	}
+
+	if len(events) > 0 {
+		observeLakeLag(events) // decode lag = age of the oldest pending event
+		decoded := dec.decodeEvents(ctx, events)
+		if cerr := m.commit(ctx, decoded, cur, to); cerr != nil {
+			if errors.Is(cerr, errSnapshotMoved) {
+				return 0, cur, true, nil // another decoder won this range; retry next pass
+			}
+			return 0, cur, true, cerr
+		}
+		// A batch committed: feed the freshness/throughput alerts (CHD-12).
+		batchesTotal.WithLabelValues(lakeMetricType).Inc()
+		rowsTotal.WithLabelValues("signals").Add(float64(decoded.signalCount))
+		rowsTotal.WithLabelValues("events").Add(float64(decoded.eventCount))
+		errorsTotal.Add(float64(decoded.errorCount))
+		cursorSnapshotID.Set(float64(to))
+		// Report progress to din's snapshot-expiry floor. Throttled: the batch is
+		// already durable, and din only needs the floor within its retention window
+		// — a lagging report just holds expiry back slightly (conservative, never
+		// unsafe), so it needn't be a catalog txn on every batch.
+		m.maybeReportProgress(ctx, to)
+		return len(events), to, true, nil
+	}
+
+	// Empty span. If it reached head, the decoder is caught up: head advanced only
+	// via this decoder's own writes. Don't burn a cursor-advance — the next pass
+	// re-reads the empty range cheaply and moves once real data arrives.
+	if to >= head {
+		observeLakeLag(nil)           // no pending raw events: no decode lag
+		m.reportProgressNow(ctx, cur) // flush the drained position once (no-op if unchanged)
+		return 0, cur, true, nil
+	}
+	// Empty sub-span below head (only this decoder's own snapshots in the window):
+	// advance the cursor past it so the next chunk reaches the data beyond, then
+	// continue. CAS so a decoder that advanced first wins.
+	if aerr := m.advanceCursor(ctx, cur, to); aerr != nil {
+		if errors.Is(aerr, errSnapshotMoved) {
+			return 0, cur, true, nil
+		}
+		return 0, cur, true, aerr
+	}
+	return 0, to, false, nil // advanced past the empty sub-span; caller continues
 }
 
 // advanceCursor moves the cursor from->to via compare-and-swap, used to skip an
