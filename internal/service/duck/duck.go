@@ -84,6 +84,16 @@ func bootstrapQueries(cfg Config) []string {
 		queries = append(queries, fmt.Sprintf("SET temp_directory = %s", sqlString(cfg.TempDirectory)))
 	}
 	queries = append(queries, "SET enable_object_cache = true")
+	// parquet_metadata_cache=true caches parquet footers across reads. DuckLake
+	// data files are immutable (a new snapshot writes new paths), so cached
+	// metadata is never stale — a safe win for the read fleet re-reading the same
+	// files (hot vehicles, the signals_latest/signals layer).
+	queries = append(queries, "SET parquet_metadata_cache = true")
+	// preserve_insertion_order=false lets DuckDB reorder rows for lower memory and
+	// better parallelism on large scans/inserts (DuckDB OOM guidance). Safe: the
+	// decoded tables are SORTED BY at the DuckLake layer and every read orders
+	// explicitly — nothing relies on implicit row order.
+	queries = append(queries, "SET preserve_insertion_order = false")
 	// HARD INVARIANT (CHD-35): every connection pins UTC. raw_events."time" and
 	// the decoded timestamps are TIMESTAMP WITH TIME ZONE, and the query layer
 	// inlines naive make_timestamp literals that DuckDB resolves in the session
