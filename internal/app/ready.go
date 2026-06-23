@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/DIMO-Network/dq/internal/config"
 	"github.com/DIMO-Network/dq/internal/service/duck"
 )
 
@@ -39,18 +38,13 @@ func (a *App) Ready(ctx context.Context) error {
 	return a.readyCheck(ctx)
 }
 
-// duckReadiness builds a readiness probe over the DuckDB/DuckLake service. In
-// ducklake mode it runs SELECT 1 FROM lake.signals LIMIT 0, which fails unless
-// the catalog is reachable, the DuckLake/httpfs extensions are loaded, and the
-// decoded table is present — exactly the cold-start conditions a static 200
-// hides. Other duck-backed modes fall back to a bare SELECT 1 (engine up).
-func duckReadiness(svc *duck.Service, backend string) func(context.Context) error {
-	probe := "SELECT 1"
-	if backend == config.QueryBackendDuckLake {
-		probe = "SELECT 1 FROM lake.signals LIMIT 0"
-	}
+// duckReadiness builds a readiness probe over the DuckLake service. It runs
+// SELECT 1 FROM lake.signals LIMIT 0, which fails unless the catalog is reachable,
+// the DuckLake/httpfs extensions are loaded, and the decoded table is present —
+// exactly the cold-start conditions a static 200 hides.
+func duckReadiness(svc *duck.Service) func(context.Context) error {
 	return func(ctx context.Context) error {
-		_, err := svc.DB().ExecContext(ctx, probe)
+		_, err := svc.DB().ExecContext(ctx, "SELECT 1 FROM lake.signals LIMIT 0")
 		return err
 	}
 }

@@ -26,12 +26,9 @@ type Settings struct {
 	S3AWSSecretAccessKey string `yaml:"S3_AWS_SECRET_ACCESS_KEY"`
 	// Identity API for device→vehicle DID resolution
 	IdentityAPIURL string `yaml:"IDENTITY_API_URL"`
-	// QueryBackend is retained for config compatibility; DuckLake is the only
-	// backend, so this is effectively always "ducklake".
-	QueryBackend string `yaml:"QUERY_BACKEND"`
 	// DuckLakeCatalogDSN is the shared DuckLake catalog (Postgres DSN in
-	// prod, a catalog file path for single-node). Required when
-	// QUERY_BACKEND=ducklake or the DuckLake materializer is enabled.
+	// prod, a catalog file path for single-node). Required for the query fleet
+	// and when the DuckLake materializer is enabled.
 	DuckLakeCatalogDSN string `yaml:"DUCKLAKE_CATALOG_DSN"`
 	// DuckLakeDataPath is where DuckLake parquet data files live (s3:// or
 	// a local dir). Must match din's LAKE_DATA_PATH.
@@ -82,7 +79,3 @@ type Settings struct {
 	AftermarketNFTAddress string `yaml:"AFTERMARKET_NFT_ADDRESS"`
 	SyntheticNFTAddress   string `yaml:"SYNTHETIC_NFT_ADDRESS"`
 }
-
-// QueryBackendDuckLake is the only query backend: signal/event queries are
-// served from the DuckLake catalog tables (lake.signals / lake.events).
-const QueryBackendDuckLake = "ducklake"

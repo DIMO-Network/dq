@@ -143,7 +143,7 @@ func New(settings config.Settings) (*App, error) {
 
 	var readyCheck func(context.Context) error
 	if duckSvc != nil {
-		readyCheck = duckReadiness(duckSvc, config.QueryBackendDuckLake)
+		readyCheck = duckReadiness(duckSvc)
 	}
 
 	return &App{

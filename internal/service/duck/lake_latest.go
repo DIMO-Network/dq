@@ -12,13 +12,32 @@ import (
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
+// DEDUP KEYS — the four dedup tuples in this codebase and why they differ. At-least-
+// once ingest (device retry, sink redelivery, dq cross-batch) can store the same
+// reading more than once under different cloud_event_ids; every read/write that must
+// not over-count collapses duplicates with the SMALLEST cloud_event_id winning. The
+// tuples differ deliberately by what makes a row "the same reading" in each table:
+//
+//   1. signals READ dedup  — (subject, name, timestamp) ORDER BY cloud_event_id
+//        `signalDedupQualify` below; embedded by lakeSignalsDeduped and the segment
+//        signal-source queries (segments_source.go). One value per signal per instant.
+//   2. signals WRITE anti-join — (subject_bucket, cloud_event_id, name, timestamp)
+//        materializer INSERT (ducklake.go): keyed on cloud_event_id so a re-decoded
+//        batch is idempotent; subject_bucket prunes the partition.
+//   3. events READ dedup   — (subject, timestamp, name, source)
+//        lakeEventsDeduped (queries.go): events include `source` because the SAME
+//        event from two sources is two distinct events, unlike signals.
+//   4. signals_latest rollup recompute — the signal key again
+//        (ducklake.go) so the rollup matches the on-read deduped scan exactly.
+//
+// LocationAt (below) and the ignition seed (segments_source.go) re-derive key #1's
+// tie-break (ORDER BY ... cloud_event_id ASC) by hand for a single-row lookup. Change
+// any one of these and you silently inflate or drop rows — keep them in lockstep.
+
 // signalDedupQualify collapses duplicate lake.signals rows to one per
-// (subject,name,timestamp), keeping the lowest cloud_event_id — the read-side
-// dedup. This dedup key is correctness-critical and
-// must stay in lockstep with the materializer's INSERT anti-join, so it lives
-// in exactly one place: lakeSignalsDeduped wraps it as an aggregation source,
-// and the segment signal-source queries (segments_source.go) embed it against
-// the bare table.
+// (subject,name,timestamp), keeping the lowest cloud_event_id (read dedup key #1
+// above). lakeSignalsDeduped wraps it as an aggregation source; the segment
+// signal-source queries (segments_source.go) embed it against the bare table.
 const signalDedupQualify = `QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1`
 
 // lakeSignalsDeduped is the canonical DuckLake decoded-signal source:

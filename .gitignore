@@ -1,1 +1,4 @@
 /settings.yaml
+
+# compiled binary (repo + binary share the name "dq")
+/dq

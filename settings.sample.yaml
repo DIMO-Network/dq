@@ -7,7 +7,6 @@ ENABLE_PPROF: false
 MAX_REQUEST_DURATION: 30s
 
 # DuckLake is the only query backend.
-QUERY_BACKEND: ducklake
 DUCKLAKE_CATALOG_DSN: ""
 DUCKLAKE_DATA_PATH: ""
 
