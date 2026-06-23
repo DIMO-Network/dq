@@ -362,6 +362,14 @@ func locationCaseSQL(component, outCol string, locationArgs []model.LocationSign
 
 // floatAggExpr maps a float aggregation to its DuckDB expression.
 //
+// DELIBERATE DIVERGENCE FROM CLICKHOUSE (exactness): MED is DuckDB's exact
+// median(value_number); ClickHouse's median() is an approximate t-digest estimate.
+// So a window's median is now EXACT, not estimated — a correctness improvement, not
+// a parity bug. Do NOT "restore parity" by switching to an approximate quantile;
+// pinned by TestExactAggExpr_DivergesFromClickHouse. (FIRST/LAST use arg_min/
+// arg_max over the (subject,name,timestamp)-deduped scan, so they are tie-free and
+// deterministic, where CH's FINAL+argMax is not.)
+//
 // RAND decision: ClickHouse used groupArraySample(1, <now-ms seed>)[1] — a
 // uniform random pick, reseeded every query. DuckDB has no seeded sampling
 // aggregate, so RAND is arg_max(value, rnd) where rnd is one random() draw
@@ -390,6 +398,11 @@ func floatAggExpr(aggType model.FloatAggregation) string {
 // stringAggExpr maps a string aggregation to its DuckDB expression:
 // topK(1) -> mode(), groupUniqArray+arrayStringConcat -> string_agg(DISTINCT),
 // argMin/argMax -> arg_min/arg_max, RAND as in floatAggExpr.
+//
+// DELIBERATE DIVERGENCE (exactness): UNIQUE is an EXACT distinct set (string_agg
+// DISTINCT) and TOP is an EXACT mode(); ClickHouse's groupUniqArray/topK are
+// approximate. This is a correctness improvement — the same intentional
+// exact-over-approximate divergence as median (see floatAggExpr).
 func stringAggExpr(aggType model.StringAggregation) string {
 	switch aggType {
 	case model.StringAggregationRand:

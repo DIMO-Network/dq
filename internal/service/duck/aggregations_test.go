@@ -411,3 +411,16 @@ func TestGetAggregatedSignalsForRanges(t *testing.T) {
 		assert.Empty(t, rows)
 	})
 }
+
+// TestExactAggExpr_DivergesFromClickHouse pins the deliberate exact-over-approximate
+// divergences from ClickHouse so a well-meaning "restore parity" change can't quietly
+// revert them: MED must be DuckDB's exact median() (CH used approximate t-digest),
+// UNIQUE an exact distinct set (CH groupUniqArray), TOP an exact mode() (CH topK).
+func TestExactAggExpr_DivergesFromClickHouse(t *testing.T) {
+	require.Equal(t, "median(value_number)", floatAggExpr(model.FloatAggregationMed),
+		"MED must be exact median(), not an approximate quantile")
+	require.Equal(t, "string_agg(DISTINCT value_string, ',' ORDER BY value_string)",
+		stringAggExpr(model.StringAggregationUnique), "UNIQUE must be an exact distinct set")
+	require.Equal(t, "mode(value_string)", stringAggExpr(model.StringAggregationTop),
+		"TOP must be exact mode()")
+}
