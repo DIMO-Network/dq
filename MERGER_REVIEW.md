@@ -8,7 +8,7 @@ Review of the telemetry-api + fetch-api → dq merger, 2026-04-23.
 - `did` → `subject` rename on the fetch side is done everywhere externally (schema, resolvers, directive argument name).
 - `DetectionMechanism` is the only enum that actually needed snake-casing, and it was done consistently — including in-doc references like `[frequencyAnalysis]` → `[FREQUENCY_ANALYSIS]`.
 - `CloudEventIndex` / `indexKey` / `indexes` / `latestIndex` / `attestations` / `vinVCLatest` are fully gone from the GraphQL surface. Internal `ListIndexesAdvanced` / `GetLatestIndexAdvanced` remain as implementation for `cloudEvents` / `latestCloudEvent`, which is correct.
-- Config is collapsed cleanly. Telemetry-only fields (`VehicleNFTAddress`, `ChainID`, `FetchAPIGRPCEndpoint`, `CreditTrackerEndpoint`, `StorageNodeDevLicense`, `VINDataVersion`) and fetch-only `DQEndpoint` are all removed. Splitting ClickHouse into `SIGNAL` and `FILE` is a reasonable choice.
+- Config is collapsed cleanly. Telemetry-only fields (`VehicleNFTAddress`, `ChainID`, `FetchAPIGRPCEndpoint`, `CreditTrackerEndpoint`, `StorageNodeDevLicense`, `VINDataVersion`) and fetch-only `DQEndpoint` are all removed. (The query backend is now DuckLake-only.)
 - Auth claim model is simplified correctly: `DQClaim` embeds `tokenclaims.Token`, directive compares `claim.Asset` to the `subject` arg as strings. No more DID reconstruction from contract + tokenId.
 - `queryRecorder`, `pricing`, `dtcmiddleware`, `credittracker`, vc/attestation repos — all fully removed, no dangling references.
 
@@ -61,13 +61,13 @@ Repositories, auth, graph resolver, and identity tests would all port with modes
 - `events_test.go` (13k)
 - `segments_test.go` (18k)
 - `auth_server_test.go` (4.5k)
-- `clickhouse_container_test.go` + `setup_test.go` (test harness)
+- `setup_test.go` (test harness)
 
-These run against a real ClickHouse container and a mock auth server, so they exercise the full permissions/resolver/repository/DB path — exactly the surface where a hand-rolled privilege filter can silently lose fidelity. Porting `setup_test.go` + `clickhouse_container_test.go` + `permission_test.go` would be the highest-value starting point.
+These ran against a real query DB and a mock auth server, so they exercise the full permissions/resolver/repository/DB path — exactly the surface where a hand-rolled privilege filter can silently lose fidelity. Porting `setup_test.go` + `permission_test.go`, adapted to the DuckLake-backed test harness (the lake parity/integration tests already stand up a real catalog), would be the highest-value starting point.
 
 ### 5. Duplicated construction in app init
 
-`app.New` and `app.CreateGRPCServer` both independently build a ClickHouse connection (FILE pool), an S3 client, a presign client, and an `eventrepo.Service` — so the process ends up with two of each for the file catalogue. Not a correctness bug but worth consolidating (construct once in `New`, pass into `CreateGRPCServer`).
+`app.New` and `app.CreateGRPCServer` both independently build an S3 client, a presign client, and the lake event service — so the process ends up with two of each. Not a correctness bug but worth consolidating (construct once in `New`, pass into `CreateGRPCServer`). Re-verify after the DuckLake-only rewiring, which may already have collapsed some of this.
 
 ### 6. Stale naming from the rename
 
@@ -79,4 +79,4 @@ Not functional, but the rename effort stopped at the public surface:
 
 ### 7. Empty `Cleanup()`
 
-`internal/app/app.go:106` — `cleanup: func() {}`. Both source repos also left this effectively empty, so it's not a merger regression, just a pre-existing TODO carried over. ClickHouse / S3 connections won't be closed on shutdown.
+`internal/app/app.go:106` — `cleanup: func() {}`. Both source repos also left this effectively empty, so it's not a merger regression, just a pre-existing TODO carried over. The DuckDB/catalog and S3 connections won't be closed on shutdown.
