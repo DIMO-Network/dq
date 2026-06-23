@@ -41,7 +41,7 @@ type App struct {
 	MCPHandler http.Handler
 	cleanup    func()
 	// readyCheck probes backend health for the /ready endpoint; nil = always
-	// ready (e.g. pure ClickHouse mode).
+	// ready (e.g. a backend with no health probe).
 	readyCheck func(context.Context) error
 	// eventService and buckets are the query backend New already built; the gRPC
 	// server reuses them instead of opening a second duck.Service + S3 client in

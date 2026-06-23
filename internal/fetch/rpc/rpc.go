@@ -38,7 +38,7 @@ func NewServer(buckets []string, eventService eventrepo.EventService) *Server {
 
 // validObjectKey rejects index keys that could escape the expected object
 // namespace via path traversal. Defense-in-depth for the gRPC fetch path, which
-// dereferences client-supplied keys on the legacy ClickHouse/JSON path (CHD-22);
+// dereferences client-supplied keys on the legacy JSON path (CHD-22);
 // the lake path re-queries by (subject,id) and ignores the key. A legitimate key
 // is a parquet ref, a lake:// locator, or a blob/object key — none contain "..".
 func validObjectKey(key string) bool {
@@ -89,8 +89,8 @@ func (s *Server) ListIndexes(ctx context.Context, req *grpc.ListIndexesRequest) 
 		}
 		return nil, status.Errorf(codes.Internal, "failed to get index keys: %v", err)
 	}
-	// The lake backend returns an empty slice (no error) when nothing matches;
-	// ClickHouse returned NotFound. Map empty → NotFound for contract parity (CHD-22).
+	// The lake backend returns an empty slice (no error) when nothing matches.
+	// Map empty → NotFound for the gRPC contract (CHD-22).
 	if len(indexObjs) == 0 {
 		return nil, status.Error(codes.NotFound, "no index keys found")
 	}

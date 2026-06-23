@@ -12,9 +12,8 @@ import (
 )
 
 // ErrNotFound reports that a query matched no stored cloud event. It wraps
-// sql.ErrNoRows so that errors.Is(err, sql.ErrNoRows) is true — matching the
-// behaviour of the ClickHouse eventrepo.Service, which the gRPC layer uses to
-// map absence to codes.NotFound.
+// sql.ErrNoRows so that errors.Is(err, sql.ErrNoRows) is true, which the
+// gRPC layer uses to map absence to codes.NotFound.
 var ErrNotFound = fmt.Errorf("cloud event not found: %w", sql.ErrNoRows)
 
 // DefaultRawScanWindowDays bounds date-unbounded raw queries. Older data is
@@ -28,7 +27,7 @@ const latestWalkMaxDays = 400
 // RawFilter narrows a raw cloudevent scan. Zero values mean "no filter".
 // The eventrepo facade translates grpc.SearchOptions into this.
 //
-// Field semantics match ClickHouse eventrepo exactly:
+// Field semantics:
 //   - Subject / Subjects: single equality vs. multi-value IN (Subjects takes
 //     priority when non-empty; Subject is kept for backward compat).
 //   - *NotIn fields: NOT IN exclusion filter, mirrors StringFilterOption.NotIn.
@@ -67,12 +66,12 @@ type RawFilter struct {
 
 	// TimestampAsc controls ORDER BY direction. When true, results are returned
 	// oldest-first (ASC); false or unset means newest-first (DESC). Mirrors
-	// ClickHouse eventrepo.ListIndexesAdvanced's GetTimestampAsc decision.
+	// eventrepo.ListIndexesAdvanced's GetTimestampAsc decision.
 	TimestampAsc bool
 }
 
 // Raw queries raw cloudevent bundles (raw/type=T/date=D hive layout)
-// directly with DuckDB — the replacement for the ClickHouse cloud_event
+// directly with DuckDB — the replacement for the former cloud_event
 // index plus per-row parquet seeks. Data comes back inline.
 //
 // Raw is the legacy bucket/hive raw-event reader (QUERY_BACKEND=duckdb), retired
@@ -230,7 +229,7 @@ func whereClause(filter RawFilter) (string, []any) {
 // ExcludeVoided is NOT applied here — it requires a correlated subquery that
 // depends on the FROM table, so it is handled by the lake query builder.
 //
-// All filter semantics mirror ClickHouse eventrepo exactly. See RawFilter for
+// All filter semantics mirror eventrepo exactly. See RawFilter for
 // field-level documentation.
 func whereClauseQ(filter RawFilter, prefix string) (string, []any) {
 	conds := []string{"1=1"}
@@ -315,9 +314,9 @@ func whereClauseQ(filter RawFilter, prefix string) (string, []any) {
 	}
 
 	if !filter.After.IsZero() {
-		// Strict greater-than matches ClickHouse eventrepo (timestamp > ?) for
-		// After boundary parity. NOTE: the legacy hive Raw path shares this
-		// function; it is being retired, so CH parity takes precedence.
+		// Strict greater-than (timestamp > ?) for After-boundary semantics.
+		// NOTE: the legacy hive Raw path shares this function; it is being
+		// retired, so the strict-boundary semantics take precedence.
 		conds = append(conds, col("time")+" > ?")
 		args = append(args, filter.After.UTC())
 	}

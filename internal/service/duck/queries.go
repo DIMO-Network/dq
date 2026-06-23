@@ -10,8 +10,8 @@ import (
 	"github.com/DIMO-Network/dq/internal/graph/model"
 )
 
-// Queries answers the signal/latest/summary/event queries previously served by
-// the ClickHouse service (internal/service/ch) from parquet files written by
+// Queries answers the signal/latest/summary/event queries served by
+// the query layer from parquet files written by
 // the materializer:
 //
 //   - decoded/v1/signals/date=YYYY-MM-DD/*.parquet  (full-history signals)
@@ -68,10 +68,10 @@ func (q *Queries) signalTable(ctx context.Context, from, to time.Time) (string, 
 // with at-rest duplicate rows collapsed to one. The materializer's INSERT
 // anti-join keys on (subject_bucket, cloud_event_id, name, timestamp), so two
 // distinct cloud_event_ids that decode to the same logical event both survive —
-// reading the bare table over-counts events vs ClickHouse, whose event
-// ReplacingMergeTree collapses on (subject, timestamp, name, source). Dedup on
+// reading the bare table over-counts events, so duplicates are collapsed
+// on (subject, timestamp, name, source). Dedup on
 // that same key here (lowest cloud_event_id wins, deterministically) restores
-// parity (SR review #3; the events analogue of lakeSignalsDeduped / CHD-2).
+// correct counts (SR review #3; the events analogue of lakeSignalsDeduped / CHD-2).
 // subject/timestamp remain partition/sort keys, so predicates still prune.
 const lakeEventsDeduped = `(SELECT * FROM lake.events ` +
 	`QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, timestamp, name, source ORDER BY cloud_event_id) = 1)`
@@ -192,8 +192,8 @@ func tsMicroLiteral(t time.Time) string {
 	return fmt.Sprintf("make_timestamp(%d)", t.UnixMicro())
 }
 
-// epochLiteral is the zero timestamp, mirroring ClickHouse's default value
-// for max()/maxIf() over empty sets. The repository layer treats the Unix
+// epochLiteral is the zero timestamp, used as the default value
+// for max() over empty sets. The repository layer treats the Unix
 // epoch as "no data".
 const epochLiteral = "make_timestamp(0)"
 
@@ -272,8 +272,8 @@ func floatFilterSQL(col string, fil *model.SignalFloatFilter) (string, []any) {
 	return strings.Join(conds, " AND "), args
 }
 
-// stringFilterSQL ports ch's stringFilterMod. Leaf conditions are AND-joined;
-// Or clauses are OR-ed against that AND-ed base (ClickHouse operator
+// stringFilterSQL builds a string value filter. Leaf conditions are AND-joined;
+// Or clauses are OR-ed against that AND-ed base (operator
 // precedence): (base1 AND base2 OR (or1) OR (or2)).
 func stringFilterSQL(col string, fil *model.StringValueFilter) (string, []any) {
 	if fil == nil {
@@ -324,8 +324,8 @@ func stringFilterSQL(col string, fil *model.StringValueFilter) (string, []any) {
 	return "(" + strings.Join(parts, " OR ") + ")", args
 }
 
-// stringArrayFilterSQL ports ch's stringArrayFilterMod using DuckDB's
-// list_has_any/list_has_all in place of ClickHouse's hasAny/hasAll. Or
+// stringArrayFilterSQL builds a string-array filter using DuckDB's
+// list_has_any/list_has_all for any/all overlap. Or
 // handling matches stringFilterSQL.
 func stringArrayFilterSQL(col string, fil *model.StringArrayFilter) (string, []any) {
 	if fil == nil {

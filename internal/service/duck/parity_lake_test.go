@@ -12,11 +12,11 @@ import (
 )
 
 // TestLakeAggregations_EngineParity locks DuckDB aggregate semantics on the
-// lake (target) backend against ClickHouse golden vectors (CHD-33). ClickHouse
-// is unavailable in the dev environment, so these are the agreed-parity values;
-// the DuckDB↔CH function mapping is documented in aggregations.go
-// (median↔median, mode↔topK(1), string_agg DISTINCT↔groupUniqArray, and the
-// coalesce(…,0) default that mirrors CH's empty-aggregate result). The bucket
+// lake (target) backend against golden vectors (CHD-33). These are the
+// agreed expected values;
+// the aggregate behavior is documented in aggregations.go
+// (exact median, mode for TOP, string_agg DISTINCT for UNIQUE, and the
+// coalesce(…,0) empty-aggregate default). The bucket
 // path exercises the same expressions in aggregations_test.go.
 func TestLakeAggregations_EngineParity(t *testing.T) {
 	ctx := context.Background()

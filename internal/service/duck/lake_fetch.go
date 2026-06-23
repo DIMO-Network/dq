@@ -24,18 +24,17 @@ var errOrClauseUnsupported = errors.New("lake fetch: Or clauses in advanced filt
 const lakeRawEvents = "lake.raw_events"
 
 // defaultFetchScanWindow bounds a subject-less, id-less lake fetch as a DoS
-// guard against scanning all of raw_events (CHD-34). It is NOT a parity bound:
-// ClickHouse applies no lookback floor when the caller supplies no `after` (it
-// just ORDER BY time DESC LIMIT n over its index), so a subject-scoped fetch
+// guard against scanning all of raw_events (CHD-34). It is NOT a correctness
+// bound: no lookback floor is applied when the caller supplies no `after`
+// (just ORDER BY time DESC LIMIT n), so a subject-scoped fetch
 // must reach arbitrarily old events too (SR review #4). queryLakeRaw therefore
 // applies this window only when neither an id nor a subject narrows the scan.
 const defaultFetchScanWindow = 400 * 24 * time.Hour
 
 // maxLakeQueryLimit caps the number of rows a single lake fetch query may
-// return, matching ClickHouse eventrepo.maxQueryLimit. Without it an oversized
+// return. Without it an oversized
 // caller-supplied limit (the gRPC layer passes it through unguarded) forces an
-// unbounded scan plus a Go-side dedup map — a memory/latency DoS ClickHouse is
-// immune to.
+// unbounded scan plus a Go-side dedup map — a memory/latency DoS.
 const maxLakeQueryLimit = 1000
 
 // RawEventColumns is the raw_events SELECT projection in din's DDL column order
@@ -81,16 +80,16 @@ var _ eventrepo.EventService = (*LakeEventService)(nil)
 
 // queryLakeRaw returns at most limit events matching filter, deduped on the
 // header key. When filter.ExcludeVoided is set, tombstones (voids_id != ”)
-// and events referenced by a tombstone are excluded. ORDER BY direction
-// matches ClickHouse eventrepo: DESC (newest-first) by default, ASC
+// and events referenced by a tombstone are excluded. ORDER BY direction:
+// DESC (newest-first) by default, ASC
 // (oldest-first) when filter.TimestampAsc is true.
 func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, limit int) ([]cloudevent.StoredEvent, error) {
 	// Apply the default lookback only when nothing else narrows the scan: not a
 	// point lookup by id (GetCloudEventFromIndex), and not a subject-scoped
 	// fetch. A subject prunes via raw_events' (subject, time) sort + zone maps to
 	// that one vehicle's files, so latestCloudEvent / cloudEvents can reach
-	// arbitrarily old events without a full scan — and must, to match ClickHouse,
-	// which imposes no floor when the caller supplies no `after`. A dormant
+	// arbitrarily old events without a full scan — and must, because no floor
+	// is imposed when the caller supplies no `after`. A dormant
 	// vehicle whose newest event predates the window otherwise wrongly looked
 	// empty (SR review #4). Only a subject-less, id-less search keeps the guard.
 	if filter.After.IsZero() && len(filter.IDs) == 0 && filter.Subject == "" && len(filter.Subjects) == 0 {
@@ -162,8 +161,7 @@ func (l *LakeEventService) ListIndexesAdvanced(ctx context.Context, limit int, o
 
 // GetLatestIndexAdvanced returns the single newest index entry matching opts,
 // or ErrNotFound when no events exist. TimestampAsc is forced to false (DESC)
-// so that "latest" always means newest, mirroring ClickHouse's
-// GetLatestIndexAdvanced which explicitly sets TimestampAsc=false before
+// so that "latest" always means newest: TimestampAsc is set to false before
 // delegating to ListIndexesAdvanced.
 func (l *LakeEventService) GetLatestIndexAdvanced(ctx context.Context, opts *grpc.AdvancedSearchOptions) (cloudevent.CloudEvent[eventrepo.ObjectInfo], error) {
 	// Force DESC regardless of any caller-supplied TimestampAsc so we always
@@ -199,8 +197,8 @@ func (l *LakeEventService) GetLatestIndex(ctx context.Context, opts *grpc.Search
 // matching opts. Voided events are excluded (ExcludeVoided always true here).
 //
 // This intentionally does NOT apply defaultFetchScanWindow: first_seen/last_seen
-// are all-time min/max per type, so a lookback bound would corrupt them and
-// diverge from ClickHouse's getEventSummariesQuery, which is also unbounded
+// are all-time min/max per type, so a lookback bound would corrupt them; the
+// summary query is therefore unbounded
 // (SR-10). raw_events is partitioned by (type, day), so a type filter still
 // prunes; an unfiltered summary is an inherent full scan by definition.
 func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Context, opts *grpc.AdvancedSearchOptions) ([]eventrepo.CloudEventTypeSummary, error) {
@@ -445,7 +443,7 @@ func filterFromAdvanced(opts *grpc.AdvancedSearchOptions) (RawFilter, error) {
 	if opts.GetBefore() != nil {
 		f.Before = opts.GetBefore().AsTime()
 	}
-	// Mirror ClickHouse eventrepo.ListIndexesAdvanced: ASC only when explicitly
+	// Mirror eventrepo.ListIndexesAdvanced: ASC only when explicitly
 	// true; unset (nil) or false → DESC (newest first).
 	f.TimestampAsc = opts.GetTimestampAsc().GetValue()
 	return f, nil

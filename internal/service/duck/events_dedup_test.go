@@ -13,8 +13,8 @@ import (
 // duplicates the way the signal path does (SR review #3). Two rows with the same
 // (subject, timestamp, name, source) but different cloud_event_id — an
 // at-least-once / re-decode duplicate the materializer's anti-join keeps because
-// its key includes cloud_event_id — must count once, matching ClickHouse's event
-// ReplacingMergeTree. A row differing only in source is a distinct event.
+// its key includes cloud_event_id — must count once after duplicates are
+// collapsed. A row differing only in source is a distinct event.
 func TestLakeEvents_DedupOnRead(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeServiceForTest(t)

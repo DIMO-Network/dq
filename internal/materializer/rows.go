@@ -62,15 +62,13 @@ type EventRow struct {
 // LatestRow is one row per (subject, source, name) in
 // decoded/v1/latest/bucket=NNN/latest.parquet.
 //
-// Two ClickHouse business rules from internal/service/ch/queries.go are
-// replicated here:
+// Two decoding business rules are applied here:
 //
 //   - A virtual per-(subject, source) row named lastSeenFieldName carries
-//     max(timestamp) across ALL signals regardless of name
-//     (getLastSeenQuery).
-//   - The loc_*_nonzero columns mirror latestLocationCond/argMaxIf: they
+//     max(timestamp) across ALL signals regardless of name.
+//   - The loc_*_nonzero columns implement latestLocationCond: they
 //     track the latest location value where latitude or longitude is
-//     non-zero, with loc_nonzero_ts as the matching maxIf timestamp.
+//     non-zero, with loc_nonzero_ts as the matching timestamp.
 //     The plain loc_* columns are the unconditional argMax values.
 type LatestRow struct {
 	Name              string    `parquet:"name"`

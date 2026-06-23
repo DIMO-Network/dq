@@ -34,7 +34,7 @@ func (r *recordingService) GetCloudEventFromIndex(_ context.Context, _ *cloudeve
 }
 
 // A batching backend (the lake) resolves every index in one call; a non-batching
-// backend (ClickHouse) falls back to one query per key.
+// backend falls back to one query per key.
 func TestListCloudEventsFromIndexes_Routing(t *testing.T) {
 	idx := make([]cloudevent.CloudEvent[eventrepo.ObjectInfo], 5)
 	for i := range idx {

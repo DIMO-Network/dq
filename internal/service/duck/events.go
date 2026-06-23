@@ -34,9 +34,9 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 	conds, args = appendEventFilterConds(conds, args, filter)
 
 	// tags is a parquet list; serialize to JSON in SQL so it round-trips
-	// through database/sql as a plain string. No LIMIT: ClickHouse GetEvents
+	// through database/sql as a plain string. No LIMIT: GetEvents
 	// returns every matching event and the GraphQL Events query exposes no
-	// limit/cursor, so a silent cap would lose data and break parity. The real
+	// limit/cursor, so a silent cap would lose data. The real
 	// blow-up risk — a fleet-wide scan — is removed by the subject_bucket prune
 	// above; a single vehicle's events over the window stay bounded by its activity.
 	stmt := "SELECT name, source, timestamp, duration_ns, metadata, CAST(to_json(tags) AS VARCHAR) FROM " + table +

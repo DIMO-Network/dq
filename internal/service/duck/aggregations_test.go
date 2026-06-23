@@ -395,7 +395,7 @@ func TestGetAggregatedSignalsForRanges(t *testing.T) {
 	loc0 := byKey[[3]int{0, int(qtypes.LocType), 0}].ValueLocation
 	assert.InDelta(t, 1, loc0.Latitude, 1e-9)
 	assert.InDelta(t, 2, loc0.Longitude, 1e-9)
-	// seg 1: batch agg does NOT exclude (0, 0) rows, mirroring ClickHouse.
+	// seg 1: batch agg does NOT exclude (0, 0) rows.
 	loc1 := byKey[[3]int{1, int(qtypes.LocType), 0}].ValueLocation
 	assert.InDelta(t, 0, loc1.Latitude, 1e-9)
 	assert.InDelta(t, 0, loc1.Longitude, 1e-9)
@@ -412,11 +412,11 @@ func TestGetAggregatedSignalsForRanges(t *testing.T) {
 	})
 }
 
-// TestExactAggExpr_DivergesFromClickHouse pins the deliberate exact-over-approximate
-// divergences from ClickHouse so a well-meaning "restore parity" change can't quietly
-// revert them: MED must be DuckDB's exact median() (CH used approximate t-digest),
-// UNIQUE an exact distinct set (CH groupUniqArray), TOP an exact mode() (CH topK).
-func TestExactAggExpr_DivergesFromClickHouse(t *testing.T) {
+// TestExactAggExpr_Exact pins the exact-aggregation expressions so a well-meaning
+// "use an approximate aggregate" change can't quietly
+// revert them: MED must be DuckDB's exact median(),
+// UNIQUE an exact distinct set, TOP an exact mode().
+func TestExactAggExpr_Exact(t *testing.T) {
 	require.Equal(t, "median(value_number)", floatAggExpr(model.FloatAggregationMed),
 		"MED must be exact median(), not an approximate quantile")
 	require.Equal(t, "string_agg(DISTINCT value_string, ',' ORDER BY value_string)",

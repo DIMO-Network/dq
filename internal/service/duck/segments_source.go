@@ -28,8 +28,8 @@ func NewLakeSignalSource(svc *Service) *LakeSignalSource {
 // bucketed to windowSizeSeconds, keeping only windows meeting the count and
 // distinct-count thresholds, ordered by window start.
 //
-// Buckets are epoch-aligned (origin = Unix epoch 1970-01-01T00:00:00Z), matching
-// ClickHouse's toStartOfInterval(timestamp, INTERVAL N second) exactly. Both
+// Buckets are epoch-aligned (origin = Unix epoch 1970-01-01T00:00:00Z): the
+// window start is floor(timestamp / N seconds) * N. Both
 // functions floor to the nearest multiple of the window size measured from the
 // epoch, so [00:00:00,00:01:00), [00:01:00,00:02:00), ... regardless of `from`.
 // A `from` that is not a multiple of the window size does NOT shift bucket
@@ -40,7 +40,7 @@ func NewLakeSignalSource(svc *Service) *LakeSignalSource {
 // lake.signals has no unique constraint per (subject,name,timestamp): duplicate
 // rows can be present across materializer batches. The inner QUALIFY dedup
 // keeps one row per (subject,name,timestamp,cloud_event_id) to prevent
-// inflated counts, mirroring ClickHouse's FINAL merge semantics.
+// inflated counts by collapsing duplicate rows.
 func (s *LakeSignalSource) WindowedSignalCounts(ctx context.Context, subject string, from, to time.Time, win, sig, dist int) ([]segments.ActiveWindow, error) {
 	winUS := int64(win) * 1_000_000
 	fromUS := from.UTC().UnixMicro()

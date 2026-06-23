@@ -42,7 +42,6 @@ func (f *fakeBlobGetter) PutObject(_ context.Context, _ *s3.PutObjectInput, _ ..
 
 // newLakeEventServiceForTest opens a DuckLake file catalog, creates the
 // lake.raw_events table, and returns a LakeEventService ready for testing.
-// No ClickHouse is required.
 func newLakeEventServiceForTest(t *testing.T) (*LakeEventService, *Service) {
 	t.Helper()
 	svc := newLakeServiceForTest(t) // creates lake-attached Service
@@ -501,7 +500,7 @@ func timestampProto(_ *testing.T, ts time.Time) *timestamppb.Timestamp {
 // --- Fix 2 tests ---
 
 // TestAfterBoundaryIsStrict verifies Fix 2: an event whose timestamp equals
-// filter.After is excluded (strict >), matching ClickHouse semantics.
+// filter.After is excluded (strict >).
 func TestAfterBoundaryIsStrict(t *testing.T) {
 	ctx := context.Background()
 	lsvc, svc := newLakeEventServiceForTest(t)
@@ -685,7 +684,7 @@ func TestOrClauseReturnsError(t *testing.T) {
 
 // TestTimestampAsc_ListIndexesAdvanced verifies that TimestampAsc=true returns
 // events oldest-first and TimestampAsc=false (or unset) returns newest-first,
-// matching ClickHouse eventrepo.ListIndexesAdvanced semantics exactly.
+// matching eventrepo.ListIndexesAdvanced semantics exactly.
 func TestTimestampAsc_ListIndexesAdvanced(t *testing.T) {
 	ctx := context.Background()
 	lsvc, svc := newLakeEventServiceForTest(t)
@@ -725,7 +724,7 @@ func TestTimestampAsc_ListIndexesAdvanced(t *testing.T) {
 
 // TestTimestampAsc_GetLatestIndexAdvanced verifies that GetLatestIndexAdvanced
 // always returns the newest event even when the caller passes TimestampAsc=true,
-// matching ClickHouse's GetLatestIndexAdvanced which forces DESC before calling
+// because it forces DESC before calling
 // ListIndexesAdvanced.
 func TestTimestampAsc_GetLatestIndexAdvanced(t *testing.T) {
 	ctx := context.Background()
@@ -809,8 +808,8 @@ func TestLakeEventService_GetCloudEventFromIndex_BlobNoGetter(t *testing.T) {
 }
 
 // TestLakeEventService_ListIndexesAdvanced_CapsLimit verifies that an
-// over-large caller limit is clamped to maxLakeQueryLimit (1000), matching
-// ClickHouse eventrepo. Without the cap, a single gRPC caller could force an
+// over-large caller limit is clamped to maxLakeQueryLimit (1000). Without the
+// cap, a single gRPC caller could force an
 // unbounded scan + Go-side dedup (memory/latency DoS).
 func TestLakeEventService_ListIndexesAdvanced_CapsLimit(t *testing.T) {
 	ctx := context.Background()
@@ -829,5 +828,5 @@ func TestLakeEventService_ListIndexesAdvanced_CapsLimit(t *testing.T) {
 		Subject: &grpc.StringFilterOption{In: []string{subj}},
 	})
 	require.NoError(t, err)
-	require.Len(t, indexes, 1000, "limit must be capped at maxLakeQueryLimit (1000) to match ClickHouse")
+	require.Len(t, indexes, 1000, "limit must be capped at maxLakeQueryLimit (1000)")
 }

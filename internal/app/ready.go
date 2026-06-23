@@ -30,7 +30,7 @@ func ReadyHandler(ready func(context.Context) error) http.HandlerFunc {
 }
 
 // Ready runs the backend readiness check (nil = ready); it is the probe behind
-// ReadyHandler. A nil check (e.g. pure ClickHouse mode with no duck service)
+// ReadyHandler. A nil check (e.g. a backend with no duck service to probe)
 // reports ready.
 func (a *App) Ready(ctx context.Context) error {
 	if a.readyCheck == nil {

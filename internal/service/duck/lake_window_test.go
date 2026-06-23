@@ -13,9 +13,9 @@ import (
 )
 
 // TestLakeEventService_DefaultScanWindow proves the default lookback window is a
-// DoS guard for subject-less, id-less scans only — NOT a parity bound. A
+// DoS guard for subject-less, id-less scans only — NOT a correctness bound. A
 // subject-scoped fetch prunes to one vehicle's files, so it reaches arbitrarily
-// old events (matching ClickHouse, which imposes no floor when given no
+// old events (no floor is imposed when given no
 // `after`); only a subject-less search keeps the window, and a point lookup by
 // id bypasses it (SR review #4).
 func TestLakeEventService_DefaultScanWindow(t *testing.T) {

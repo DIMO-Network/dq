@@ -1,6 +1,6 @@
 // Package segments holds backend-agnostic vehicle usage-segment detection.
 // Detectors contain only algorithm logic; all data access goes through a
-// SignalSource, implemented once per storage backend (ClickHouse, DuckLake).
+// SignalSource, implemented once per storage backend (DuckLake).
 package segments
 
 import (
@@ -60,8 +60,8 @@ type TimeRange struct {
 
 // IdleRunSource is an OPTIONAL capability: a backend that can compute idle-RPM runs
 // in the store (window functions / gaps-and-islands) instead of streaming every RPM
-// sample to Go. The lake backend implements it; ClickHouse does not, so the idling
-// detector falls back to LevelSamples + findIdleRpmRanges. Runs are the raw
+// sample to Go. The lake backend implements it; a backend that does not triggers the
+// idling detector's fallback to LevelSamples + findIdleRpmRanges. Runs are the raw
 // contiguous idle intervals over [from, to) — a run breaks on a non-idle reading or
 // a gap > maxGapSeconds between consecutive idle readings (matching the Go logic);
 // the detector clips and minDuration-filters them.

@@ -115,7 +115,7 @@ func TestGetLatestSignalsAllZeroLocation(t *testing.T) {
 	signals, err := q.GetLatestSignals(context.Background(), testSubject1, latestArgs)
 	require.NoError(t, err)
 	require.Len(t, signals, 1)
-	// Mirrors ClickHouse maxIf/argMaxIf defaults: the row exists but with
+	// Default for an empty latest-location aggregate: the row exists but with
 	// epoch timestamp and zero location; the repository treats it as no data.
 	assert.Equal(t, unixEpoch, signals[0].Data.Timestamp)
 	assert.Zero(t, signals[0].Data.ValueLocation.Latitude)

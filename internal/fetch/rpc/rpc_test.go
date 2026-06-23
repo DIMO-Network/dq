@@ -73,7 +73,7 @@ func TestListCloudEventsFromIndex_RejectsTooManyKeys(t *testing.T) {
 }
 
 // TestListIndexes_EmptyReturnsNotFound pins the gRPC contract: an empty result
-// is NotFound, matching ClickHouse, not OK+empty (CHD-22). The lake backend
+// is NotFound, not OK+empty (CHD-22). The lake backend
 // returns an empty slice with no error, which silently broke clients expecting
 // NotFound.
 func TestListIndexes_EmptyReturnsNotFound(t *testing.T) {

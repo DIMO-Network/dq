@@ -96,8 +96,8 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 		args = append(args, a...)
 	}
 
-	// ORDER BY makes the result deterministic so shadow-compare against
-	// ClickHouse diffs values, not engine-specific GROUP BY ordering.
+	// ORDER BY makes the result deterministic so a shadow-compare
+	// diffs values, not engine-specific GROUP BY ordering.
 	return q.querySignals(ctx, strings.Join(stmts, " UNION ALL ")+" ORDER BY name", args)
 }
 

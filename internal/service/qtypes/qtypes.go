@@ -1,7 +1,6 @@
 // Package qtypes holds the backend-agnostic query result and argument types
 // shared by the query layer (the DuckLake backend) and its repository consumers.
-// These were originally defined in the ClickHouse service; they outlived it and
-// now live in a neutral package so no consumer depends on a specific backend.
+// They live in a neutral package so no consumer depends on a specific backend.
 package qtypes
 
 import (

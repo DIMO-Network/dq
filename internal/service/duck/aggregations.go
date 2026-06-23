@@ -14,7 +14,7 @@ import (
 )
 
 // Result row types (qtypes.AggSignal, qtypes.AggSignalForRange, qtypes.FieldType, ...)
-// are reused from the ClickHouse service so the repository layer can swap
+// are shared across backends so the repository layer can swap
 // implementations without translation.
 
 // signalSrcColumns is the projection of the inner (pre-aggregation) select
@@ -25,14 +25,13 @@ const signalSrcColumns = `agg_table.signal_type AS signal_type, agg_table.signal
 	s.loc_lat AS loc_lat, s.loc_lon AS loc_lon, s.loc_hdop AS loc_hdop, s.loc_heading AS loc_heading,
 	random() AS rnd`
 
-// GetAggregatedSignals ports ch.Service.GetAggregatedSignals to DuckDB over
+// GetAggregatedSignals computes signal aggregations in DuckDB over
 // the decoded signal parquet files. Each requested aggregation is identified
-// by (signal_type, signal_index) through a VALUES join (the same trick the
-// ClickHouse query used), and per-(type, index) CASE expressions pick the
-// right aggregate per output column.
+// by (signal_type, signal_index) through a VALUES join, and per-(type, index)
+// CASE expressions pick the right aggregate per output column.
 //
-// Time bucketing decision: ClickHouse's
-// toStartOfInterval(ts, toIntervalMicrosecond(n), origin) is implemented with
+// Time bucketing decision: epoch-aligned bucketing
+// (toStartOfInterval-style) is implemented with
 // pure epoch math — origin + ((epoch_us(ts) - epoch_us(origin)) // n) * n —
 // instead of DuckDB's time_bucket(). Both were verified to agree for
 // microsecond intervals (time_bucket(to_microseconds(n), ts, origin)), but
@@ -116,10 +115,10 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 	return signals, nil
 }
 
-// GetAggregatedSignalsForRanges ports ch.Service.GetAggregatedSignalsForRanges:
-// the same aggregations computed for multiple [From, To) segments in one
-// query. The ClickHouse multiIf segment classifier becomes a CASE chain.
-// Mirroring ch, only FloatArgs and LocationArgs are supported, no per-signal
+// GetAggregatedSignalsForRanges computes the same aggregations for multiple
+// [From, To) segments in one
+// query. The segment classifier is a CASE chain.
+// Only FloatArgs and LocationArgs are supported, no per-signal
 // value filters are applied, and (0, 0) locations are NOT excluded.
 func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject string, ranges []qtypes.TimeRange, globalFrom, globalTo time.Time, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs) ([]*qtypes.AggSignalForRange, error) {
 	if len(ranges) == 0 {
@@ -188,8 +187,8 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 // location signal filter, or "" when there is none. Pure SQL — no spatial
 // extension dependency: inCircle is a haversine great-circle distance (km) and
 // inPolygon is an even-odd ray cast unrolled over the request's vertices (fixed
-// at query-build time). Replaces the old "not supported" rejection and mirrors
-// ClickHouse's geoDistance / pointInPolygon (SR review #10). InCircle takes
+// at query-build time). Replaces the old "not supported" rejection and provides
+// geodesic distance / point-in-polygon filtering (SR review #10). InCircle takes
 // precedence when both are set.
 func locationFilterSQL(latCol, lonCol string, f *model.SignalLocationFilter) string {
 	if f == nil {
@@ -205,7 +204,7 @@ func locationFilterSQL(latCol, lonCol string, f *model.SignalLocationFilter) str
 }
 
 // haversineWithinSQL constrains the great-circle distance (km, mean Earth radius
-// 6371 — matching ClickHouse geoDistance's sphere) from (latCol,lonCol) to the
+// 6371) from (latCol,lonCol) to the
 // center to be within radiusKm.
 func haversineWithinSQL(latCol, lonCol string, clat, clon, radiusKm float64) string {
 	return fmt.Sprintf(
@@ -245,8 +244,8 @@ func floatLit(f float64) string {
 }
 
 // aggValuesTable renders the (signal_type, signal_index, name) inline VALUES
-// table identifying each requested aggregation, the DuckDB equivalent of
-// ClickHouse's VALUES('...', (1, 0, 'speed'), ...) join.
+// table identifying each requested aggregation, e.g.
+// VALUES((1, 0, 'speed'), ...) for the join.
 func aggValuesTable(floatArgs []model.FloatSignalArgs, stringArgs []model.StringSignalArgs, locationArgs []model.LocationSignalArgs) string {
 	entries := make([]string, 0, len(floatArgs)+len(stringArgs)+len(locationArgs))
 	for i, a := range floatArgs {
@@ -317,7 +316,7 @@ func segmentIndexCaseSQL(tsCol string, ranges []qtypes.TimeRange) string {
 
 // floatCaseSQL renders the agg_number output column: a CASE choosing the
 // requested float aggregate per (signal_type, signal_index). NULL branches
-// (rows of other types) are coalesced to 0 like the ClickHouse scan did.
+// (rows of other types) are coalesced to 0.
 func floatCaseSQL(floatArgs []model.FloatSignalArgs) string {
 	if len(floatArgs) == 0 {
 		return "0.0 AS agg_number"
@@ -344,10 +343,9 @@ func stringCaseSQL(stringArgs []model.StringSignalArgs) string {
 }
 
 // locationCaseSQL renders one component (lat/lon/hdop/heading) of the
-// location aggregate output. ClickHouse aggregated the location tuple
-// atomically; here each component is aggregated with the same ordering key
+// location aggregate output. Each component is aggregated with the same ordering key
 // (timestamp, or the shared per-row rnd for RAND), so components still come
-// from the same row except for AVG, which averages component-wise like CH.
+// from the same row except for AVG, which averages component-wise.
 func locationCaseSQL(component, outCol string, locationArgs []model.LocationSignalArgs) string {
 	if len(locationArgs) == 0 {
 		return "0.0 AS " + outCol
@@ -362,18 +360,17 @@ func locationCaseSQL(component, outCol string, locationArgs []model.LocationSign
 
 // floatAggExpr maps a float aggregation to its DuckDB expression.
 //
-// DELIBERATE DIVERGENCE FROM CLICKHOUSE (exactness): MED is DuckDB's exact
-// median(value_number); ClickHouse's median() is an approximate t-digest estimate.
-// So a window's median is now EXACT, not estimated — a correctness improvement, not
-// a parity bug. Do NOT "restore parity" by switching to an approximate quantile;
-// pinned by TestExactAggExpr_DivergesFromClickHouse. (FIRST/LAST use arg_min/
+// EXACT aggregation: MED is DuckDB's exact
+// median(value_number) (not an approximate quantile).
+// So a window's median is EXACT, not estimated. Do NOT switch to an approximate
+// quantile;
+// pinned by TestExactAggExpr_Exact. (FIRST/LAST use arg_min/
 // arg_max over the (subject,name,timestamp)-deduped scan, so they are tie-free and
-// deterministic, where CH's FINAL+argMax is not.)
+// deterministic.)
 //
-// RAND decision: ClickHouse used groupArraySample(1, <now-ms seed>)[1] — a
-// uniform random pick, reseeded every query. DuckDB has no seeded sampling
+// RAND decision: DuckDB has no seeded sampling
 // aggregate, so RAND is arg_max(value, rnd) where rnd is one random() draw
-// per input row: also a uniform random pick, also different per query.
+// per input row: a uniform random pick, different per query.
 func floatAggExpr(aggType model.FloatAggregation) string {
 	switch aggType {
 	case model.FloatAggregationAvg:
@@ -399,10 +396,9 @@ func floatAggExpr(aggType model.FloatAggregation) string {
 // topK(1) -> mode(), groupUniqArray+arrayStringConcat -> string_agg(DISTINCT),
 // argMin/argMax -> arg_min/arg_max, RAND as in floatAggExpr.
 //
-// DELIBERATE DIVERGENCE (exactness): UNIQUE is an EXACT distinct set (string_agg
-// DISTINCT) and TOP is an EXACT mode(); ClickHouse's groupUniqArray/topK are
-// approximate. This is a correctness improvement — the same intentional
-// exact-over-approximate divergence as median (see floatAggExpr).
+// EXACT aggregation: UNIQUE is an EXACT distinct set (string_agg
+// DISTINCT) and TOP is an EXACT mode() (not approximate). This is the same
+// exact aggregation approach as median (see floatAggExpr).
 func stringAggExpr(aggType model.StringAggregation) string {
 	switch aggType {
 	case model.StringAggregationRand:

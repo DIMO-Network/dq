@@ -1,27 +1,27 @@
-// fetch_lake_parity_test.go documents and pins the CH-parity semantics of
+// fetch_lake_parity_test.go documents and pins the fetch-contract semantics of
 // duck.LakeEventService against lake.raw_events.
 //
-// PURPOSE: every bullet in the parity surface must be demonstrably covered
+// PURPOSE: every bullet in the contract surface must be demonstrably covered
 // somewhere in the test suite. Tests that are ALREADY covered by existing
 // files are noted by reference; this file adds the GAPS.
 //
 // ────────────────────────────────────────────────────────────────────────────
-// PARITY COVERAGE MAP
-// (each CH eventrepo behaviour → where it is pinned)
+// FETCH CONTRACT COVERAGE MAP
+// (each eventrepo behaviour → where it is pinned)
 // ────────────────────────────────────────────────────────────────────────────
 //
 //  1. ORDERING — list/latest return newest-first by time.
-//     CH rule: ORDER BY timestamp DESC.
+//     Rule: ORDER BY timestamp DESC.
 //     Covered by:
 //       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_ListIndexesAdvanced
-//       • tests/ducklake_no_clickhouse_test.go:TestDuckLakeNoClickHouse_FetchQueriesWork
+//       • tests/ducklake_only_test.go:TestDuckLakeOnly_FetchQueriesWork
 //
-//  2. STRICT After — event exactly at After is EXCLUDED (CH: timestamp > ?).
+//  2. STRICT After — event exactly at After is EXCLUDED (timestamp > ?).
 //     Covered by:
 //       • internal/service/duck/lake_fetch_test.go:TestAfterBoundaryIsStrict
 //
-//  3. STRICT Before — event exactly at Before is EXCLUDED (CH: timestamp < ?).
-//     Note: ducklake_no_clickhouse_test.go tests Before with a non-boundary
+//  3. STRICT Before — event exactly at Before is EXCLUDED (timestamp < ?).
+//     Note: ducklake_only_test.go tests Before with a non-boundary
 //     timestamp. The strict exclusive-boundary case is pinned HERE:
 //       • THIS FILE: TestBeforeBoundaryIsStrict
 //
@@ -30,7 +30,7 @@
 //     Covered by:
 //       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_VoidingExcludes
 //       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_ListIndexesAdvanced
-//       • tests/ducklake_no_clickhouse_test.go:TestDuckLakeNoClickHouse_VoidingExcludesEvents
+//       • tests/ducklake_only_test.go:TestDuckLakeOnly_VoidingExcludesEvents
 //
 //  5. FILTER NARROWING — each field filter is exercised:
 //

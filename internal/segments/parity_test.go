@@ -529,11 +529,11 @@ func TestIgnitionDetectorFiltersShortOff(t *testing.T) {
 }
 
 func TestIgnitionDetectorEmitsOngoingInitialOn(t *testing.T) {
-	// CH-aligned behavior: an initial ON with no prior OFF in the window opens an
-	// ongoing segment that IS emitted. The source now seeds prev_state=0 (like CH's
-	// signal_state_changes) rather than -1, and the detector no longer special-cases
-	// -1 — so a continuously-ON vehicle's in-progress segment is reported, matching
-	// ClickHouse at cutover.
+	// Expected behavior: an initial ON with no prior OFF in the window opens an
+	// ongoing segment that IS emitted. The source now seeds prev_state=0
+	// rather than -1, and the detector no longer special-cases
+	// -1 — so a continuously-ON vehicle's in-progress segment is reported as a
+	// single open segment.
 	now := time.Now()
 	from := now.Add(-time.Hour)
 	to := now

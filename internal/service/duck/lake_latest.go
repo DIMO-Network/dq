@@ -14,7 +14,7 @@ import (
 
 // signalDedupQualify collapses duplicate lake.signals rows to one per
 // (subject,name,timestamp), keeping the lowest cloud_event_id — the read-side
-// mirror of ClickHouse's FINAL merge. This dedup key is parity-critical and
+// dedup. This dedup key is correctness-critical and
 // must stay in lockstep with the materializer's INSERT anti-join, so it lives
 // in exactly one place: lakeSignalsDeduped wraps it as an aggregation source,
 // and the segment signal-source queries (segments_source.go) embed it against
@@ -29,7 +29,7 @@ const signalDedupQualify = `QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, nam
 // avg/count/sum/median/latest/summary (CHD-2 / R1-C1). After collapsing, every
 // (subject,name,timestamp) is unique, so arg_max(value, timestamp) for latest
 // has no tie-break ambiguity either (R1-C2). Matches the segments path
-// (segments_source.go) and ClickHouse FINAL merge semantics. The PARTITION BY
+// (segments_source.go), collapsing duplicate rows. The PARTITION BY
 // columns are partition/sort keys (CHD-1), so subject/timestamp predicates
 // still prune below the window.
 const lakeSignalsDeduped = `(SELECT * FROM lake.signals ` + signalDedupQualify + `)`
@@ -192,7 +192,7 @@ func (q *Queries) getSignalSummariesLake(ctx context.Context, subject string, fi
 // ties (lowest cloud_event_id, matching the read-path dedup). nil means the vehicle
 // has no known fix at/before ts. The segment enrichment uses it to gap-fill a trip's
 // start/end location when no GPS fix landed inside the (often short) trip window — a
-// correctness win ClickHouse's window-bounded argMin/argMax structurally cannot do.
+// correctness win a window-bounded argMin/argMax structurally cannot do.
 func (q *Queries) LocationAt(ctx context.Context, subject string, ts time.Time) (*model.Location, error) {
 	query := fmt.Sprintf(`
 SELECT loc_lat, loc_lon, loc_hdop FROM lake.signals

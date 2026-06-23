@@ -4,7 +4,7 @@
 // decoded parquet, exactly as the parse-on-read pipeline produces it) and a
 // recording fake SegmentsBackend that returns canned segment windows.
 //
-// Segment DETECTION still lives in ClickHouse (the fake stands in for it);
+// Segment DETECTION is supplied by the recording fake here;
 // everything around it — argument validation, config plumbing, default
 // signal-set merging, per-segment signal aggregation and event counts over
 // DuckDB, limit/after pagination, idling speed filtering, and dailyActivity

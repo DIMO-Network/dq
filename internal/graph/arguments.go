@@ -116,7 +116,7 @@ func latestArgsFromContext(ctx context.Context, did string, filter *model.Signal
 // getIntervalMicroseconds parses the interval string and returns the number
 // of microseconds the interval contains.
 //
-// We use microseconds because the ClickHouse column is DateTime64(6, 'UTC').
+// We use microseconds for sub-second timestamp precision.
 func getIntervalMicroseconds(interval string) (int64, error) {
 	dur, err := time.ParseDuration(interval)
 	if err != nil {

@@ -72,8 +72,7 @@ func downloadS3Object(ctx context.Context, client ObjectGetter, bucket, key stri
 
 // DownloadObject fetches an entire S3 object into memory, rejecting objects
 // larger than the maximum single-object size (maxObjectSize). It is the
-// blob-payload resolution primitive shared by the ClickHouse fetch path
-// (getObjectFromS3) and the DuckLake LakeEventService.
+// blob-payload resolution primitive used by the DuckLake LakeEventService.
 func DownloadObject(ctx context.Context, client ObjectGetter, bucket, key string) ([]byte, error) {
 	return downloadS3Object(ctx, client, bucket, key, maxObjectSize)
 }

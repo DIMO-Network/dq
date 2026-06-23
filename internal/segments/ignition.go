@@ -76,7 +76,7 @@ func (d *IgnitionDetector) buildSegmentsWithDebouncing(stateChanges []StateChang
 
 	// Handle ongoing segment (started but no end signal). Emitted for any open
 	// segment: no source seeds prev_state=-1 anymore, so an in-progress segment on
-	// a continuously-ON vehicle is reported exactly as ClickHouse does (parity).
+	// a continuously-ON vehicle is reported as a single open segment.
 	if currentSegmentStart != nil {
 		duration := int32(to.Sub(*currentSegmentStart).Seconds())
 		if int(duration) >= minDuration {

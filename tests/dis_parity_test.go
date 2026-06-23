@@ -6,7 +6,7 @@
 // same payload the dis integration suite pushes through mTLS. Its expected
 // decoded values (speed 31.24609375, powertrainType "COMBUSTION", oil level
 // "LOW", tire pressures, …) are hand-verified in model-garage and are
-// exactly what dis persisted to ClickHouse and served through dq's GraphQL
+// exactly what dis persisted and served through dq's GraphQL
 // API. Here the same payload flows through the NEW pipeline — raw parquet →
 // materializer → DuckDB — and a real gqlgen execution of signalsLatest must
 // return those exact numbers.

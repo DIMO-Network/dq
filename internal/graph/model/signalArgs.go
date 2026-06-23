@@ -8,7 +8,7 @@ const (
 	// LastSeenField is the field name for the last seen timestamp.
 	LastSeenField = "lastSeen"
 	// ApproximateCoordinatesField is the field name for the approximate current location.
-	// This is treated specially because there is no underlying ClickHouse table row carrying
+	// This is treated specially because there is no underlying stored row carrying
 	// this name.
 	ApproximateCoordinatesField = "currentLocationApproximateCoordinates"
 )

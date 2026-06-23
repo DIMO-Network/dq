@@ -15,7 +15,7 @@ import (
 // sink redelivery, cross-batch) can store with different cloud_event_id — do
 // not over-count aggregations or summaries. The segments path already dedups;
 // the aggregation/latest/summary paths did not (CHD-2 / R1-C1). One canonical
-// row per key (lowest cloud_event_id) is kept, mirroring ClickHouse FINAL.
+// row per key (lowest cloud_event_id) is kept by collapsing duplicates.
 func TestLakeQueries_DedupOverCount(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeServiceForTest(t)

@@ -1,9 +1,8 @@
-// segments_lake_parity_test.go — e2e parity test for LakeSegments.
+// segments_lake_parity_test.go — e2e test for LakeSegments.
 //
-// Approach: golden-vector comparison rather than a live CH cross-backend diff.
-// A real ClickHouse instance is not available in this CI environment. Because CH
-// and the lake share the exact same detector algorithms (both call
-// segments.NewDetector with only the SignalSource differing), parity is
+// Approach: golden-vector comparison against expected segment shapes.
+// The detector algorithms are backend-agnostic (segments.NewDetector with only
+// the SignalSource differing), so correctness is
 // guaranteed by construction; the unit tests in internal/segments/parity_test.go
 // pin the algorithm. This test validates that LakeSegments correctly fetches
 // data from lake.signals AND invokes the detectors, producing the expected

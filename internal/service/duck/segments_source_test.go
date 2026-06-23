@@ -312,8 +312,8 @@ func TestLakeSignalSource_IgnitionStateChanges_ContinuouslyOn(t *testing.T) {
 // parity fix: a vehicle already ON entering the window that turns OFF in range
 // must NOT fabricate a phantom trip. With prev_state seeded from the true prior ON,
 // the in-window ON reading is not a transition; only the OFF is emitted, and the
-// detector (OFF with no open segment) produces no segment — matching ClickHouse,
-// not the old hardcoded-0 seed that invented one.
+// detector (OFF with no open segment) produces no segment — unlike
+// the old hardcoded-0 seed that invented one.
 func TestLakeSignalSource_IgnitionStateChanges_PriorOnNoFabrication(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeServiceForTest(t)

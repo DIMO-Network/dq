@@ -75,11 +75,11 @@ MATERIALIZER_ENABLED=true \
 go run ./cmd/dq
 ```
 
-**Honest caveat (current state):** the server still requires a reachable ClickHouse at startup even in duckdb mode (segments backend, eventrepo, gRPC fetch) — decoupling is a tracked work item. Until then, the fastest way to see the full parse-on-read path run locally with zero infra is the test suite, which exercises raw bundles → materializer → DuckDB → real GraphQL execution end to end:
+**Local dev:** the whole query surface — signals, events, raw, segments, and the eventrepo fetch path — is served from DuckLake (the lake catalog plus S3, or entirely from local parquet). The fastest way to see the full parse-on-read path run with zero infra is the test suite, which exercises raw bundles → materializer → DuckDB → real GraphQL execution end to end:
 
 ```bash
 go test ./tests/ -v -run 'TestPipelineEndToEnd|TestDISParity'
 go test ./tests/ -v -perf -run 'TestQueryPerformance|TestMaterializerPerformance'
 ```
 
-Other limitations in single-node mode: segment detection and the eventrepo fetch path (ClickHouse index + S3 presign) keep their backing services; the duckdb signal/event/raw query surfaces work fully from local parquet.
+In single-node mode every query surface — signals, events, raw, segments, and the eventrepo fetch path (S3 presign) — runs from DuckLake over local parquet; no external query engine is required.

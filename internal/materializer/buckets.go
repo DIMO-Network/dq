@@ -134,7 +134,7 @@ func applySignalToLatest(m map[latestKey]*LatestRow, row SignalRow) {
 		cur.LocHeading = row.LocHeading
 	}
 	// latestLocationCond: exclude (0, 0) coordinates from the
-	// latest-location tracking, mirroring the ClickHouse argMaxIf/maxIf.
+	// latest-location tracking, keeping the latest non-zero location per bucket.
 	if (row.LocLat != 0 || row.LocLon != 0) && row.Timestamp.After(cur.LocNonzeroTS) {
 		cur.LocNonzeroTS = row.Timestamp
 		cur.LocLatNonzero = row.LocLat

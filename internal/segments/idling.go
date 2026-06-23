@@ -55,7 +55,7 @@ func (d *IdlingDetector) DetectSegments(
 			appendIdleRange(r.Start, r.End, minDuration, from, to, &ranges)
 		}
 	} else {
-		// Fallback (ClickHouse): stream RPM samples and find runs in Go.
+		// Fallback (no in-store idle-run support): stream RPM samples and find runs in Go.
 		samples, err := d.src.LevelSamples(ctx, subject, vss.FieldPowertrainCombustionEngineSpeed, lookbackFrom, to)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query RPM samples: %w", err)

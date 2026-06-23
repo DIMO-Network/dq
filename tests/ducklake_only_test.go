@@ -1,12 +1,12 @@
-// ducklake_no_clickhouse_test.go proves that in QUERY_BACKEND=ducklake mode
+// ducklake_only_test.go proves that in QUERY_BACKEND=ducklake mode
 // the event service (cloudEvents / latestCloudEvent / availableCloudEventTypes)
-// can be fully constructed and serve queries against lake.raw_events without
-// any ClickHouse reachable.
+// can be fully constructed and serve queries against lake.raw_events using only
+// the DuckLake backend.
 //
 // The key property being tested: duck.NewLakeEventService (the implementation
 // that newEventService selects for ducklake mode) serves all index/summary/
-// payload queries from a file-backed DuckLake catalog — no ClickHouse DSN
-// required, no ClickHouse client constructed.
+// payload queries from a file-backed DuckLake catalog — no external query
+// backend required.
 package tests
 
 import (
@@ -26,11 +26,11 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// fetchSubject is the test vehicle DID for no-ClickHouse fetch tests.
+// fetchSubject is the test vehicle DID for DuckLake-only fetch tests.
 var fetchSubject = fmt.Sprintf("did:erc721:137:%s:200", vehicleNFT.Hex())
 
-// newLakeFetchService opens a file-catalog DuckDB service (no ClickHouse
-// required), creates lake.raw_events, and returns a LakeEventService.
+// newLakeFetchService opens a file-catalog DuckDB service, creates
+// lake.raw_events, and returns a LakeEventService.
 // This mirrors the duck.Service that newEventService constructs in ducklake mode.
 func newLakeFetchService(t *testing.T) (*duck.LakeEventService, *duck.Service) {
 	t.Helper()
@@ -70,9 +70,9 @@ func seedFetchRawEvent(t *testing.T, duckSvc *duck.Service, id, subject, evType 
 	require.NoError(t, err)
 }
 
-// TestDuckLakeNoClickHouse_FetchQueriesWork boots the lake fetch event service
-// (no ClickHouse at all) and asserts all four fetch surfaces serve correctly.
-func TestDuckLakeNoClickHouse_FetchQueriesWork(t *testing.T) {
+// TestDuckLakeOnly_FetchQueriesWork boots the lake fetch event service
+// (DuckLake backend only) and asserts all four fetch surfaces serve correctly.
+func TestDuckLakeOnly_FetchQueriesWork(t *testing.T) {
 	ctx := context.Background()
 	svc, duckSvc := newLakeFetchService(t)
 
@@ -92,7 +92,7 @@ func TestDuckLakeNoClickHouse_FetchQueriesWork(t *testing.T) {
 
 	// --- ListIndexesAdvanced ---
 	indexes, err := svc.ListIndexesAdvanced(ctx, 10, subjectFilter)
-	require.NoError(t, err, "ListIndexesAdvanced must succeed with no ClickHouse")
+	require.NoError(t, err, "ListIndexesAdvanced must succeed")
 	require.Len(t, indexes, 3)
 	// newest-first: fetch-fp (3h) > fetch-2 (2h) > fetch-1 (1h)
 	assert.Equal(t, "fetch-fp", indexes[0].ID)
@@ -101,12 +101,12 @@ func TestDuckLakeNoClickHouse_FetchQueriesWork(t *testing.T) {
 
 	// --- GetLatestIndexAdvanced ---
 	latest, err := svc.GetLatestIndexAdvanced(ctx, subjectFilter)
-	require.NoError(t, err, "GetLatestIndexAdvanced must succeed with no ClickHouse")
+	require.NoError(t, err, "GetLatestIndexAdvanced must succeed")
 	assert.Equal(t, "fetch-fp", latest.ID)
 
 	// --- GetCloudEventTypeSummariesAdvanced ---
 	summaries, err := svc.GetCloudEventTypeSummariesAdvanced(ctx, subjectFilter)
-	require.NoError(t, err, "GetCloudEventTypeSummariesAdvanced must succeed with no ClickHouse")
+	require.NoError(t, err, "GetCloudEventTypeSummariesAdvanced must succeed")
 	require.Len(t, summaries, 2)
 	sumByType := map[string]eventrepo.CloudEventTypeSummary{}
 	for _, s := range summaries {
@@ -117,7 +117,7 @@ func TestDuckLakeNoClickHouse_FetchQueriesWork(t *testing.T) {
 
 	// --- GetCloudEventFromIndex (inline data round-trip) ---
 	raw, err := svc.GetCloudEventFromIndex(ctx, &indexes[2], "") // fetch-1
-	require.NoError(t, err, "GetCloudEventFromIndex must succeed with no ClickHouse")
+	require.NoError(t, err, "GetCloudEventFromIndex must succeed")
 	require.NotNil(t, raw.Data)
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(raw.Data, &payload))
@@ -151,9 +151,9 @@ func TestDuckLakeNoClickHouse_FetchQueriesWork(t *testing.T) {
 	assert.ErrorIs(t, err, duck.ErrNotFound, "GetLatestIndexAdvanced must return ErrNotFound when no events match")
 }
 
-// TestDuckLakeNoClickHouse_VoidingExcludesEvents proves tombstone voiding
-// works correctly in the lake fetch path without ClickHouse.
-func TestDuckLakeNoClickHouse_VoidingExcludesEvents(t *testing.T) {
+// TestDuckLakeOnly_VoidingExcludesEvents proves tombstone voiding
+// works correctly in the lake fetch path.
+func TestDuckLakeOnly_VoidingExcludesEvents(t *testing.T) {
 	ctx := context.Background()
 	svc, duckSvc := newLakeFetchService(t)
 
@@ -182,7 +182,7 @@ func TestDuckLakeNoClickHouse_VoidingExcludesEvents(t *testing.T) {
 	// must exclude void-target (voided) and the tombstone itself; only
 	// not-voided should appear.
 	indexes, err := svc.ListIndexesAdvanced(ctx, 10, subjectFilter)
-	require.NoError(t, err, "voiding query must succeed without ClickHouse")
+	require.NoError(t, err, "voiding query must succeed")
 	require.Len(t, indexes, 1, "only the non-voided event should be returned")
 	assert.Equal(t, "not-voided", indexes[0].ID)
 
@@ -193,9 +193,9 @@ func TestDuckLakeNoClickHouse_VoidingExcludesEvents(t *testing.T) {
 	assert.Equal(t, uint64(1), summaries[0].Count, "voided event excluded from summary count")
 }
 
-// TestDuckLakeNoClickHouse_SegmentsSucceed proves the signal/segments path
-// also works in ducklake mode without ClickHouse via the LakeQueries backend.
-func TestDuckLakeNoClickHouse_SegmentsSucceed(t *testing.T) {
+// TestDuckLakeOnly_SegmentsSucceed proves the signal/segments path
+// also works in ducklake mode via the LakeQueries backend.
+func TestDuckLakeOnly_SegmentsSucceed(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	lkSvc := newLakeService(t, dir)
@@ -215,11 +215,11 @@ func TestDuckLakeNoClickHouse_SegmentsSucceed(t *testing.T) {
 		WithDuckLake(mat)
 
 	processed := drainRunner(t, ctx, runner)
-	require.Equal(t, 2, processed, "two raw events decoded without ClickHouse")
+	require.Equal(t, 2, processed, "two raw events decoded")
 
-	// LakeQueries serves GetAvailableSignals with no CH.
+	// LakeQueries serves GetAvailableSignals.
 	lakeQ := duck.NewLakeQueries(lkSvc)
 	signals, err := lakeQ.GetAvailableSignals(ctx, segSubject, nil)
-	require.NoError(t, err, "GetAvailableSignals must succeed without ClickHouse")
+	require.NoError(t, err, "GetAvailableSignals must succeed")
 	assert.Contains(t, signals, "speed")
 }

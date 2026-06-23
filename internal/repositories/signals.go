@@ -35,8 +35,8 @@ type Backend interface {
 	GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error)
 }
 
-// SegmentsBackend is the segment-detection surface, currently only
-// implemented by ClickHouse.
+// SegmentsBackend is the segment-detection surface, implemented by the
+// lake backend.
 type SegmentsBackend interface {
 	GetSegments(ctx context.Context, subject string, from, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig) ([]*model.Segment, error)
 }
