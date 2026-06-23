@@ -5,9 +5,27 @@ cutover. That was right for a safe cutover — but it means dq inherits CH's
 *limitations*. ClickHouse forced compromises DuckDB doesn't have. This doc lists
 where DuckLake can do **better**, prioritized, code-grounded.
 
-_Analysis 2026-06-23, verified against the code. The ignition ongoing-trip
-improvement (#0) is shipped (dq `c83d6b5`). The rest are proposals; SQL sketches are
-illustrative — refine before building._
+_Analysis 2026-06-23, verified against the code, with implementation in progress._
+
+## Implementation status (2026-06-23)
+
+| # | Improvement | Status |
+|---|---|---|
+| #0 | Ignition ongoing-trips (correct seed + deterministic) | **SHIPPED** `c83d6b5`,`210b345` |
+| #1 | Exact-aggregation divergence documented + pinned | **SHIPPED** `406e54c` |
+| #2 | ASOF **location gap-fill** (start/end, schema-free) | **SHIPPED** `6723ac3` |
+| #3 | SQL-native **idling** (gaps-and-islands) | **SHIPPED** `6f2ebd7` |
+| #2 | per-trip distance / avg-speed | distance already in `signals[]` (odo first/last); avg-speed already client-requestable — not forced as default (would churn the API + tests for marginal gain) |
+| #6 | on-read latest; rollup is an optional optimization | already the architecture (`lake_latest.go` + optional `lake_rollup.go`) — no build needed |
+| #3 | SQL-native **refuel / recharge** | REMAINING — high parity-risk (intricate Go trough/peak + smoothing logic to match exactly); focused PR with parity tests |
+| #4 | **Spatial** geofencing | REMAINING — needs `LOAD spatial` in the bootstrap (the extension may be absent in some envs → LOAD-failure risk) + geo-edge parity; behind a fallback |
+| #5 | Recharge odometer-filter via ASOF | REMAINING — folds into #3 recharge |
+| #7 | Ignition debounce + assembly → SQL | REMAINING — parity-sensitive, perf/cleanliness only (low value) |
+
+The SHIPPED items establish the pattern (the optional-capability interface:
+`IdleRunSource`, `LocationAtSource` — CH keeps its path, lake adds the SQL-native one,
+output guarded by the existing parity tests). The REMAINING items are the most
+parity-sensitive; each is a focused PR.
 
 ---
 
