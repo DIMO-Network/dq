@@ -116,4 +116,3 @@ func TestDuckLakePostgres_ConcurrentMaterializers(t *testing.T) {
 		GROUP BY cloud_event_id, name, timestamp HAVING count(*) > 1)`).Scan(&dupes))
 	assert.Zero(t, dupes, "no duplicate decoded rows")
 }
-

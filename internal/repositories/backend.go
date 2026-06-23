@@ -19,7 +19,7 @@ type LocationAtSource interface {
 var (
 	_ Backend         = (*duck.Queries)(nil)
 	_ SegmentsBackend = (*duck.LakeSegments)(nil)
-	_ CHService       = composedBackend{}
+	_ QueryService    = composedBackend{}
 )
 
 // composedBackend pairs the signal/event Backend with a separate SegmentsBackend,
@@ -30,9 +30,9 @@ type composedBackend struct {
 	SegmentsBackend
 }
 
-// ComposeBackend returns a CHService that serves signal/latest/summary/event
+// ComposeBackend returns a QueryService that serves signal/latest/summary/event
 // queries from backend and segment detection from segments.
-func ComposeBackend(backend Backend, segments SegmentsBackend) CHService {
+func ComposeBackend(backend Backend, segments SegmentsBackend) QueryService {
 	return composedBackend{Backend: backend, SegmentsBackend: segments}
 }
 

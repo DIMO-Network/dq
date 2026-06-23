@@ -60,7 +60,7 @@ func (f *fakeBackend) GetEventSummaries(context.Context, string) ([]*qtypes.Even
 	return nil, nil
 }
 
-// fakePrimary adds the segments surface so it satisfies CHService.
+// fakePrimary adds the segments surface so it satisfies QueryService.
 type fakePrimary struct {
 	fakeBackend
 	segments []*model.Segment

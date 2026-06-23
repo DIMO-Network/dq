@@ -13,67 +13,67 @@
 //  1. ORDERING — list/latest return newest-first by time.
 //     Rule: ORDER BY timestamp DESC.
 //     Covered by:
-//       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_ListIndexesAdvanced
-//       • tests/ducklake_only_test.go:TestDuckLakeOnly_FetchQueriesWork
+//     • internal/service/duck/lake_fetch_test.go:TestLakeEventService_ListIndexesAdvanced
+//     • tests/ducklake_only_test.go:TestDuckLakeOnly_FetchQueriesWork
 //
 //  2. STRICT After — event exactly at After is EXCLUDED (timestamp > ?).
 //     Covered by:
-//       • internal/service/duck/lake_fetch_test.go:TestAfterBoundaryIsStrict
+//     • internal/service/duck/lake_fetch_test.go:TestAfterBoundaryIsStrict
 //
 //  3. STRICT Before — event exactly at Before is EXCLUDED (timestamp < ?).
 //     Note: ducklake_only_test.go tests Before with a non-boundary
 //     timestamp. The strict exclusive-boundary case is pinned HERE:
-//       • THIS FILE: TestBeforeBoundaryIsStrict
+//     • THIS FILE: TestBeforeBoundaryIsStrict
 //
 //  4. VOIDING — tombstone and its voided target are BOTH absent from
 //     list/latest/type-summaries.
 //     Covered by:
-//       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_VoidingExcludes
-//       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_ListIndexesAdvanced
-//       • tests/ducklake_only_test.go:TestDuckLakeOnly_VoidingExcludesEvents
+//     • internal/service/duck/lake_fetch_test.go:TestLakeEventService_VoidingExcludes
+//     • internal/service/duck/lake_fetch_test.go:TestLakeEventService_ListIndexesAdvanced
+//     • tests/ducklake_only_test.go:TestDuckLakeOnly_VoidingExcludesEvents
 //
 //  5. FILTER NARROWING — each field filter is exercised:
 //
 //     Type IN + NotIn:
-//       • internal/service/duck/lake_fetch_test.go:TestStringNotIn
+//     • internal/service/duck/lake_fetch_test.go:TestStringNotIn
 //
 //     Source IN:
-//       • THIS FILE: TestSourceINFilter
+//     • THIS FILE: TestSourceINFilter
 //
 //     Producer IN:
-//       • THIS FILE: TestProducerINFilter
+//     • THIS FILE: TestProducerINFilter
 //
 //     ID IN (via GetCloudEventFromIndex re-fetch path):
-//       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_GetCloudEventFromIndex
+//     • internal/service/duck/lake_fetch_test.go:TestLakeEventService_GetCloudEventFromIndex
 //
 //     DataVersion IN:
-//       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_DataVersionFilter
+//     • internal/service/duck/lake_fetch_test.go:TestLakeEventService_DataVersionFilter
 //
 //     Extras IN + NotIn:
-//       • internal/service/duck/lake_fetch_test.go:TestExtrasFilter
+//     • internal/service/duck/lake_fetch_test.go:TestExtrasFilter
 //
 //  6. TAG FILTERS — all four operators:
 //
 //     ContainsAny:
-//       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_TagsFilter
+//     • internal/service/duck/lake_fetch_test.go:TestLakeEventService_TagsFilter
 //
 //     ContainsAll:
-//       • internal/service/duck/lake_fetch_test.go:TestTagsContainsAll
+//     • internal/service/duck/lake_fetch_test.go:TestTagsContainsAll
 //
 //     NotContainsAny:
-//       • internal/service/duck/lake_fetch_test.go:TestTagsNotContainsAny
+//     • internal/service/duck/lake_fetch_test.go:TestTagsNotContainsAny
 //
 //     NotContainsAll:
-//       • THIS FILE: TestTagsNotContainsAll
+//     • THIS FILE: TestTagsNotContainsAll
 //
 //  7. TYPE SUMMARIES — per-type count/min(time)/max(time), voided excluded.
 //     Covered by:
-//       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_GetCloudEventTypeSummariesAdvanced
-//       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_VoidingExcludes
+//     • internal/service/duck/lake_fetch_test.go:TestLakeEventService_GetCloudEventTypeSummariesAdvanced
+//     • internal/service/duck/lake_fetch_test.go:TestLakeEventService_VoidingExcludes
 //
 //  8. DEDUP — duplicate header-key rows collapse to one result.
 //     Covered by:
-//       • internal/service/duck/lake_fetch_test.go:TestLakeEventService_DedupOnKey
+//     • internal/service/duck/lake_fetch_test.go:TestLakeEventService_DedupOnKey
 //
 // ────────────────────────────────────────────────────────────────────────────
 package tests

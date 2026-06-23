@@ -12,11 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// dailyFake is a full CHService whose unused methods panic (the embedded nil
+// dailyFake is a full QueryService whose unused methods panic (the embedded nil
 // interface), so the test fails loudly if GetDailyActivity reaches a method it
 // should not. The day-summary methods count their calls.
 type dailyFake struct {
-	CHService
+	QueryService
 	perDayAgg    int32
 	perDayEvents int32
 }

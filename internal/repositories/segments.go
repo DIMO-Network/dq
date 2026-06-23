@@ -185,7 +185,7 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 		}
 	}
 
-	chSegments, err := r.chService.GetSegments(ctx, did, from, to, mechanism, config)
+	segments, err := r.query.GetSegments(ctx, did, from, to, mechanism, config)
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
@@ -194,8 +194,8 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	// permanently skip real idle segments past the cutoff. Defer idling's
 	// truncation until after that filter; other mechanisms truncate now to bound
 	// the per-segment summary fetch.
-	if limit != nil && mechanism != model.DetectionMechanismIdling && len(chSegments) > *limit {
-		chSegments = chSegments[:*limit]
+	if limit != nil && mechanism != model.DetectionMechanismIdling && len(segments) > *limit {
+		segments = segments[:*limit]
 	}
 
 	defaultReqs := defaultSegmentSignalSet(mechanism)
@@ -208,11 +208,11 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 
 	var eventCountsBySeg map[int]map[string]int
 	var aggsBySeg map[int][]*qtypes.AggSignal
-	if wantSummary && len(chSegments) > 0 {
-		ranges := make([]qtypes.TimeRange, len(chSegments))
-		aggRanges := make([]qtypes.TimeRange, len(chSegments))
+	if wantSummary && len(segments) > 0 {
+		ranges := make([]qtypes.TimeRange, len(segments))
+		aggRanges := make([]qtypes.TimeRange, len(segments))
 		var globalFrom, globalTo time.Time
-		for i, seg := range chSegments {
+		for i, seg := range segments {
 			segTo := to
 			if seg.End != nil {
 				segTo = seg.End.Timestamp
@@ -240,12 +240,12 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 		g, gctx := errgroup.WithContext(ctx)
 		g.Go(func() error {
 			var err error
-			batchCounts, err = r.chService.GetEventCountsForRanges(gctx, did, ranges, eventNames)
+			batchCounts, err = r.query.GetEventCountsForRanges(gctx, did, ranges, eventNames)
 			return err
 		})
 		g.Go(func() error {
 			var err error
-			batchAggs, err = r.chService.GetAggregatedSignalsForRanges(gctx, did, aggRanges, globalFrom, globalTo, floatArgs, locationArgs)
+			batchAggs, err = r.query.GetAggregatedSignalsForRanges(gctx, did, aggRanges, globalFrom, globalTo, floatArgs, locationArgs)
 			return err
 		})
 		if err := g.Wait(); err != nil {
@@ -257,9 +257,8 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 
 	// locAt (lake backend only) gap-fills a trip's start/end location from the
 	// nearest fix before the boundary when no GPS fix landed inside the window.
-	locAt, hasLocAt := r.chService.(LocationAtSource)
+	locAt, hasLocAt := r.query.(LocationAtSource)
 
-	segments := chSegments
 	for i, seg := range segments {
 		if wantSummary {
 			var eventCounts []*qtypes.EventCount
@@ -427,7 +426,7 @@ func (r *Repository) segmentSummary(ctx context.Context, did string, seg *model.
 			LocationArgs: locationArgs,
 		}
 		var err error
-		aggs, err = r.chService.GetAggregatedSignals(ctx, did, aggArgs)
+		aggs, err = r.query.GetAggregatedSignals(ctx, did, aggArgs)
 		if err != nil {
 			return nil, handleDBError(ctx, err)
 		}
@@ -439,7 +438,7 @@ func (r *Repository) segmentSummary(ctx context.Context, did string, seg *model.
 	if preFetchedEventCounts != nil {
 		eventCountMap = eventCountsToMap(preFetchedEventCounts)
 	} else {
-		eventCounts, err := r.chService.GetEventCounts(ctx, did, segFrom, segTo, eventNames)
+		eventCounts, err := r.query.GetEventCounts(ctx, did, segFrom, segTo, eventNames)
 		if err != nil {
 			return nil, handleDBError(ctx, err)
 		}
@@ -548,7 +547,7 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 		}
 		// Gap-fill the day's start/end location from the nearest prior fix (lake
 		// backend only) when neither a segment nor the windowed aggregate supplied one.
-		if las, ok := r.chService.(LocationAtSource); ok {
+		if las, ok := r.query.(LocationAtSource); ok {
 			if startLoc == nil {
 				if loc, err := las.LocationAt(ctx, did, dayStartUTC); err == nil && loc != nil {
 					startLoc = loc
@@ -611,12 +610,12 @@ func (r *Repository) batchDaySummaries(ctx context.Context, did string, days []d
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		var err error
-		batchAggs, err = r.chService.GetAggregatedSignalsForRanges(gctx, did, ranges, globalFrom, globalTo, floatArgs, locationArgs)
+		batchAggs, err = r.query.GetAggregatedSignalsForRanges(gctx, did, ranges, globalFrom, globalTo, floatArgs, locationArgs)
 		return err
 	})
 	g.Go(func() error {
 		var err error
-		batchCounts, err = r.chService.GetEventCountsForRanges(gctx, did, ranges, eventNames)
+		batchCounts, err = r.query.GetEventCountsForRanges(gctx, did, ranges, eventNames)
 		return err
 	})
 	if err := g.Wait(); err != nil {

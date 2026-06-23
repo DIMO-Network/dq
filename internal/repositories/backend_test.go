@@ -17,7 +17,7 @@ import (
 var (
 	_ Backend         = (*duck.Queries)(nil)
 	_ SegmentsBackend = (*duck.LakeSegments)(nil)
-	_ CHService       = composedBackend{}
+	_ QueryService    = composedBackend{}
 )
 
 func TestComposeBackendRouting(t *testing.T) {

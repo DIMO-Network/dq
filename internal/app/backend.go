@@ -72,7 +72,7 @@ func isLocalBucket(bucket string) bool {
 // backend). It returns the backend, the DuckDB service, and a cleanup function
 // (always non-nil). The returned duckSvc is owned by the cleanup — callers must
 // not close it themselves.
-func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (repositories.CHService, *duck.Service, func(), error) {
+func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (repositories.QueryService, *duck.Service, func(), error) {
 	duckSvc, err := duck.NewService(duckConfigFromSettings(settings))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("couldn't create DuckDB service: %w", err)

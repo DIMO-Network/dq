@@ -41,8 +41,8 @@ type SegmentsBackend interface {
 	GetSegments(ctx context.Context, subject string, from, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig) ([]*model.Segment, error)
 }
 
-// CHService is the full query surface the Repository depends on.
-type CHService interface {
+// QueryService is the full query surface the Repository depends on.
+type QueryService interface {
 	Backend
 	SegmentsBackend
 }
@@ -51,11 +51,11 @@ type CHService interface {
 type Repository struct {
 	queryableSignals map[string]struct{}
 	signalPrivileges map[string][]string
-	chService        CHService
+	query            QueryService
 }
 
 // NewRepository creates a new base repository.
-func NewRepository(chService CHService) (*Repository, error) {
+func NewRepository(query QueryService) (*Repository, error) {
 	definitions, err := schema.LoadDefinitionFile(strings.NewReader(schema.DefaultDefinitionsYAML()))
 	if err != nil {
 		return nil, fmt.Errorf("error reading definition file: %w", err)
@@ -68,7 +68,7 @@ func NewRepository(chService CHService) (*Repository, error) {
 		signalPrivileges[jsonName] = info.RequiredPrivileges
 	}
 	return &Repository{
-		chService:        chService,
+		query:            query,
 		queryableSignals: queryableSignals,
 		signalPrivileges: signalPrivileges,
 	}, nil
@@ -89,7 +89,7 @@ func (r *Repository) GetSignal(ctx context.Context, aggArgs *model.AggregatedSig
 		return nil, errorhandler.NewBadRequestError(ctx, err)
 	}
 
-	signals, err := r.chService.GetAggregatedSignals(ctx, aggArgs.Subject, aggArgs)
+	signals, err := r.query.GetAggregatedSignals(ctx, aggArgs.Subject, aggArgs)
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
@@ -139,7 +139,7 @@ func (r *Repository) GetSignalLatest(ctx context.Context, latestArgs *model.Late
 	if err := validateLatestSigArgs(latestArgs); err != nil {
 		return nil, errorhandler.NewBadRequestError(ctx, err)
 	}
-	signals, err := r.chService.GetLatestSignals(ctx, latestArgs.Subject, latestArgs)
+	signals, err := r.query.GetLatestSignals(ctx, latestArgs.Subject, latestArgs)
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
@@ -157,7 +157,7 @@ func (r *Repository) GetSignalLatest(ctx context.Context, latestArgs *model.Late
 
 // GetAvailableSignals returns the available signals for the given DID and filter.
 func (r *Repository) GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
-	allSignals, err := r.chService.GetAvailableSignals(ctx, subject, filter)
+	allSignals, err := r.query.GetAvailableSignals(ctx, subject, filter)
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
@@ -183,11 +183,11 @@ func foldTimeRange(minTime, maxTime, first, last time.Time) (time.Time, time.Tim
 }
 
 func (r *Repository) GetDataSummary(ctx context.Context, subject string, filter *model.SignalFilter) (*model.DataSummary, error) {
-	signalDataSummary, err := r.chService.GetSignalSummaries(ctx, subject, filter)
+	signalDataSummary, err := r.query.GetSignalSummaries(ctx, subject, filter)
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
-	eventSummaries, err := r.chService.GetEventSummaries(ctx, subject)
+	eventSummaries, err := r.query.GetEventSummaries(ctx, subject)
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
@@ -227,7 +227,7 @@ func (r *Repository) GetEvents(ctx context.Context, did string, from, to time.Ti
 	if err := validateEventArgs(did, from, to, filter); err != nil {
 		return nil, errorhandler.NewBadRequestError(ctx, err)
 	}
-	allEvents, err := r.chService.GetEvents(ctx, did, from, to, filter)
+	allEvents, err := r.query.GetEvents(ctx, did, from, to, filter)
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
@@ -248,7 +248,7 @@ func (r *Repository) GetEvents(ctx context.Context, did string, from, to time.Ti
 
 // GetSignalSnapshot returns the latest value for every available signal for the given subject.
 func (r *Repository) GetSignalSnapshot(ctx context.Context, subject string, filter *model.SignalFilter) (*model.SignalsSnapshotResponse, error) {
-	signals, err := r.chService.GetAllLatestSignals(ctx, subject, filter)
+	signals, err := r.query.GetAllLatestSignals(ctx, subject, filter)
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
