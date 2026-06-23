@@ -26,7 +26,7 @@ func TestDuckLake_SpanBoundedDrain(t *testing.T) {
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
 	mat.WithMaxSnapshotSpan(1) // one raw_events snapshot of data per pass
-	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 
 	// Three distinct raw_events, each committed as its own snapshot.

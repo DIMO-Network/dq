@@ -63,7 +63,7 @@ func TestDuckLake_MaterializeBlobPayload(t *testing.T) {
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
 	mat = mat.WithBlobStore(getter, "test-bucket")
-	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 
 	processed := drainRunner(t, ctx, runner)

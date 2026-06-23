@@ -15,8 +15,7 @@ import (
 
 // Service wraps a DuckDB-backed *sql.DB.
 type Service struct {
-	db  *sql.DB
-	cfg Config
+	db *sql.DB
 }
 
 // NewService opens an in-memory DuckDB database and applies the bootstrap
@@ -52,17 +51,12 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("failed to initialize duckdb connection: %w", err)
 	}
 
-	return &Service{db: db, cfg: cfg}, nil
+	return &Service{db: db}, nil
 }
 
 // DB returns the underlying *sql.DB.
 func (s *Service) DB() *sql.DB {
 	return s.db
-}
-
-// Config returns the resolved (defaults applied) configuration.
-func (s *Service) Config() Config {
-	return s.cfg
 }
 
 // Close closes the underlying database and its connector.

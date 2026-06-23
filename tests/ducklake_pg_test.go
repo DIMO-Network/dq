@@ -87,7 +87,7 @@ func TestDuckLakePostgres_ConcurrentMaterializers(t *testing.T) {
 		svc := newPGLakeService(t, dsn, dataPath)
 		mat, err := materializer.NewDuckLakeMaterializer(ctx, svc.DB(), zerolog.Nop())
 		require.NoError(t, err)
-		runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
+		runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 			WithDuckLake(mat)
 		for {
 			n, err := runner.RunOnce(ctx)

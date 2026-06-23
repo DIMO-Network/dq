@@ -46,7 +46,7 @@ func TestRecomputeRollup_RebuildsDroppedRollupFromBase(t *testing.T) {
 	db := svc.DB()
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
-	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, nil, zerolog.Nop()).
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 
 	subjA := fmt.Sprintf("did:erc721:137:%s:7", vehicleNFT.Hex())
