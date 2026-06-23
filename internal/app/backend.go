@@ -261,7 +261,8 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	// Resolve externalized blob payloads from the same bucket the fetch path
 	// presigns/downloads (settings.ParquetBucket): din writes payloads larger
 	// than the inline threshold to a blob and leaves only the key on the row.
-	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.ParquetBucket)
+	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.ParquetBucket).
+		WithTempDir(settings.DuckDBTempDirectory) // stage batch parquet on the sized spill volume, not the root fs
 
 	var decodedRetention time.Duration
 	if settings.LakeDecodedRetention != "" {

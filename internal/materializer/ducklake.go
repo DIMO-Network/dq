@@ -44,6 +44,11 @@ type DuckLakeMaterializer struct {
 	// memory-bounded chunks instead of materializing the entire (cur, head]
 	// delta at once and OOM-killing the single writer. <= 0 means unbounded.
 	maxSnapshotSpan int64
+	// tempDir is where per-batch parquet is staged for read_parquet. Empty uses
+	// the OS default ($TMPDIR/tmp on the container root, which has no size limit);
+	// set it (DUCKDB_TEMP_DIRECTORY) to the sized spill volume so a batch's temp
+	// file lands there, not on the root fs.
+	tempDir string
 	// lastProgressReport / lastReportedSnapshot throttle the per-batch
 	// expiry-floor heartbeat (see maybeReportProgress) and track what was last
 	// published so the tail is flushed exactly once on catch-up.
@@ -92,13 +97,20 @@ func (m *DuckLakeMaterializer) WithBlobStore(getter eventrepo.ObjectGetter, buck
 	return m
 }
 
+// WithTempDir stages per-batch parquet under dir (the sized DuckDB spill volume)
+// instead of the OS default temp dir. Empty keeps the default. Returns m.
+func (m *DuckLakeMaterializer) WithTempDir(dir string) *DuckLakeMaterializer {
+	m.tempDir = dir
+	return m
+}
+
 func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
-	sigTmp, err := writeTempParquet(writeSignalParquet, []SignalRow{})
+	sigTmp, err := writeTempParquet(m.tempDir, writeSignalParquet, []SignalRow{})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(sigTmp) }()
-	evTmp, err := writeTempParquet(writeEventParquet, []EventRow{})
+	evTmp, err := writeTempParquet(m.tempDir, writeEventParquet, []EventRow{})
 	if err != nil {
 		return err
 	}
@@ -597,7 +609,7 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 	defer func() { _ = tx.Rollback() }()
 
 	if len(dec.signals) > 0 {
-		tmp, err := writeTempParquet(writeSignalParquet, dec.signals)
+		tmp, err := writeTempParquet(m.tempDir, writeSignalParquet, dec.signals)
 		if err != nil {
 			return err
 		}
@@ -607,7 +619,7 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		}
 	}
 	if len(dec.events) > 0 {
-		tmp, err := writeTempParquet(writeEventParquet, dec.events)
+		tmp, err := writeTempParquet(m.tempDir, writeEventParquet, dec.events)
 		if err != nil {
 			return err
 		}
@@ -657,14 +669,14 @@ func isCommitConflict(err error) bool {
 		strings.Contains(s, "Failed to commit DuckLake transaction")
 }
 
-// writeTempParquet writes rows via enc into a temp file DuckDB can read and
-// returns its path; the caller removes it.
-func writeTempParquet[T any](enc func([]T) ([]byte, error), rows []T) (string, error) {
+// writeTempParquet writes rows via enc into a temp file under dir (empty = OS
+// default) that DuckDB can read, and returns its path; the caller removes it.
+func writeTempParquet[T any](dir string, enc func([]T) ([]byte, error), rows []T) (string, error) {
 	body, err := enc(rows)
 	if err != nil {
 		return "", fmt.Errorf("encoding parquet: %w", err)
 	}
-	f, err := os.CreateTemp("", "ducklake-*.parquet")
+	f, err := os.CreateTemp(dir, "ducklake-*.parquet")
 	if err != nil {
 		return "", fmt.Errorf("temp parquet: %w", err)
 	}
