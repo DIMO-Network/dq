@@ -60,7 +60,7 @@ SELECT window_start,
 FROM (
   SELECT %s AS window_start, name
   FROM lake.signals
-  WHERE subject = ? AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
+  WHERE subject = ? AND `+subjectBucketPredicate("", subject)+` AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
   `+signalDedupQualify+`
 )
 GROUP BY window_start
@@ -93,7 +93,7 @@ func (s *LakeSignalSource) LevelSamples(ctx context.Context, subject, name strin
 	q := fmt.Sprintf(`
 SELECT timestamp, value_number
 FROM lake.signals
-WHERE subject = ? AND name = ? AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
+WHERE subject = ? AND `+subjectBucketPredicate("", subject)+` AND name = ? AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
 `+signalDedupQualify+`
 ORDER BY timestamp`,
 		fromUS, toUS)
@@ -157,7 +157,7 @@ func (s *LakeSignalSource) IgnitionStateChanges(ctx context.Context, subject str
 WITH deduped AS (
   SELECT timestamp, value_number
   FROM lake.signals
-  WHERE subject = ? AND name = 'isIgnitionOn'
+  WHERE subject = ? AND `+subjectBucketPredicate("", subject)+` AND name = 'isIgnitionOn'
     AND value_number IS NOT NULL
     AND timestamp >= make_timestamp(%d) AND timestamp < make_timestamp(%d)
   `+signalDedupQualify+`
