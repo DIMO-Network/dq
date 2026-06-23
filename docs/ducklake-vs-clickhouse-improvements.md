@@ -17,15 +17,19 @@ _Analysis 2026-06-23, verified against the code, with implementation in progress
 | #3 | SQL-native **idling** (gaps-and-islands) | **SHIPPED** `6f2ebd7` |
 | #2 | per-trip distance / avg-speed | distance already in `signals[]` (odo first/last); avg-speed already client-requestable — not forced as default (would churn the API + tests for marginal gain) |
 | #6 | on-read latest; rollup is an optional optimization | already the architecture (`lake_latest.go` + optional `lake_rollup.go`) — no build needed |
-| #3 | SQL-native **refuel / recharge** | REMAINING — high parity-risk (intricate Go trough/peak + smoothing logic to match exactly); focused PR with parity tests |
-| #4 | **Spatial** geofencing | REMAINING — needs `LOAD spatial` in the bootstrap (the extension may be absent in some envs → LOAD-failure risk) + geo-edge parity; behind a fallback |
-| #5 | Recharge odometer-filter via ASOF | REMAINING — folds into #3 recharge |
-| #7 | Ignition debounce + assembly → SQL | REMAINING — parity-sensitive, perf/cleanliness only (low value) |
+| #3 | SQL-native **refuel / recharge** | **VERIFIED NOT SAFELY PORTABLE** — refuel is a stateful trough/peak walk with a stabilization-drop early-break; recharge's 11-sample smoothing is documented as relying on *exact FP summation* (`smoothSamples`: "per-position summation for exact floating-point reproducibility") feeding a direction-walk. SQL `avg() OVER` won't reproduce the same FP bits → flips rise/fall on near-flat curves → different trip boundaries. Go path is exact + tested; **keep it**. |
+| #4 | **Spatial** geofencing | NOT SHIPPED — `LOAD spatial` is absent in the test env, so the `ST_*` path is unverifiable here (won't ship unverified geo). Needs spatial wired into the test bootstrap, then a gated dual-path + geo-edge parity tests. |
+| #5 | Recharge odometer-filter via ASOF | folds into #3 recharge (not safely portable, above) |
+| #7 | Ignition debounce + assembly → SQL | NOT SHIPPED — parity-sensitive stateful debounce, perf/cleanliness only (low value); Go path is correct. |
 
 The SHIPPED items establish the pattern (the optional-capability interface:
 `IdleRunSource`, `LocationAtSource` — CH keeps its path, lake adds the SQL-native one,
-output guarded by the existing parity tests). The REMAINING items are the most
-parity-sensitive; each is a focused PR.
+output guarded by parity tests). **Verification principle:** ship a SQL-native
+detector only when a parity test proves it matches the Go reference exactly. Idling
+(gaps-and-islands + threshold) and the location gap-fill (point lookup) pass that bar;
+refuel/recharge structurally cannot (FP-exact smoothing + stateful walks), so they
+stay on the verified-correct Go path rather than risk user-visible trip-boundary drift
+for a transfer-size optimization.
 
 ---
 
