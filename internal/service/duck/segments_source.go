@@ -168,7 +168,10 @@ transitions AS (
       (SELECT value_number FROM lake.signals
        WHERE subject = ? AND `+bucket+` AND name = 'isIgnitionOn' AND value_number IS NOT NULL
          AND timestamp < make_timestamp(%[1]d)
-       ORDER BY timestamp DESC LIMIT 1),
+       -- timestamp DESC for the latest pre-window row; cloud_event_id ASC matches
+       -- signalDedupQualify (smallest id wins at a tied timestamp) so the seed picks
+       -- the same canonical value the deduped window would — deterministic.
+       ORDER BY timestamp DESC, cloud_event_id ASC LIMIT 1),
       0
     ) AS prev_state
   FROM deduped
