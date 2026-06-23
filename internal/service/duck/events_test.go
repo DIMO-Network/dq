@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/dq/internal/service/ch"
+	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -153,7 +153,7 @@ func TestGetEventCounts(t *testing.T) {
 		counts, err := q.GetEventCounts(context.Background(), testSubject1, from, to, []string{evHarshBrake})
 		require.NoError(t, err)
 		require.Len(t, counts, 1)
-		assert.Equal(t, &ch.EventCount{Name: evHarshBrake, Count: 2}, counts[0])
+		assert.Equal(t, &qtypes.EventCount{Name: evHarshBrake, Count: 2}, counts[0])
 	})
 
 	t.Run("empty range", func(t *testing.T) {
@@ -165,14 +165,14 @@ func TestGetEventCounts(t *testing.T) {
 
 func TestGetEventCountsForRanges(t *testing.T) {
 	q := setupEventFixtures(t)
-	ranges := []ch.TimeRange{
+	ranges := []qtypes.TimeRange{
 		{From: d1(t, "00:00:00"), To: d2(t, "00:00:00")},
 		{From: d2(t, "00:00:00"), To: mkts(t, "2026-06-03T00:00:00Z")},
 	}
 
 	counts, err := q.GetEventCountsForRanges(context.Background(), testSubject1, ranges, nil)
 	require.NoError(t, err)
-	want := []*ch.EventCountForRange{
+	want := []*qtypes.EventCountForRange{
 		{SegIndex: 0, Name: evHarshBrake, Count: 1},
 		{SegIndex: 0, Name: evTripEnd, Count: 1},
 		{SegIndex: 0, Name: evTripStart, Count: 1},
@@ -184,7 +184,7 @@ func TestGetEventCountsForRanges(t *testing.T) {
 	t.Run("name subset", func(t *testing.T) {
 		counts, err := q.GetEventCountsForRanges(context.Background(), testSubject1, ranges, []string{evHarshBrake})
 		require.NoError(t, err)
-		want := []*ch.EventCountForRange{
+		want := []*qtypes.EventCountForRange{
 			{SegIndex: 0, Name: evHarshBrake, Count: 1},
 			{SegIndex: 1, Name: evHarshBrake, Count: 1},
 		}

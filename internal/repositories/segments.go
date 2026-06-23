@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/dq/internal/service/ch"
+	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
 	"golang.org/x/sync/errgroup"
@@ -207,22 +207,22 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	extendSummaryEnd := mechanism == model.DetectionMechanismRefuel || mechanism == model.DetectionMechanismRecharge
 
 	var eventCountsBySeg map[int]map[string]int
-	var aggsBySeg map[int][]*ch.AggSignal
+	var aggsBySeg map[int][]*qtypes.AggSignal
 	if wantSummary && len(chSegments) > 0 {
-		ranges := make([]ch.TimeRange, len(chSegments))
-		aggRanges := make([]ch.TimeRange, len(chSegments))
+		ranges := make([]qtypes.TimeRange, len(chSegments))
+		aggRanges := make([]qtypes.TimeRange, len(chSegments))
 		var globalFrom, globalTo time.Time
 		for i, seg := range chSegments {
 			segTo := to
 			if seg.End != nil {
 				segTo = seg.End.Timestamp
 			}
-			ranges[i] = ch.TimeRange{From: seg.Start.Timestamp, To: segTo}
+			ranges[i] = qtypes.TimeRange{From: seg.Start.Timestamp, To: segTo}
 			summaryTo := segTo
 			if extendSummaryEnd {
 				summaryTo = segTo.Add(summaryEndBuffer)
 			}
-			aggRanges[i] = ch.TimeRange{From: seg.Start.Timestamp, To: summaryTo}
+			aggRanges[i] = qtypes.TimeRange{From: seg.Start.Timestamp, To: summaryTo}
 			if i == 0 {
 				globalFrom, globalTo = seg.Start.Timestamp, summaryTo
 			} else {
@@ -235,8 +235,8 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 			}
 		}
 		floatArgs, locationArgs := buildAggArgs(signalReqs)
-		var batchCounts []*ch.EventCountForRange
-		var batchAggs []*ch.AggSignalForRange
+		var batchCounts []*qtypes.EventCountForRange
+		var batchAggs []*qtypes.AggSignalForRange
 		g, gctx := errgroup.WithContext(ctx)
 		g.Go(func() error {
 			var err error
@@ -262,19 +262,19 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	segments := chSegments
 	for i, seg := range segments {
 		if wantSummary {
-			var eventCounts []*ch.EventCount
+			var eventCounts []*qtypes.EventCount
 			if eventCountsBySeg != nil {
 				m := eventCountsBySeg[i]
-				eventCounts = make([]*ch.EventCount, 0, len(m))
+				eventCounts = make([]*qtypes.EventCount, 0, len(m))
 				for name, count := range m {
-					eventCounts = append(eventCounts, &ch.EventCount{Name: name, Count: count})
+					eventCounts = append(eventCounts, &qtypes.EventCount{Name: name, Count: count})
 				}
 			}
-			var preFetchedAggs []*ch.AggSignal
+			var preFetchedAggs []*qtypes.AggSignal
 			if aggsBySeg != nil {
 				preFetchedAggs = aggsBySeg[i]
 				if preFetchedAggs == nil {
-					preFetchedAggs = []*ch.AggSignal{}
+					preFetchedAggs = []*qtypes.AggSignal{}
 				}
 			}
 			summary, err := r.segmentSummary(ctx, did, seg, to, signalReqs, eventNames, eventCounts, preFetchedAggs)
@@ -351,18 +351,18 @@ type segmentSummaryResult struct {
 	EventCounts   []*model.EventCount
 }
 
-func buildSummaryFromAggs(aggs []*ch.AggSignal, floatArgs []model.FloatSignalArgs) ([]*model.SignalAggregationValue, *model.Location, *model.Location) {
+func buildSummaryFromAggs(aggs []*qtypes.AggSignal, floatArgs []model.FloatSignalArgs) ([]*model.SignalAggregationValue, *model.Location, *model.Location) {
 	signals := make([]*model.SignalAggregationValue, 0, len(floatArgs))
 	var startLoc, endLoc *model.Location
 	for _, a := range aggs {
-		if a.SignalType == ch.FloatType && int(a.SignalIndex) < len(floatArgs) {
+		if a.SignalType == qtypes.FloatType && int(a.SignalIndex) < len(floatArgs) {
 			signals = append(signals, &model.SignalAggregationValue{
 				Name:  floatArgs[a.SignalIndex].Name,
 				Agg:   string(floatArgs[a.SignalIndex].Agg),
 				Value: a.ValueNumber,
 			})
 		}
-		if a.SignalType == ch.LocType {
+		if a.SignalType == qtypes.LocType {
 			loc := &model.Location{
 				Latitude:  a.ValueLocation.Latitude,
 				Longitude: a.ValueLocation.Longitude,
@@ -394,7 +394,7 @@ func buildEventSummary(eventCountMap map[string]int, eventNames []string) []*mod
 	return out
 }
 
-func eventCountsToMap(counts []*ch.EventCount) map[string]int {
+func eventCountsToMap(counts []*qtypes.EventCount) map[string]int {
 	m := make(map[string]int, len(counts))
 	for _, ec := range counts {
 		m[ec.Name] = ec.Count
@@ -402,7 +402,7 @@ func eventCountsToMap(counts []*ch.EventCount) map[string]int {
 	return m
 }
 
-func (r *Repository) segmentSummary(ctx context.Context, did string, seg *model.Segment, queryTo time.Time, signalReqs []*model.SegmentSignalRequest, eventNames []string, preFetchedEventCounts []*ch.EventCount, preFetchedAggs []*ch.AggSignal) (*segmentSummaryResult, error) {
+func (r *Repository) segmentSummary(ctx context.Context, did string, seg *model.Segment, queryTo time.Time, signalReqs []*model.SegmentSignalRequest, eventNames []string, preFetchedEventCounts []*qtypes.EventCount, preFetchedAggs []*qtypes.AggSignal) (*segmentSummaryResult, error) {
 	segFrom := seg.Start.Timestamp
 	segTo := queryTo
 	if seg.End != nil {
@@ -414,7 +414,7 @@ func (r *Repository) segmentSummary(ctx context.Context, did string, seg *model.
 	}
 
 	floatArgs, locationArgs := buildAggArgs(signalReqs)
-	var aggs []*ch.AggSignal
+	var aggs []*qtypes.AggSignal
 	if preFetchedAggs != nil {
 		aggs = preFetchedAggs
 	} else {
@@ -595,19 +595,19 @@ type dayWindow struct {
 // concurrently), then scatters the results by day index. This replaces the old
 // per-day daySummary (one GetAggregatedSignals + one GetEventCounts each), whose
 // serialized round-trips blew the request timeout for wide ranges (SR-3).
-func (r *Repository) batchDaySummaries(ctx context.Context, did string, days []dayWindow, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs, eventNames []string) (map[int][]*ch.AggSignal, map[int]map[string]int, error) {
+func (r *Repository) batchDaySummaries(ctx context.Context, did string, days []dayWindow, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs, eventNames []string) (map[int][]*qtypes.AggSignal, map[int]map[string]int, error) {
 	if len(days) == 0 {
-		return map[int][]*ch.AggSignal{}, map[int]map[string]int{}, nil
+		return map[int][]*qtypes.AggSignal{}, map[int]map[string]int{}, nil
 	}
-	ranges := make([]ch.TimeRange, len(days))
+	ranges := make([]qtypes.TimeRange, len(days))
 	for i, w := range days {
-		ranges[i] = ch.TimeRange{From: w.start, To: w.end}
+		ranges[i] = qtypes.TimeRange{From: w.start, To: w.end}
 	}
 	globalFrom := days[0].start
 	globalTo := days[len(days)-1].end
 
-	var batchAggs []*ch.AggSignalForRange
-	var batchCounts []*ch.EventCountForRange
+	var batchAggs []*qtypes.AggSignalForRange
+	var batchCounts []*qtypes.EventCountForRange
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		var err error
@@ -640,10 +640,10 @@ func eventNamesOf(eventRequests []*model.SegmentEventRequest) []string {
 
 // scatterAggsByIndex groups per-range aggregated signals by SegIndex — the
 // position of the originating segment/day in the request slice.
-func scatterAggsByIndex(aggs []*ch.AggSignalForRange) map[int][]*ch.AggSignal {
-	out := make(map[int][]*ch.AggSignal)
+func scatterAggsByIndex(aggs []*qtypes.AggSignalForRange) map[int][]*qtypes.AggSignal {
+	out := make(map[int][]*qtypes.AggSignal)
 	for _, a := range aggs {
-		out[a.SegIndex] = append(out[a.SegIndex], &ch.AggSignal{
+		out[a.SegIndex] = append(out[a.SegIndex], &qtypes.AggSignal{
 			SignalType:    a.SignalType,
 			SignalIndex:   a.SignalIndex,
 			ValueNumber:   a.ValueNumber,
@@ -656,7 +656,7 @@ func scatterAggsByIndex(aggs []*ch.AggSignalForRange) map[int][]*ch.AggSignal {
 
 // scatterEventCountsByIndex groups per-range event counts by SegIndex into a
 // name→count map.
-func scatterEventCountsByIndex(counts []*ch.EventCountForRange) map[int]map[string]int {
+func scatterEventCountsByIndex(counts []*qtypes.EventCountForRange) map[int]map[string]int {
 	out := make(map[int]map[string]int)
 	for _, ec := range counts {
 		if out[ec.SegIndex] == nil {

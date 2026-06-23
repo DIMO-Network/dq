@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/dq/internal/service/ch"
+	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,20 +25,20 @@ func (f *dailyFake) GetSegments(context.Context, string, time.Time, time.Time, m
 	return nil, nil
 }
 
-func (f *dailyFake) GetAggregatedSignalsForRanges(context.Context, string, []ch.TimeRange, time.Time, time.Time, []model.FloatSignalArgs, []model.LocationSignalArgs) ([]*ch.AggSignalForRange, error) {
+func (f *dailyFake) GetAggregatedSignalsForRanges(context.Context, string, []qtypes.TimeRange, time.Time, time.Time, []model.FloatSignalArgs, []model.LocationSignalArgs) ([]*qtypes.AggSignalForRange, error) {
 	return nil, nil
 }
 
-func (f *dailyFake) GetEventCountsForRanges(context.Context, string, []ch.TimeRange, []string) ([]*ch.EventCountForRange, error) {
+func (f *dailyFake) GetEventCountsForRanges(context.Context, string, []qtypes.TimeRange, []string) ([]*qtypes.EventCountForRange, error) {
 	return nil, nil
 }
 
-func (f *dailyFake) GetAggregatedSignals(context.Context, string, *model.AggregatedSignalArgs) ([]*ch.AggSignal, error) {
+func (f *dailyFake) GetAggregatedSignals(context.Context, string, *model.AggregatedSignalArgs) ([]*qtypes.AggSignal, error) {
 	atomic.AddInt32(&f.perDayAgg, 1)
 	return nil, nil
 }
 
-func (f *dailyFake) GetEventCounts(context.Context, string, time.Time, time.Time, []string) ([]*ch.EventCount, error) {
+func (f *dailyFake) GetEventCounts(context.Context, string, time.Time, time.Time, []string) ([]*qtypes.EventCount, error) {
 	atomic.AddInt32(&f.perDayEvents, 1)
 	return nil, nil
 }

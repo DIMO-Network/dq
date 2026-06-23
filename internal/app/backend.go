@@ -10,7 +10,6 @@ import (
 	"github.com/DIMO-Network/dq/internal/fsstore"
 	"github.com/DIMO-Network/dq/internal/materializer"
 	"github.com/DIMO-Network/dq/internal/repositories"
-	"github.com/DIMO-Network/dq/internal/service/ch"
 	"github.com/DIMO-Network/dq/internal/service/duck"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -45,12 +44,9 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		Bucket:               bucket,
 		RawPrefix:            settings.RawPrefix,
 		DecodedPrefix:        settings.DecodedPrefix,
-		// Enable the DuckLake catalog when running ducklake mode or shadow mode
-		// with a catalog DSN configured — shadow needs it to compare segment
-		// detection results from the lake against the primary ClickHouse backend.
-		DuckLakeEnabled: settings.QueryBackend == config.QueryBackendDuckLake ||
-			(settings.QueryBackend == config.QueryBackendShadow && settings.DuckLakeCatalogDSN != ""),
-		CatalogDSN:     settings.DuckLakeCatalogDSN,
+		// DuckLake is the only backend — always attach the catalog.
+		DuckLakeEnabled: true,
+		CatalogDSN:      settings.DuckLakeCatalogDSN,
 		CatalogReadDSN: settings.DuckLakeCatalogReadDSN,
 		DataPath:       settings.DuckLakeDataPath,
 		// Only the single-writer materializer writes the lake. Any other role
@@ -68,105 +64,26 @@ func isLocalBucket(bucket string) bool {
 	return strings.HasPrefix(bucket, "file://") || strings.HasPrefix(bucket, "/")
 }
 
-// newQueryBackend selects the Repository backend per QUERY_BACKEND. It
-// returns the backend, the DuckDB service (nil for clickhouse mode), a cleanup
-// function (always non-nil), and an error for unknown backend values. The
-// returned duckSvc (when non-nil) is owned by the cleanup — callers must not
-// close it themselves.
-func newQueryBackend(settings *config.Settings, chService *ch.Service, logger zerolog.Logger) (repositories.CHService, *duck.Service, func(), error) {
-	backend := settings.QueryBackend
-	if backend == "" {
-		backend = config.QueryBackendClickHouse
-	}
-	if backend == config.QueryBackendClickHouse {
-		return chService, nil, func() {}, nil
-	}
-
+// newQueryBackend builds the DuckLake-backed Repository backend (the only
+// backend). It returns the backend, the DuckDB service, and a cleanup function
+// (always non-nil). The returned duckSvc is owned by the cleanup — callers must
+// not close it themselves.
+func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (repositories.CHService, *duck.Service, func(), error) {
 	duckSvc, err := duck.NewService(duckConfigFromSettings(settings))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("couldn't create DuckDB service: %w", err)
 	}
-	switch backend {
-	case config.QueryBackendDuckLake:
-		// Reads and segment detection both come from the DuckLake catalog.
-		// Return duckSvc so the caller can share it with newEventService.
-		return repositories.ComposeBackend(duck.NewLakeQueries(duckSvc), duck.NewLakeSegments(duckSvc)), duckSvc, closeDuck(duckSvc, logger), nil
-	}
-
-	queries := duck.NewQueries(duckSvc, "")
-	switch backend {
-	case config.QueryBackendDuckDB:
-		// Segment detection is not implemented on DuckDB; it stays on ClickHouse.
-		return repositories.ComposeBackend(queries, chService), duckSvc, closeDuck(duckSvc, logger), nil
-	case config.QueryBackendShadow:
-		// Shadow must validate the SAME backend that goes live under
-		// QUERY_BACKEND=ducklake — lake mode (NewLakeQueries), not bucket mode.
-		// With a catalog DSN configured (the cutover scenario; DuckLakeEnabled is
-		// set above for this case) the signal/latest/summary secondary reads
-		// lake.signals exactly like the live ducklake path, and segments shadow
-		// against the lake too. Bucket mode here would read decoded/v1/*.parquet
-		// globs the ducklake materializer never writes — comparing ClickHouse
-		// against empty results, so a green shadow would be false confidence on
-		// the highest-traffic surface. With no catalog DSN there is no lake to
-		// compare, so fall back to the legacy bucket secondary unchanged.
-		secondary := repositories.Backend(queries)
-		var secondarySegment repositories.SegmentsBackend
-		if settings.DuckLakeCatalogDSN != "" {
-			secondary = duck.NewLakeQueries(duckSvc)
-			secondarySegment = duck.NewLakeSegments(duckSvc)
-		}
-		shadow := repositories.NewShadowBackend(chService, secondary, secondarySegment, logger)
-		cleanup := func() {
-			shadow.Wait()
-			closeDuck(duckSvc, logger)()
-		}
-		return shadow, duckSvc, cleanup, nil
-	default:
-		_ = duckSvc.Close()
-		return nil, nil, nil, fmt.Errorf("unknown QUERY_BACKEND %q (expected %s, %s, %s, or %s)",
-			settings.QueryBackend, config.QueryBackendClickHouse, config.QueryBackendDuckDB, config.QueryBackendShadow, config.QueryBackendDuckLake)
-	}
+	// Reads and segment detection both come from the DuckLake catalog. Return
+	// duckSvc so the caller can share it with newEventService.
+	return repositories.ComposeBackend(duck.NewLakeQueries(duckSvc), duck.NewLakeSegments(duckSvc)), duckSvc, closeDuck(duckSvc, logger), nil
 }
 
-// newEventService selects the cloudevent fetch backend per QUERY_BACKEND.
-// ducklake → lake.raw_events (no ClickHouse client constructed).
-// shadow → ShadowEventService (CH primary + lake secondary).
-// everything else → ClickHouse cloud_event index.
-//
-// duckSvc must be non-nil when the backend is ducklake or shadow (the same
-// catalog-attached service returned by newQueryBackend). s3Client must be
-// non-nil for all backends.
-func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client *s3.Client, log zerolog.Logger) (eventrepo.EventService, error) {
+// newEventService builds the DuckLake cloudevent fetch backend (lake.raw_events).
+// duckSvc is the same catalog-attached service returned by newQueryBackend;
+// s3Client must be non-nil.
+func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client *s3.Client, _ zerolog.Logger) (eventrepo.EventService, error) {
 	presigner := s3.NewPresignClient(s3Client)
-	bucket := settings.ParquetBucket
-
-	switch settings.QueryBackend {
-	case config.QueryBackendDuckLake:
-		// No ClickHouse client is created in this branch.
-		return duck.NewLakeEventService(duckSvc, s3Client, presigner, bucket), nil
-
-	case config.QueryBackendShadow:
-		// Build a CH event service as primary.
-		chConn, err := chClientFromSettings(&settings.ClickhouseFileCatalogue)
-		if err != nil {
-			return nil, fmt.Errorf("ClickHouse connection for shadow event repo: %w", err)
-		}
-		chEvtSvc := eventrepo.New(chConn, s3Client, presigner, bucket)
-		if settings.DuckLakeCatalogDSN == "" {
-			// No catalog DSN configured — shadow fetch not possible; serve from CH.
-			return chEvtSvc, nil
-		}
-		lakeSvc := duck.NewLakeEventService(duckSvc, s3Client, presigner, bucket)
-		return eventrepo.NewShadowEventService(chEvtSvc, lakeSvc, log), nil
-
-	default:
-		// clickhouse, duckdb, or unset: build a CH event service.
-		chConn, err := chClientFromSettings(&settings.ClickhouseFileCatalogue)
-		if err != nil {
-			return nil, fmt.Errorf("ClickHouse connection for event repo: %w", err)
-		}
-		return eventrepo.New(chConn, s3Client, presigner, bucket), nil
-	}
+	return duck.NewLakeEventService(duckSvc, s3Client, presigner, settings.ParquetBucket), nil
 }
 
 func closeDuck(duckSvc *duck.Service, logger zerolog.Logger) func() {

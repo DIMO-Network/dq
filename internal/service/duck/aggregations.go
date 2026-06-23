@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/dq/internal/service/ch"
+	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
-// Result row types (ch.AggSignal, ch.AggSignalForRange, ch.FieldType, ...)
+// Result row types (qtypes.AggSignal, qtypes.AggSignalForRange, qtypes.FieldType, ...)
 // are reused from the ClickHouse service so the repository layer can swap
 // implementations without translation.
 
@@ -38,9 +38,9 @@ const signalSrcColumns = `agg_table.signal_type AS signal_type, agg_table.signal
 // microsecond intervals (time_bucket(to_microseconds(n), ts, origin)), but
 // the epoch math has unconditional floor semantics for any microsecond
 // interval and no interval-type edge cases, so it is the implementation.
-func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggArgs *model.AggregatedSignalArgs) ([]*ch.AggSignal, error) {
+func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggArgs *model.AggregatedSignalArgs) ([]*qtypes.AggSignal, error) {
 	if aggArgs == nil || len(aggArgs.FloatArgs)+len(aggArgs.StringArgs)+len(aggArgs.LocationArgs) == 0 {
-		return []*ch.AggSignal{}, nil
+		return []*qtypes.AggSignal{}, nil
 	}
 	if aggArgs.Interval <= 0 {
 		return nil, errors.New("aggregation interval must be positive")
@@ -50,7 +50,7 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 	if err != nil {
 		return nil, err
 	}
-	signals := []*ch.AggSignal{}
+	signals := []*qtypes.AggSignal{}
 	if table == "" {
 		return signals, nil
 	}
@@ -98,7 +98,7 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 	}
 	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
-		var signal ch.AggSignal
+		var signal qtypes.AggSignal
 		var ts time.Time
 		var loc vss.Location
 		err := rows.Scan(&signal.SignalType, &signal.SignalIndex, &ts, &signal.ValueNumber, &signal.ValueString,
@@ -121,19 +121,19 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 // query. The ClickHouse multiIf segment classifier becomes a CASE chain.
 // Mirroring ch, only FloatArgs and LocationArgs are supported, no per-signal
 // value filters are applied, and (0, 0) locations are NOT excluded.
-func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject string, ranges []ch.TimeRange, globalFrom, globalTo time.Time, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs) ([]*ch.AggSignalForRange, error) {
+func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject string, ranges []qtypes.TimeRange, globalFrom, globalTo time.Time, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs) ([]*qtypes.AggSignalForRange, error) {
 	if len(ranges) == 0 {
 		return nil, nil
 	}
 	if len(floatArgs) == 0 && len(locationArgs) == 0 {
-		return []*ch.AggSignalForRange{}, nil
+		return []*qtypes.AggSignalForRange{}, nil
 	}
 
 	table, err := q.signalTable(ctx, globalFrom, globalTo)
 	if err != nil {
 		return nil, err
 	}
-	result := []*ch.AggSignalForRange{}
+	result := []*qtypes.AggSignalForRange{}
 	if table == "" {
 		return result, nil
 	}
@@ -167,7 +167,7 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
 		var segIdx int64
-		var row ch.AggSignalForRange
+		var row qtypes.AggSignalForRange
 		var loc vss.Location
 		err := rows.Scan(&segIdx, &row.SignalType, &row.SignalIndex, &row.ValueNumber, &row.ValueString,
 			&loc.Latitude, &loc.Longitude, &loc.HDOP, &loc.Heading)
@@ -250,13 +250,13 @@ func floatLit(f float64) string {
 func aggValuesTable(floatArgs []model.FloatSignalArgs, stringArgs []model.StringSignalArgs, locationArgs []model.LocationSignalArgs) string {
 	entries := make([]string, 0, len(floatArgs)+len(stringArgs)+len(locationArgs))
 	for i, a := range floatArgs {
-		entries = append(entries, fmt.Sprintf("(%d, %d, %s)", ch.FloatType, i, sqlString(a.Name)))
+		entries = append(entries, fmt.Sprintf("(%d, %d, %s)", qtypes.FloatType, i, sqlString(a.Name)))
 	}
 	for i, a := range stringArgs {
-		entries = append(entries, fmt.Sprintf("(%d, %d, %s)", ch.StringType, i, sqlString(a.Name)))
+		entries = append(entries, fmt.Sprintf("(%d, %d, %s)", qtypes.StringType, i, sqlString(a.Name)))
 	}
 	for i, a := range locationArgs {
-		entries = append(entries, fmt.Sprintf("(%d, %d, %s)", ch.LocType, i, sqlString(a.Name)))
+		entries = append(entries, fmt.Sprintf("(%d, %d, %s)", qtypes.LocType, i, sqlString(a.Name)))
 	}
 	return "(VALUES " + strings.Join(entries, ", ") + ") AS agg_table(signal_type, signal_index, name)"
 }
@@ -283,10 +283,10 @@ func perSignalFilterSQL(aggArgs *model.AggregatedSignalArgs) (string, []any) {
 			}
 			parts = append(parts, "("+cond+")")
 		}
-		branches = append(branches, fmt.Sprintf("(agg_table.signal_type = %d AND (%s))", ch.FloatType, strings.Join(parts, " OR ")))
+		branches = append(branches, fmt.Sprintf("(agg_table.signal_type = %d AND (%s))", qtypes.FloatType, strings.Join(parts, " OR ")))
 	}
 	if len(aggArgs.StringArgs) != 0 {
-		branches = append(branches, fmt.Sprintf("agg_table.signal_type = %d", ch.StringType))
+		branches = append(branches, fmt.Sprintf("agg_table.signal_type = %d", qtypes.StringType))
 	}
 	if len(aggArgs.LocationArgs) != 0 {
 		parts := make([]string, 0, len(aggArgs.LocationArgs))
@@ -298,7 +298,7 @@ func perSignalFilterSQL(aggArgs *model.AggregatedSignalArgs) (string, []any) {
 			parts = append(parts, "("+cond+")")
 		}
 		branches = append(branches, fmt.Sprintf("(agg_table.signal_type = %d AND (s.loc_lat != 0 OR s.loc_lon != 0) AND (%s))",
-			ch.LocType, strings.Join(parts, " OR ")))
+			qtypes.LocType, strings.Join(parts, " OR ")))
 	}
 	return "(" + strings.Join(branches, " OR ") + ")", args
 }
@@ -306,7 +306,7 @@ func perSignalFilterSQL(aggArgs *model.AggregatedSignalArgs) (string, []any) {
 // segmentIndexCaseSQL ports ch's buildSegmentIndexMultiIf: rows falling in
 // ranges[i] get segment index i, everything else -1. Range timestamps are
 // inlined with microsecond precision.
-func segmentIndexCaseSQL(tsCol string, ranges []ch.TimeRange) string {
+func segmentIndexCaseSQL(tsCol string, ranges []qtypes.TimeRange) string {
 	parts := make([]string, 0, len(ranges))
 	for i, r := range ranges {
 		parts = append(parts, fmt.Sprintf("WHEN %s >= %s AND %s < %s THEN %d",
@@ -325,7 +325,7 @@ func floatCaseSQL(floatArgs []model.FloatSignalArgs) string {
 	parts := make([]string, 0, len(floatArgs))
 	for i, agg := range floatArgs {
 		parts = append(parts, fmt.Sprintf("WHEN signal_type = %d AND signal_index = %d THEN %s",
-			ch.FloatType, i, floatAggExpr(agg.Agg)))
+			qtypes.FloatType, i, floatAggExpr(agg.Agg)))
 	}
 	return "coalesce(CASE " + strings.Join(parts, " ") + " ELSE NULL END, 0) AS agg_number"
 }
@@ -338,7 +338,7 @@ func stringCaseSQL(stringArgs []model.StringSignalArgs) string {
 	parts := make([]string, 0, len(stringArgs))
 	for i, agg := range stringArgs {
 		parts = append(parts, fmt.Sprintf("WHEN signal_type = %d AND signal_index = %d THEN %s",
-			ch.StringType, i, stringAggExpr(agg.Agg)))
+			qtypes.StringType, i, stringAggExpr(agg.Agg)))
 	}
 	return "coalesce(CASE " + strings.Join(parts, " ") + " ELSE NULL END, '') AS agg_string"
 }
@@ -355,7 +355,7 @@ func locationCaseSQL(component, outCol string, locationArgs []model.LocationSign
 	parts := make([]string, 0, len(locationArgs))
 	for i, agg := range locationArgs {
 		parts = append(parts, fmt.Sprintf("WHEN signal_type = %d AND signal_index = %d THEN %s",
-			ch.LocType, i, locationAggExpr(component, agg.Agg)))
+			qtypes.LocType, i, locationAggExpr(component, agg.Agg)))
 	}
 	return "coalesce(CASE " + strings.Join(parts, " ") + " ELSE NULL END, 0) AS " + outCol
 }

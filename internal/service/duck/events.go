@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/dq/internal/service/ch"
+	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
@@ -70,12 +70,12 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 // GetEventCounts returns event counts by name for a subject in [from, to).
 // If eventNames is non-empty only those names are counted, mirroring
 // ch.Service.GetEventCounts.
-func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*ch.EventCount, error) {
+func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*qtypes.EventCount, error) {
 	table, err := q.eventTable(ctx, from, to)
 	if err != nil {
 		return nil, err
 	}
-	var result []*ch.EventCount
+	var result []*qtypes.EventCount
 	if table == "" {
 		return result, nil
 	}
@@ -107,7 +107,7 @@ func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to t
 		if err := rows.Scan(&name, &count); err != nil {
 			return nil, fmt.Errorf("failed scanning duckdb event count row: %w", err)
 		}
-		result = append(result, &ch.EventCount{Name: name, Count: int(count)})
+		result = append(result, &qtypes.EventCount{Name: name, Count: int(count)})
 	}
 	if rows.Err() != nil {
 		return nil, fmt.Errorf("duckdb event count row error: %w", rows.Err())
@@ -118,7 +118,7 @@ func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to t
 // GetEventCountsForRanges returns event counts by name per segment index for
 // multiple [From, To) ranges in one query, mirroring
 // ch.Service.GetEventCountsForRanges (multiIf -> CASE).
-func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, ranges []ch.TimeRange, eventNames []string) ([]*ch.EventCountForRange, error) {
+func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, ranges []qtypes.TimeRange, eventNames []string) ([]*qtypes.EventCountForRange, error) {
 	if len(ranges) == 0 {
 		return nil, nil
 	}
@@ -136,7 +136,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 	if err != nil {
 		return nil, err
 	}
-	var result []*ch.EventCountForRange
+	var result []*qtypes.EventCountForRange
 	if table == "" {
 		return result, nil
 	}
@@ -165,7 +165,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 		if err := rows.Scan(&segIdx, &name, &count); err != nil {
 			return nil, fmt.Errorf("failed scanning duckdb event count by range row: %w", err)
 		}
-		result = append(result, &ch.EventCountForRange{SegIndex: int(segIdx), Name: name, Count: int(count)})
+		result = append(result, &qtypes.EventCountForRange{SegIndex: int(segIdx), Name: name, Count: int(count)})
 	}
 	if rows.Err() != nil {
 		return nil, fmt.Errorf("duckdb event count by range row error: %w", rows.Err())
@@ -176,12 +176,12 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 // GetEventSummaries returns per-event-name summaries (count, first/last seen)
 // for a subject over all time, mirroring ch.Service.GetEventSummaries. This
 // scans every event date partition for the subject.
-func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*ch.EventSummary, error) {
+func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
 	table, err := q.eventTable(ctx, time.Time{}, time.Time{})
 	if err != nil {
 		return nil, err
 	}
-	var result []*ch.EventSummary
+	var result []*qtypes.EventSummary
 	if table == "" {
 		return result, nil
 	}
@@ -196,7 +196,7 @@ func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*ch.
 	}
 	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
-		var es ch.EventSummary
+		var es qtypes.EventSummary
 		if err := rows.Scan(&es.Name, &es.Count, &es.FirstSeen, &es.LastSeen); err != nil {
 			return nil, fmt.Errorf("failed scanning duckdb event summary row: %w", err)
 		}

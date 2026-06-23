@@ -17,7 +17,6 @@ import (
 	"github.com/DIMO-Network/dq/internal/identity"
 	"github.com/DIMO-Network/dq/internal/limits"
 	"github.com/DIMO-Network/dq/internal/repositories"
-	"github.com/DIMO-Network/dq/internal/service/ch"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	fetchgrpc "github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
@@ -55,18 +54,7 @@ type App struct {
 func New(settings config.Settings) (*App, error) {
 	logger := appLogger()
 
-	// chService is only needed for clickhouse/duckdb/shadow backends. In
-	// ducklake mode we skip constructing any ClickHouse client entirely.
-	var chService *ch.Service
-	if settings.QueryBackend != config.QueryBackendDuckLake {
-		var err error
-		chService, err = ch.NewService(settings)
-		if err != nil {
-			return nil, fmt.Errorf("couldn't create ClickHouse service: %w", err)
-		}
-	}
-
-	backend, duckSvc, backendCleanup, err := newQueryBackend(&settings, chService, logger)
+	backend, duckSvc, backendCleanup, err := newQueryBackend(&settings, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +143,7 @@ func New(settings config.Settings) (*App, error) {
 
 	var readyCheck func(context.Context) error
 	if duckSvc != nil {
-		readyCheck = duckReadiness(duckSvc, settings.QueryBackend)
+		readyCheck = duckReadiness(duckSvc, config.QueryBackendDuckLake)
 	}
 
 	return &App{

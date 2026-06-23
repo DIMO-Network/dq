@@ -1,22 +1,16 @@
 // Package config holds application configuration settings.
 package config
 
-import (
-	"github.com/DIMO-Network/clickhouse-infra/pkg/connect/config"
-)
-
 // Settings contains the application config.
 type Settings struct {
-	LogLevel                  string          `yaml:"LOG_LEVEL"`
-	Port                      int             `yaml:"PORT"`
-	GRPCPort                  int             `yaml:"GRPC_PORT"`
-	MonPort                   int             `yaml:"MON_PORT"`
-	EnablePprof               bool            `yaml:"ENABLE_PPROF"`
-	MaxRequestDuration        string          `yaml:"MAX_REQUEST_DURATION"`
-	ClickhouseSignal          config.Settings `yaml:"SIGNAL"`
-	ClickhouseFileCatalogue   config.Settings `yaml:"FILE"`
-	TokenExchangeJWTKeySetURL string          `yaml:"TOKEN_EXCHANGE_JWK_KEY_SET_URL"`
-	TokenExchangeIssuer       string          `yaml:"TOKEN_EXCHANGE_ISSUER_URL"`
+	LogLevel                  string `yaml:"LOG_LEVEL"`
+	Port                      int    `yaml:"PORT"`
+	GRPCPort                  int    `yaml:"GRPC_PORT"`
+	MonPort                   int    `yaml:"MON_PORT"`
+	EnablePprof               bool   `yaml:"ENABLE_PPROF"`
+	MaxRequestDuration        string `yaml:"MAX_REQUEST_DURATION"`
+	TokenExchangeJWTKeySetURL string `yaml:"TOKEN_EXCHANGE_JWK_KEY_SET_URL"`
+	TokenExchangeIssuer       string `yaml:"TOKEN_EXCHANGE_ISSUER_URL"`
 	// FetchGRPCRequireJWT makes a valid DIMO JWT mandatory on the fetch gRPC port.
 	// The interceptor always rejects an *invalid* token; this flag controls
 	// whether a *missing* one is rejected too. Default false eases rollout (admit
@@ -32,9 +26,8 @@ type Settings struct {
 	S3AWSSecretAccessKey string `yaml:"S3_AWS_SECRET_ACCESS_KEY"`
 	// Identity API for device→vehicle DID resolution
 	IdentityAPIURL string `yaml:"IDENTITY_API_URL"`
-	// QueryBackend selects the signal/event query backend: clickhouse (default),
-	// duckdb, ducklake (the shared DuckLake catalog — the cutover target), or
-	// shadow (serve from clickhouse, mirror to the lake and compare).
+	// QueryBackend is retained for config compatibility; DuckLake is the only
+	// backend, so this is effectively always "ducklake".
 	QueryBackend string `yaml:"QUERY_BACKEND"`
 	// DuckLakeCatalogDSN is the shared DuckLake catalog (Postgres DSN in
 	// prod, a catalog file path for single-node). Required when
@@ -90,16 +83,6 @@ type Settings struct {
 	SyntheticNFTAddress   string `yaml:"SYNTHETIC_NFT_ADDRESS"`
 }
 
-// Query backend values for QueryBackend.
-const (
-	// QueryBackendClickHouse serves all queries from ClickHouse (default).
-	QueryBackendClickHouse = "clickhouse"
-	// QueryBackendDuckDB serves signal/event queries from DuckDB over parquet.
-	QueryBackendDuckDB = "duckdb"
-	// QueryBackendShadow serves from ClickHouse while mirroring queries to
-	// DuckDB in the background and comparing results.
-	QueryBackendShadow = "shadow"
-	// QueryBackendDuckLake serves signal/event queries from the DuckLake
-	// catalog tables (lake.signals / lake.events).
-	QueryBackendDuckLake = "ducklake"
-)
+// QueryBackendDuckLake is the only query backend: signal/event queries are
+// served from the DuckLake catalog tables (lake.signals / lake.events).
+const QueryBackendDuckLake = "ducklake"

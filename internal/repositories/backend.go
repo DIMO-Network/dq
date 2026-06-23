@@ -5,30 +5,26 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/dq/internal/service/ch"
 	"github.com/DIMO-Network/dq/internal/service/duck"
 )
 
 // LocationAtSource is an optional backend capability: the nearest non-origin
 // location fix at or before a timestamp, reaching back before any window. The lake
-// backend implements it (duck.Queries.LocationAt); ClickHouse does not, so the
-// segment enrichment only gap-fills trip start/end locations on the lake path.
+// backend implements it (duck.Queries.LocationAt) for trip start/end gap-fill.
 type LocationAtSource interface {
 	LocationAt(ctx context.Context, subject string, ts time.Time) (*model.Location, error)
 }
 
-// Compile-time interface assertions: both query engines must satisfy the
-// shared Backend surface, and ClickHouse additionally the segments surface.
+// Compile-time interface assertions for the DuckLake backend (the only backend).
 var (
-	_ Backend         = (*ch.Service)(nil)
 	_ Backend         = (*duck.Queries)(nil)
-	_ CHService       = (*ch.Service)(nil)
-	_ SegmentsBackend = (*ch.Service)(nil)
+	_ SegmentsBackend = (*duck.LakeSegments)(nil)
+	_ CHService       = composedBackend{}
 )
 
-// composedBackend pairs a primary signal/event Backend with a separate
-// SegmentsBackend, forming the full CHService surface. Used for the duckdb
-// query backend, where segment detection still runs on ClickHouse.
+// composedBackend pairs the signal/event Backend with a separate SegmentsBackend,
+// forming the full query-service surface. The DuckLake backend supplies both
+// (NewLakeQueries + NewLakeSegments).
 type composedBackend struct {
 	Backend
 	SegmentsBackend
@@ -40,9 +36,8 @@ func ComposeBackend(backend Backend, segments SegmentsBackend) CHService {
 	return composedBackend{Backend: backend, SegmentsBackend: segments}
 }
 
-// LocationAt promotes the underlying Backend's nearest-fix lookup (the lake
-// backend's) so the composed CHService satisfies LocationAtSource; returns nil when
-// the Backend doesn't support it (ClickHouse-backed compose).
+// LocationAt promotes the underlying Backend's nearest-fix lookup so the composed
+// service satisfies LocationAtSource; returns nil when the Backend lacks it.
 func (b composedBackend) LocationAt(ctx context.Context, subject string, ts time.Time) (*model.Location, error) {
 	if las, ok := b.Backend.(LocationAtSource); ok {
 		return las.LocationAt(ctx, subject, ts)

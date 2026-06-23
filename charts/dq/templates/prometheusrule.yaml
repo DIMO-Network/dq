@@ -59,41 +59,11 @@ spec:
               ({{ "{{ $value }}" }} resets; span in
               dq_materializer_last_cursor_reset_gap_snapshots). Backfill the
               skipped range, then raise retention or decode throughput.
-        - alert: DQShadowMismatch
-          expr: increase(dq_shadow_mismatch_total[1h]) > 0
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: shadow backend disagreement
-            description: DuckDB and ClickHouse returned different results for the same query.
         # End-to-end decode backlog as a single number (CHD-14): how many
         # DuckLake snapshots the decoder is behind the committed head. Pair with
         # din's head-age metric for the full pipeline lag.
         - record: dq:pipeline_snapshot_backlog
           expr: max(dq_materializer_head_snapshot_id) - max(dq_materializer_cursor_snapshot_id)
-        - alert: DQShadowDropped
-          expr: increase(dq_shadow_dropped_total[1h]) > 0 or increase(dq_fetch_shadow_dropped_total[1h]) > 0
-          for: 10m
-          labels:
-            severity: warning
-          annotations:
-            summary: shadow comparisons dropped under backpressure
-            description: >-
-              The shadow validator skipped comparisons because its concurrency
-              limit saturated, so a clean dq_shadow_mismatch_total does NOT mean
-              the lake matched everything (CHD-15). Do not trust the cutover gate
-              until drops are zero — raise shadow concurrency or reduce load.
-        # Fetch-path shadow had only a dropped alert; mismatches/errors on the
-        # index path were invisible (SR-14).
-        - alert: DQFetchShadowMismatch
-          expr: increase(dq_fetch_shadow_mismatch_total[1h]) > 0 or increase(dq_fetch_shadow_error_total[1h]) > 0
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: fetch shadow backend disagreement
-            description: The lake fetch index path returned different results from ClickHouse. Do not trust the cutover gate.
         # Background-loop failures were only logged, never alerted (SR-14).
         - alert: DQMaterializerPruneErrors
           expr: increase(dq_materializer_prune_errors_total[1h]) > 0

@@ -7,9 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/dq/internal/service/ch"
+	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/DIMO-Network/model-garage/pkg/schema"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
@@ -20,21 +19,20 @@ const approximateLocationResolution = 6
 
 var unixEpoch = time.Unix(0, 0).UTC()
 
-// Backend is the signal/latest/summary/event query surface shared by the
-// ClickHouse service (internal/service/ch) and the DuckDB parse-on-read
-// query layer (internal/service/duck). Both *ch.Service and *duck.Queries
-// satisfy it (see assertions in backend.go).
+// Backend is the signal/latest/summary/event query surface served by the
+// DuckLake parse-on-read query layer (internal/service/duck). *duck.Queries
+// satisfies it (see assertions in backend.go).
 type Backend interface {
-	GetAggregatedSignals(ctx context.Context, subject string, aggArgs *model.AggregatedSignalArgs) ([]*ch.AggSignal, error)
-	GetAggregatedSignalsForRanges(ctx context.Context, subject string, ranges []ch.TimeRange, globalFrom, globalTo time.Time, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs) ([]*ch.AggSignalForRange, error)
+	GetAggregatedSignals(ctx context.Context, subject string, aggArgs *model.AggregatedSignalArgs) ([]*qtypes.AggSignal, error)
+	GetAggregatedSignalsForRanges(ctx context.Context, subject string, ranges []qtypes.TimeRange, globalFrom, globalTo time.Time, floatArgs []model.FloatSignalArgs, locationArgs []model.LocationSignalArgs) ([]*qtypes.AggSignalForRange, error)
 	GetLatestSignals(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error)
 	GetAllLatestSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error)
 	GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error)
 	GetSignalSummaries(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error)
 	GetEvents(ctx context.Context, subject string, from, to time.Time, filter *model.EventFilter) ([]*vss.Event, error)
-	GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*ch.EventCount, error)
-	GetEventCountsForRanges(ctx context.Context, subject string, ranges []ch.TimeRange, eventNames []string) ([]*ch.EventCountForRange, error)
-	GetEventSummaries(ctx context.Context, subject string) ([]*ch.EventSummary, error)
+	GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*qtypes.EventCount, error)
+	GetEventCountsForRanges(ctx context.Context, subject string, ranges []qtypes.TimeRange, eventNames []string) ([]*qtypes.EventCountForRange, error)
+	GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error)
 }
 
 // SegmentsBackend is the segment-detection surface, currently only
@@ -113,17 +111,17 @@ func (r *Repository) GetSignal(ctx context.Context, aggArgs *model.AggregatedSig
 		}
 
 		switch signal.SignalType {
-		case ch.FloatType:
+		case qtypes.FloatType:
 			if len(aggArgs.FloatArgs) <= int(signal.SignalIndex) {
 				return nil, fmt.Errorf("only %d float signal requests, but the query returned index %d", len(aggArgs.FloatArgs), signal.SignalIndex)
 			}
 			currAggs.ValueNumbers[aggArgs.FloatArgs[signal.SignalIndex].Alias] = signal.ValueNumber
-		case ch.StringType:
+		case qtypes.StringType:
 			if len(aggArgs.StringArgs) <= int(signal.SignalIndex) {
 				return nil, fmt.Errorf("only %d string signal requests, but the query returned index %d", len(aggArgs.StringArgs), signal.SignalIndex)
 			}
 			currAggs.ValueStrings[aggArgs.StringArgs[signal.SignalIndex].Alias] = signal.ValueString
-		case ch.LocType:
+		case qtypes.LocType:
 			if len(aggArgs.LocationArgs) <= int(signal.SignalIndex) {
 				return nil, fmt.Errorf("only %d location signal requests, but the query returned index %d", len(aggArgs.LocationArgs), signal.SignalIndex)
 			}
@@ -310,8 +308,7 @@ func signalToLatestSignal(signal *vss.Signal) *model.LatestSignal {
 
 // handleDBError logs the error and returns a generic error message.
 func handleDBError(ctx context.Context, err error) error {
-	exceptionErr := &proto.Exception{}
-	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &exceptionErr) && exceptionErr.Code == ch.TimeoutErrCode) {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return errorhandler.NewBadRequestErrorWithMsg(ctx, err, "request exceeded or is estimated to exceed the maximum execution time")
 	}
 	return errorhandler.NewInternalErrorWithMsg(ctx, err, "failed to query db")

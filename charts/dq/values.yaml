@@ -53,7 +53,7 @@ env:
   MON_PORT: 8888
   GRPC_PORT: 8086
   ENVIRONMENT: dev
-  QUERY_BACKEND: clickhouse
+  QUERY_BACKEND: ducklake
   PARQUET_BUCKET: dimo-storage-dev
   RAW_PREFIX: raw/
   DECODED_PREFIX: decoded/v1/

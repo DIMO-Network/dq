@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/dq/internal/service/ch"
+	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,12 +59,12 @@ func setupAggFixtures(t *testing.T) *Queries {
 
 type aggKey struct {
 	ts    time.Time
-	stype ch.FieldType
+	stype qtypes.FieldType
 	index uint16
 }
 
-func aggsByKey(signals []*ch.AggSignal) map[aggKey]*ch.AggSignal {
-	m := make(map[aggKey]*ch.AggSignal, len(signals))
+func aggsByKey(signals []*qtypes.AggSignal) map[aggKey]*qtypes.AggSignal {
+	m := make(map[aggKey]*qtypes.AggSignal, len(signals))
 	for _, s := range signals {
 		m[aggKey{ts: s.Timestamp, stype: s.SignalType, index: s.SignalIndex}] = s
 	}
@@ -107,14 +107,14 @@ func TestGetAggregatedSignalsFloatAggregations(t *testing.T) {
 	// minute 0: values 10, 30
 	want0 := []float64{20, 10, 30, 10, 30, 20} // avg, min, max, first, last, med
 	for i, want := range want0 {
-		row := m[aggKey{ts: minute(0), stype: ch.FloatType, index: uint16(i)}]
+		row := m[aggKey{ts: minute(0), stype: qtypes.FloatType, index: uint16(i)}]
 		require.NotNil(t, row, "missing minute-0 row for agg index %d", i)
 		assert.InDelta(t, want, row.ValueNumber, 1e-9, "agg index %d", i)
 	}
 	// minute 1: single value 50; minute 2: single value 20
 	for i := range want0 {
-		assert.InDelta(t, 50, m[aggKey{ts: minute(1), stype: ch.FloatType, index: uint16(i)}].ValueNumber, 1e-9)
-		assert.InDelta(t, 20, m[aggKey{ts: minute(2), stype: ch.FloatType, index: uint16(i)}].ValueNumber, 1e-9)
+		assert.InDelta(t, 50, m[aggKey{ts: minute(1), stype: qtypes.FloatType, index: uint16(i)}].ValueNumber, 1e-9)
+		assert.InDelta(t, 20, m[aggKey{ts: minute(2), stype: qtypes.FloatType, index: uint16(i)}].ValueNumber, 1e-9)
 	}
 
 	// rows are ordered by bucket timestamp ascending
@@ -173,16 +173,16 @@ func TestGetAggregatedSignalsStringAggregations(t *testing.T) {
 
 	m := aggsByKey(signals)
 	minute0 := d1(t, "00:00:00")
-	assert.Equal(t, "HEV", m[aggKey{ts: minute0, stype: ch.StringType, index: 0}].ValueString)
-	assert.Equal(t, "EV", m[aggKey{ts: minute0, stype: ch.StringType, index: 1}].ValueString)
-	uniq := strings.Split(m[aggKey{ts: minute0, stype: ch.StringType, index: 2}].ValueString, ",")
+	assert.Equal(t, "HEV", m[aggKey{ts: minute0, stype: qtypes.StringType, index: 0}].ValueString)
+	assert.Equal(t, "EV", m[aggKey{ts: minute0, stype: qtypes.StringType, index: 1}].ValueString)
+	uniq := strings.Split(m[aggKey{ts: minute0, stype: qtypes.StringType, index: 2}].ValueString, ",")
 	sort.Strings(uniq)
 	assert.Equal(t, []string{"EV", "HEV"}, uniq)
-	assert.Equal(t, "EV", m[aggKey{ts: minute0, stype: ch.StringType, index: 3}].ValueString, "EV appears 2 of 3 times in minute 0")
+	assert.Equal(t, "EV", m[aggKey{ts: minute0, stype: qtypes.StringType, index: 3}].ValueString, "EV appears 2 of 3 times in minute 0")
 
 	minute1 := d1(t, "00:01:00")
 	for i := range 4 {
-		assert.Equal(t, "EV", m[aggKey{ts: minute1, stype: ch.StringType, index: uint16(i)}].ValueString)
+		assert.Equal(t, "EV", m[aggKey{ts: minute1, stype: qtypes.StringType, index: uint16(i)}].ValueString)
 	}
 }
 
@@ -207,17 +207,17 @@ func TestGetAggregatedSignalsLocationAggregations(t *testing.T) {
 	m := aggsByKey(signals)
 	minute0, minute1 := d1(t, "00:00:00"), d1(t, "00:01:00")
 
-	first := m[aggKey{ts: minute0, stype: ch.LocType, index: 0}].ValueLocation
+	first := m[aggKey{ts: minute0, stype: qtypes.LocType, index: 0}].ValueLocation
 	assert.InDelta(t, 1, first.Latitude, 1e-9)
 	assert.InDelta(t, 2, first.Longitude, 1e-9)
 	assert.InDelta(t, 0.5, first.HDOP, 1e-9)
 	assert.InDelta(t, 90, first.Heading, 1e-9)
 
-	last := m[aggKey{ts: minute0, stype: ch.LocType, index: 1}].ValueLocation
+	last := m[aggKey{ts: minute0, stype: qtypes.LocType, index: 1}].ValueLocation
 	assert.InDelta(t, 3, last.Latitude, 1e-9)
 	assert.InDelta(t, 4, last.Longitude, 1e-9)
 
-	avg := m[aggKey{ts: minute0, stype: ch.LocType, index: 2}].ValueLocation
+	avg := m[aggKey{ts: minute0, stype: qtypes.LocType, index: 2}].ValueLocation
 	assert.InDelta(t, 2, avg.Latitude, 1e-9)
 	assert.InDelta(t, 3, avg.Longitude, 1e-9)
 	assert.InDelta(t, 0.6, avg.HDOP, 1e-9)
@@ -225,7 +225,7 @@ func TestGetAggregatedSignalsLocationAggregations(t *testing.T) {
 
 	// minute 1 contains a (0, 0) row that interval aggregations exclude.
 	for i := range 3 {
-		loc := m[aggKey{ts: minute1, stype: ch.LocType, index: uint16(i)}].ValueLocation
+		loc := m[aggKey{ts: minute1, stype: qtypes.LocType, index: uint16(i)}].ValueLocation
 		assert.InDelta(t, 5, loc.Latitude, 1e-9, "(0,0) row must be excluded, agg %d", i)
 		assert.InDelta(t, 6, loc.Longitude, 1e-9, "(0,0) row must be excluded, agg %d", i)
 	}
@@ -362,7 +362,7 @@ func TestGetAggregatedSignalsEdgeCases(t *testing.T) {
 
 func TestGetAggregatedSignalsForRanges(t *testing.T) {
 	q := setupAggFixtures(t)
-	ranges := []ch.TimeRange{
+	ranges := []qtypes.TimeRange{
 		{From: d1(t, "00:00:00"), To: d1(t, "00:01:00")},
 		{From: d1(t, "00:01:00"), To: d1(t, "00:02:00")},
 	}
@@ -379,24 +379,24 @@ func TestGetAggregatedSignalsForRanges(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 6, "2 segments x (2 float + 1 location)")
 
-	byKey := map[[3]int]*ch.AggSignalForRange{}
+	byKey := map[[3]int]*qtypes.AggSignalForRange{}
 	for _, r := range rows {
 		byKey[[3]int{r.SegIndex, int(r.SignalType), int(r.SignalIndex)}] = r
 	}
 
 	// seg 0: speed values 10, 30 and 80 (no source filter in batch agg)
-	assert.InDelta(t, 40, byKey[[3]int{0, int(ch.FloatType), 0}].ValueNumber, 1e-9)
-	assert.InDelta(t, 80, byKey[[3]int{0, int(ch.FloatType), 1}].ValueNumber, 1e-9)
+	assert.InDelta(t, 40, byKey[[3]int{0, int(qtypes.FloatType), 0}].ValueNumber, 1e-9)
+	assert.InDelta(t, 80, byKey[[3]int{0, int(qtypes.FloatType), 1}].ValueNumber, 1e-9)
 	// seg 1: speed value 50
-	assert.InDelta(t, 50, byKey[[3]int{1, int(ch.FloatType), 0}].ValueNumber, 1e-9)
-	assert.InDelta(t, 50, byKey[[3]int{1, int(ch.FloatType), 1}].ValueNumber, 1e-9)
+	assert.InDelta(t, 50, byKey[[3]int{1, int(qtypes.FloatType), 0}].ValueNumber, 1e-9)
+	assert.InDelta(t, 50, byKey[[3]int{1, int(qtypes.FloatType), 1}].ValueNumber, 1e-9)
 
 	// seg 0 first location is (1, 2)
-	loc0 := byKey[[3]int{0, int(ch.LocType), 0}].ValueLocation
+	loc0 := byKey[[3]int{0, int(qtypes.LocType), 0}].ValueLocation
 	assert.InDelta(t, 1, loc0.Latitude, 1e-9)
 	assert.InDelta(t, 2, loc0.Longitude, 1e-9)
 	// seg 1: batch agg does NOT exclude (0, 0) rows, mirroring ClickHouse.
-	loc1 := byKey[[3]int{1, int(ch.LocType), 0}].ValueLocation
+	loc1 := byKey[[3]int{1, int(qtypes.LocType), 0}].ValueLocation
 	assert.InDelta(t, 0, loc1.Latitude, 1e-9)
 	assert.InDelta(t, 0, loc1.Longitude, 1e-9)
 
