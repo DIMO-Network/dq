@@ -141,13 +141,16 @@ func stringFilterSQL(col string, fil *model.StringValueFilter) (string, []any) {
 	if fil.Neq != nil {
 		conds, args = append(conds, col+" != ?"), append(args, *fil.Neq)
 	}
-	if fil.NotIn != nil {
+	// len() != 0, not != nil: a non-nil empty slice (gqlgen yields one for
+	// `in: []`) would render "col IN ()", a DuckDB parser error. Matches
+	// floatFilterSQL / stringArrayFilterSQL.
+	if len(fil.NotIn) != 0 {
 		conds = append(conds, col+" NOT IN ("+placeholders(len(fil.NotIn))+")")
 		for _, v := range fil.NotIn {
 			args = append(args, v)
 		}
 	}
-	if fil.In != nil {
+	if len(fil.In) != 0 {
 		conds = append(conds, col+" IN ("+placeholders(len(fil.In))+")")
 		for _, v := range fil.In {
 			args = append(args, v)

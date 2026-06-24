@@ -135,6 +135,15 @@ func TestGetEventsNameAndSourceFilters(t *testing.T) {
 		Eq: &start,
 		Or: []*model.StringValueFilter{{Eq: &end}},
 	}}))
+
+	// A non-nil empty In/NotIn slice (gqlgen yields one for `in: []`) must not
+	// render "col IN ()", which is a DuckDB parser error. It is a no-op filter.
+	t.Run("empty in/notIn slices are no-ops, not a crash", func(t *testing.T) {
+		all := get(t, nil)
+		assert.Equal(t, all, get(t, &model.EventFilter{Name: &model.StringValueFilter{In: []string{}}}))
+		assert.Equal(t, all, get(t, &model.EventFilter{Name: &model.StringValueFilter{NotIn: []string{}}}))
+		assert.Equal(t, all, get(t, &model.EventFilter{Source: &model.StringValueFilter{In: []string{}}}))
+	})
 }
 
 func TestGetEventCounts(t *testing.T) {
