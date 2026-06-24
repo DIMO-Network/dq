@@ -24,6 +24,7 @@ func (c *CloudEvent) AsRawCloudEvent() cloudevent.RawEvent {
 	return cloudevent.RawEvent{
 		CloudEventHeader: c.GetHeader().AsCloudEventHeader(),
 		Data:             c.GetData(),
+		DataBase64:       c.GetDataBase64(),
 	}
 }
 
@@ -93,7 +94,8 @@ func CloudEventHeaderToProto(event *cloudevent.CloudEventHeader) *CloudEventHead
 // CloudEventToProto converts a cloudevent.RawEvent to a grpc.CloudEvent.
 func CloudEventToProto(event cloudevent.RawEvent) *CloudEvent {
 	return &CloudEvent{
-		Header: CloudEventHeaderToProto(&event.CloudEventHeader),
-		Data:   event.Data,
+		Header:     CloudEventHeaderToProto(&event.CloudEventHeader),
+		Data:       event.Data,
+		DataBase64: event.DataBase64,
 	}
 }

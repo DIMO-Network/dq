@@ -9,7 +9,13 @@ import "google/protobuf/timestamp.proto";
 // CloudEvent represents a CloudEvent with a header and data.
 message CloudEvent {
     CloudEventHeader header = 1;
+    // data is the decoded payload (e.g. JSON). Empty when the payload is binary and
+    // carried in data_base64 instead.
     bytes data = 2;
+    // data_base64 is the base64-encoded payload, set instead of data when the
+    // payload is binary (≤ the inline threshold; larger ones are externalized).
+    // Exactly one of data / data_base64 is populated, mirroring the CloudEvent model.
+    string data_base64 = 3;
 }
 
 // CloudEventHeader represents the header structure of a CloudEvent.
