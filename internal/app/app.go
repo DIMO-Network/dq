@@ -64,13 +64,16 @@ func New(settings config.Settings) (*App, error) {
 	// a newly added one can't silently forget it; cleared (ok=true) only once the App
 	// takes ownership of the cleanup.
 	var stopMaterializer func()
+	cleanup := func() {
+		if stopMaterializer != nil {
+			stopMaterializer()
+		}
+		backendCleanup()
+	}
 	ok := false
 	defer func() {
 		if !ok {
-			if stopMaterializer != nil {
-				stopMaterializer()
-			}
-			backendCleanup()
+			cleanup()
 		}
 	}()
 
@@ -162,12 +165,7 @@ func New(settings config.Settings) (*App, error) {
 		readyCheck:   readyCheck,
 		eventService: eventService,
 		buckets:      buckets,
-		cleanup: func() {
-			if stopMaterializer != nil {
-				stopMaterializer()
-			}
-			backendCleanup()
-		},
+		cleanup:      cleanup,
 	}, nil
 }
 
