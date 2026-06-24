@@ -69,6 +69,12 @@ func isLocalBucket(bucket string) bool {
 // (always non-nil). The returned duckSvc is owned by the cleanup — callers must
 // not close it themselves.
 func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (repositories.QueryService, *duck.Service, func(), error) {
+	// DuckLake is the only backend, so the catalog DSN is mandatory. Fail fast and
+	// clear at boot rather than attaching an empty catalog and failing opaquely on
+	// the first query (the materializer path guards the same setting).
+	if settings.DuckLakeCatalogDSN == "" {
+		return nil, nil, nil, fmt.Errorf("DUCKLAKE_CATALOG_DSN is empty: the DuckLake catalog is required for the query backend")
+	}
 	duckSvc, err := duck.NewService(duckConfigFromSettings(settings))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("couldn't create DuckDB service: %w", err)

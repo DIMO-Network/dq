@@ -18,7 +18,7 @@ spec:
             description: >-
               Raw cloudevents are arriving faster than the materializer
               decodes them ({{ "{{ $labels.type }}" }}). Queries serve stale
-              data; din's raw compactor is also gated behind this cursor.
+              data; din's snapshot expiry is also held back by this consumer floor.
         - alert: DQMaterializerStalled
           expr: rate(dq_materializer_batches_total[30m]) == 0 and max(dq_materializer_lag_seconds) > 0
           for: 30m
@@ -26,7 +26,7 @@ spec:
             severity: critical
           annotations:
             summary: materializer has pending work but committed no batches in 30m
-            description: watermark is not advancing — decode pipeline is stuck.
+            description: the materializer cursor is not advancing — decode pipeline is stuck.
 {{- if (.Values.prometheusRule | default dict).materializerEnabled }}
         - alert: DQMaterializerDown
           # The single-writer materializer is replicaCount:1 with no PDB. When it

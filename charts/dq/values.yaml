@@ -42,9 +42,9 @@ networkPolicy:
   # NetworkPolicyPeer list for the gRPC port's `from:` — e.g. a namespaceSelector
   # and/or podSelector for the services allowed to call gRPC fetch.
   grpcAllowedFrom: []
-# Recreate: the embedded materializer + decoded compactor are
-# single-writer components — two pods must never overlap during a deploy
-# until leader election lands. Query-only fleets (MATERIALIZER_ENABLED=false)
+# Recreate: the embedded materializer is a single-writer component — two
+# pods must never overlap during a deploy until leader election lands.
+# Query-only fleets (MATERIALIZER_ENABLED=false)
 # can switch back to RollingUpdate and scale replicas freely.
 strategy:
   type: Recreate
