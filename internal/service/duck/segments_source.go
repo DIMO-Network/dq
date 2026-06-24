@@ -39,8 +39,8 @@ func NewLakeSignalSource(svc *Service) *LakeSignalSource {
 //
 // lake.signals has no unique constraint per (subject,name,timestamp): duplicate
 // rows can be present across materializer batches. The inner QUALIFY dedup
-// keeps one row per (subject,name,timestamp,cloud_event_id) to prevent
-// inflated counts by collapsing duplicate rows.
+// (signalDedupQualify) keeps one row per (subject,name,timestamp) — breaking ties
+// by cloud_event_id — to prevent inflated counts.
 func (s *LakeSignalSource) WindowedSignalCounts(ctx context.Context, subject string, from, to time.Time, win, sig, dist int) ([]segments.ActiveWindow, error) {
 	winUS := int64(win) * 1_000_000
 	fromUS := from.UTC().UnixMicro()

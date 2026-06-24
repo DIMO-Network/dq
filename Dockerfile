@@ -8,7 +8,7 @@ COPY . ./
 RUN make tidy
 RUN make build
 
-# Pre-install DuckDB extensions (httpfs, aws, spatial) into a fixed directory.
+# Pre-install DuckDB extensions (httpfs, aws, spatial, ducklake, postgres) into a fixed directory.
 # The distroless runtime has no network or writable home, so extensions must
 # be baked into the image. The version/platform subdirectories created here
 # match the duckdb library linked into the binary.
