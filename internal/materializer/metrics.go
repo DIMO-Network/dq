@@ -33,6 +33,15 @@ var (
 		Name: "dq_materializer_prune_errors_total",
 		Help: "Decoded-retention prune passes that failed.",
 	})
+	// passErrorsTotal makes a wedged decode loop alertable. A RunOnce spinning on the
+	// same readDelta/commit/CAS error increments this every pass while the cursor and
+	// lag gauges stay flat (cursorSnapshotID is re-published unchanged, lag isn't
+	// touched on the error path) — so the Down (absent-gauge) and Stalled (lag>0)
+	// alerts miss it. Alert on a sustained increase here instead.
+	passErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dq_materializer_pass_errors_total",
+		Help: "RunOnce passes that returned an error (readDelta/commit/CAS); a sustained increase means the decode loop is wedged.",
+	})
 	// rollupRefreshSeconds tracks the per-batch latest/summary rollup refresh
 	// cost. The refresh recomputes affected subjects from the deduped base
 	// (subject_bucket-pruned, SR-6); this gauge makes its growth with history

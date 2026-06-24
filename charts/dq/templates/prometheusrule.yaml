@@ -73,6 +73,40 @@ spec:
           annotations:
             summary: decoded-retention prune is failing
             description: PruneDecoded errored; decoded tables grow past retention until it recovers.
+        # A wedged decode loop spins on the same readDelta/commit/CAS error every
+        # pass while the cursor gauge re-publishes unchanged and lag isn't touched —
+        # so Down (absent-gauge) and Stalled (lag>0) both miss it. This is the wedge
+        # signal (CHD: materializer-liveness).
+        - alert: DQMaterializerPassErrors
+          expr: increase(dq_materializer_pass_errors_total[15m]) > 5
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: materializer decode loop is failing every pass (likely wedged)
+            description: >-
+              RunOnce returned errors repeatedly (readDelta/commit/CAS). Decode has
+              effectively halted; the cursor/lag gauges can stay flat, so this is the
+              only signal. Investigate before lag passes retention (cursor reset).
+        # Silent decoded-side data loss was emitted but never alerted: undecodable
+        # rows (errors_total) and permanently-missing externalized payloads
+        # (blob_missing_total, dropped on S3 404). Mirror of din's poison-row alert.
+        - alert: DQMaterializerDecodeErrors
+          expr: increase(dq_materializer_errors_total[1h]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: materializer is shedding undecodable rows
+            description: Conversion failures / undecodable raw events — a producer or schema regression silently drops decoded rows.
+        - alert: DQMaterializerBlobMissing
+          expr: increase(dq_materializer_blob_missing_total[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: materializer dropped a permanently-missing blob
+            description: A decoded event's externalized payload 404'd on S3 and was skipped — permanent decoded-side data loss. Investigate the blob write path.
         # Early warning that the per-batch rollup recompute is growing with
         # history (the SR-1 O(history) cost) before it gates decode throughput.
         - alert: DQMaterializerRollupRefreshSlow

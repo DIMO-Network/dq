@@ -93,6 +93,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+			passErrorsTotal.Inc()
 			r.log.Error().Err(err).Msg("materializer pass failed")
 		} else if processed > 0 {
 			continue // drain the backlog without waiting
