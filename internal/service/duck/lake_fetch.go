@@ -310,6 +310,12 @@ func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, index
 		idsBySubject[s] = append(idsBySubject[s], indexes[i].ID)
 	}
 
+	// Keyed (subject, id) on the assumption that (subject, id) is unique — true because
+	// din's id is a content hash. The cloudevent contract only guarantees (id, source)
+	// uniqueness, so if a subject ever held two rows sharing an id (distinct sources),
+	// this map would collapse them to the last and the len(ids) bound below could
+	// truncate a *different* id out, turning the batch into ErrNotFound. Key on the full
+	// header Key() and drop the len(ids) bound if that assumption ever stops holding.
 	type key struct{ subject, id string }
 	found := make(map[key]cloudevent.StoredEvent, len(indexes))
 	for subject, ids := range idsBySubject {
