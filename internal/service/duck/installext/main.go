@@ -17,7 +17,7 @@ import (
 
 func main() {
 	dir := flag.String("dir", "", "directory to install extensions into (extension_directory)")
-	extensions := flag.String("extensions", "httpfs,aws,spatial,ducklake", "comma-separated list of extensions to install")
+	extensions := flag.String("extensions", "httpfs,aws,spatial,ducklake,postgres", "comma-separated list of extensions to install")
 	flag.Parse()
 
 	if *dir == "" {

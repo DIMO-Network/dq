@@ -73,9 +73,10 @@ var (
 	})
 )
 
-// lakeMetricType labels the DuckLake-path materializer metrics. The bucket path
-// labels lag/batches by cloudevent type; the lake path commits mixed types per
-// snapshot, so it reports under one series.
+// lakeMetricType is the single value of the "type" label on the materializer
+// lag/batch metrics. The materializer commits mixed cloudevent types per snapshot,
+// so all series report under this one label. (This is a Prometheus/alert wire
+// contract — don't rename the value.)
 const lakeMetricType = "ducklake"
 
 // observeLakeLag sets the decode-lag gauge from the oldest un-decoded event in a

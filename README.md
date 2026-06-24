@@ -49,16 +49,11 @@ latestCloudEvent(
 
 The queries `indexes` and `latestIndex` have been removed. If a client does not want to incur the cost of loading the referenced documents, then it should not request the fields `data` or `dataBase64`. Note that we no longer expose the `indexKey` field, since clients have no way of making use of it.
 
-## Storage backends (parse-on-read)
+## Storage backend (parse-on-read)
 
-With `QUERY_BACKEND=duckdb` the service reads raw and decoded parquet straight from object storage. The backend is inferred from `ParquetBucket` — no separate switch:
+The service reads from a DuckLake catalog: decoded signals/events in `lake.signals`/`lake.events` and raw cloudevents in `lake.raw_events`, written by din and the materializer. DuckLake is the only backend — there is no query-backend switch.
 
-| Value | Backend |
-|---|---|
-| `my-bucket` | S3 (DuckDB httpfs + materializer S3 client) |
-| `/data/pipeline` or `file:///data/pipeline` | Local filesystem |
-
-Paths must be absolute. The materializer's filesystem store publishes atomically (temp file + fsync + rename), so din's compactor never reads a torn watermark and DuckDB never globs a partial file.
+Configure the catalog with `DUCKLAKE_CATALOG_DSN` (a Postgres DSN in prod for concurrent writers, or a local catalog-file path for single-node/tests) and `DUCKLAKE_DATA_PATH` (where parquet data files live — an `s3://` prefix in prod, a local directory in tests). `PARQUET_BUCKET` is the bucket the fetch path presigns/downloads externalized cloudevent payloads from.
 
 ### Clone layout (required until cloudevent is released)
 
@@ -66,20 +61,20 @@ This branch builds against a local cloudevent checkout via a `replace` directive
 
 ### Single-node quickstart
 
-Run against the same root din writes to:
+Run against a local DuckLake catalog file; the materializer decodes din's raw_events into it:
 
 ```bash
+DUCKLAKE_CATALOG_DSN=/data/catalog.ducklake \
+DUCKLAKE_DATA_PATH=/data/lake \
 PARQUET_BUCKET=/data/pipeline \
-QUERY_BACKEND=duckdb \
 MATERIALIZER_ENABLED=true \
 go run ./cmd/dq
 ```
 
-**Local dev:** the whole query surface — signals, events, raw, segments, and the eventrepo fetch path — is served from DuckLake (the lake catalog plus S3, or entirely from local parquet). The fastest way to see the full parse-on-read path run with zero infra is the test suite, which exercises raw bundles → materializer → DuckDB → real GraphQL execution end to end:
+**Local dev:** the whole query surface — signals, events, raw, segments, and the eventrepo fetch path — is served from DuckLake (the catalog plus S3, or entirely from a local catalog + parquet). The fastest way to see the full parse-on-read path run with zero infra is the test suite, which exercises raw bundles → materializer → DuckDB → real GraphQL execution end to end:
 
 ```bash
-go test ./tests/ -v -run 'TestPipelineEndToEnd|TestDISParity'
-go test ./tests/ -v -perf -run 'TestQueryPerformance|TestMaterializerPerformance'
+go test ./tests/ -run 'TestDuckLake_MaterializeFromRawEvents|TestDISParity'
 ```
 
-In single-node mode every query surface — signals, events, raw, segments, and the eventrepo fetch path (S3 presign) — runs from DuckLake over local parquet; no external query engine is required.
+No external query engine is required.

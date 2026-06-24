@@ -54,8 +54,6 @@ env:
   GRPC_PORT: 8086
   ENVIRONMENT: dev
   PARQUET_BUCKET: dimo-storage-dev
-  RAW_PREFIX: raw/
-  DECODED_PREFIX: decoded/v1/
   MATERIALIZER_ENABLED: 'false'
   MATERIALIZER_POLL_INTERVAL: 15s
   # DuckDB runtime sizing (CHD-20). memory_limit must be ~75% of the pod memory

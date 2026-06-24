@@ -141,9 +141,9 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 			settings.MaterializerShardCount)
 	}
 	cfg := duckConfigFromSettings(settings)
-	cfg.DuckLakeEnabled = true
-	// The materializer reads the DuckLake delta (ducklake_table_changes); spatial's
-	// RTreeIndexScanOptimizer crashes the planner on that read, so never load it here.
+	// duckConfigFromSettings already sets DuckLakeEnabled. The materializer reads the
+	// DuckLake delta (ducklake_table_changes); spatial's RTreeIndexScanOptimizer
+	// crashes the planner on that read, so never load it here.
 	cfg.LoadSpatial = false
 	duckSvc, err := duck.NewService(cfg)
 	if err != nil {
