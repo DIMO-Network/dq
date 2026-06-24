@@ -602,7 +602,7 @@ func scanRawEvent(rows *sql.Rows) (cloudevent.RawEvent, string, error) {
 		if err := json.Unmarshal([]byte(extras.String), &ev.Extras); err != nil {
 			return ev, "", fmt.Errorf("decoding extras for %s: %w", ev.ID, err)
 		}
-		cloudevent.RestoreNonColumnFields(&ev.CloudEventHeader)
+		restoreNonColumnFieldsSafe(&ev.CloudEventHeader)
 	}
 	if len(dataBase64) > 0 {
 		ev.DataBase64 = string(dataBase64)

@@ -175,6 +175,18 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+// restoreNonColumnFieldsSafe wraps cloudevent.RestoreNonColumnFields, which rebuilds
+// non-column header fields (Tags, etc.) from the producer-supplied extras map via
+// unchecked type assertions — a malformed element (e.g. {"tags":[42]}) panics. The
+// fetch gRPC path has no recover middleware, so an unguarded panic on a poisoned
+// raw_events row would take down the server goroutine; contain it and keep the row
+// (the malformed non-column field is simply not restored). din validates Tags as a
+// typed []string at ingest, so this is defense-in-depth at the din→dq boundary.
+func restoreNonColumnFieldsSafe(hdr *cloudevent.CloudEventHeader) {
+	defer func() { _ = recover() }()
+	cloudevent.RestoreNonColumnFields(hdr)
+}
+
 // scanStoredEvent mirrors cloudevent/parquet's convertRow: rebuild the
 // header, restore non-column fields from extras, attach payload.
 func scanStoredEvent(row rowScanner) (cloudevent.StoredEvent, error) {
@@ -193,7 +205,7 @@ func scanStoredEvent(row rowScanner) (cloudevent.StoredEvent, error) {
 		if err := json.Unmarshal([]byte(*extras), &ev.Extras); err != nil {
 			return ev, fmt.Errorf("decoding extras for %s: %w", ev.ID, err)
 		}
-		cloudevent.RestoreNonColumnFields(&ev.CloudEventHeader)
+		restoreNonColumnFieldsSafe(&ev.CloudEventHeader)
 	}
 	if len(dataBase64) > 0 {
 		ev.DataBase64 = string(dataBase64)
