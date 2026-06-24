@@ -58,17 +58,30 @@ func New(settings config.Settings) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Past this point a failed boot must release the DuckDB service — and the
+	// materializer loop once started — or it leaks the catalog connection and a
+	// running goroutine. One deferred cleanup-on-error covers every return below, so
+	// a newly added one can't silently forget it; cleared (ok=true) only once the App
+	// takes ownership of the cleanup.
+	var stopMaterializer func()
+	ok := false
+	defer func() {
+		if !ok {
+			if stopMaterializer != nil {
+				stopMaterializer()
+			}
+			backendCleanup()
+		}
+	}()
+
 	signalRepo, err := repositories.NewRepository(backend)
 	if err != nil {
-		backendCleanup()
 		return nil, fmt.Errorf("couldn't create signal repository: %w", err)
 	}
 
-	var stopMaterializer func()
 	if settings.MaterializerEnabled {
 		stopMaterializer, err = startMaterializer(&settings, logger)
 		if err != nil {
-			backendCleanup()
 			return nil, fmt.Errorf("couldn't start materializer: %w", err)
 		}
 	}
@@ -76,10 +89,6 @@ func New(settings config.Settings) (*App, error) {
 	s3Client := s3ClientFromSettings(&settings)
 	eventService, err := newEventService(&settings, duckSvc, s3Client, logger)
 	if err != nil {
-		if stopMaterializer != nil {
-			stopMaterializer()
-		}
-		backendCleanup()
 		return nil, fmt.Errorf("couldn't create event service: %w", err)
 	}
 
@@ -146,6 +155,7 @@ func New(settings config.Settings) (*App, error) {
 		readyCheck = duckReadiness(duckSvc)
 	}
 
+	ok = true // App now owns backendCleanup + stopMaterializer; disarm the deferred cleanup
 	return &App{
 		Handler:      authChain(gqlSrv),
 		MCPHandler:   authChain(mcpHandler),
