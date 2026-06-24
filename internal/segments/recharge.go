@@ -3,6 +3,7 @@ package segments
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
@@ -76,7 +77,10 @@ func detectRechargeSegments(ctx context.Context, src SignalSource, subject strin
 	shouldMerge := func(a, b timeRange) bool {
 		_, odoCurEnd, ok1 := levelFirstLastInRange(odoSamples, a.start, a.end)
 		odoNextStart, _, ok2 := levelFirstLastInRange(odoSamples, b.start, b.end)
-		return ok1 && ok2 && odoCurEnd == odoNextStart
+		// Stationary between sessions: allow ≤ the same odometer-noise epsilon used in
+		// filterRangesBySocAndOdo (a raw float == would fail to merge two real charge
+		// sessions if the odometer wobbled by even 0.001 km).
+		return ok1 && ok2 && math.Abs(odoNextStart-odoCurEnd) <= rechargeOdometerEpsilonKm
 	}
 	// Merge with zero from/to to skip clipping (already filtered/clipped upstream)
 	merged := mergeTimeRanges(filtered, rechargeSessionGapMax, minDuration, time.Time{}, time.Time{}, shouldMerge)
@@ -92,14 +96,18 @@ func smoothSamples(samples []LevelSample, window int) []LevelSample {
 		return samples
 	}
 	half := window / 2
-	wf := float64(window)
+	// The window is symmetric (±half), so it sums 2*half+1 samples — exactly `window`
+	// for an odd window but window+1 for an even one. Divide by the actual count so an
+	// even window isn't biased high (the only caller uses the odd rechargeSmoothWindow,
+	// but the helper must hold its "rolling average" contract for any window).
+	denom := float64(2*half + 1)
 	out := make([]LevelSample, 0, len(samples)-window+1)
 	for i := half; i < len(samples)-half; i++ {
 		sum := 0.0
 		for j := i - half; j <= i+half; j++ {
 			sum += samples[j].Value
 		}
-		out = append(out, LevelSample{TS: samples[i].TS, Value: sum / wf})
+		out = append(out, LevelSample{TS: samples[i].TS, Value: sum / denom})
 	}
 	return out
 }
