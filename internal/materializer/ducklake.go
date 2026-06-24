@@ -566,6 +566,24 @@ func (m *DuckLakeMaterializer) resolveBlob(ctx context.Context, ev *cloudevent.R
 	return nil
 }
 
+// restoreNonColumnFieldsSafe wraps cloudevent.RestoreNonColumnFields, which rebuilds
+// Tags (and other non-column fields) from the extras map via unchecked type
+// assertions — a malformed element (e.g. {"tags":[42]}) panics. din currently writes
+// extras only from a typed Tags []string (validated at ingest), so a non-string tag
+// never reaches storage; this is defense-in-depth at the din→dq trust boundary, not a
+// live path. It matters because the scan runs OUTSIDE the decode recover: an unguarded
+// panic here would propagate to RunOnce and crash-loop the single-writer materializer
+// on that row forever (the cursor never advances). Contain it — keep the row with its
+// scanned columns, skip the non-column reconstruction, count it via errorsTotal.
+func restoreNonColumnFieldsSafe(hdr *cloudevent.CloudEventHeader) {
+	defer func() {
+		if recover() != nil {
+			errorsTotal.Inc()
+		}
+	}()
+	cloudevent.RestoreNonColumnFields(hdr)
+}
+
 // scanRawEvent rebuilds a RawEvent from a raw_events row, restoring the
 // non-column header fields from extras exactly like the parquet decoder.
 func scanRawEvent(rows *sql.Rows) (cloudevent.RawEvent, string, error) {
