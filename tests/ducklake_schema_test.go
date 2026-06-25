@@ -32,6 +32,7 @@ func TestDuckLake_DecodedSchemaContract(t *testing.T) {
 		defer rows.Close() //nolint:errcheck
 		names, err := rows.Columns()
 		require.NoError(t, err)
+		require.NoError(t, rows.Err())
 		return names
 	}
 

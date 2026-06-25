@@ -1,0 +1,20 @@
+# golangci-lint policy for dq — the correctness/maintainability linters that must stay
+# green (CI gate). gosec is intentionally NOT gated: on a SQL query engine it fires almost
+# entirely on inherent-to-domain patterns — G201/G202 (dynamic SQL; injection is proven
+# clean via bound params + schema-derived fragments, see the R2 security review) and G115
+# (bounded int conversions, e.g. HashBucket's [0,256)). Run `golangci-lint run -E gosec`
+# ad-hoc for a security audit instead of gating on its noise.
+version: "2"
+linters:
+  default: none
+  enable:
+    - bodyclose      # response/HTTP bodies are closed
+    - errcheck       # returned errors are checked
+    - errorlint      # error wrapping (%w) and errors.Is/As use
+    - govet
+    - ineffassign    # no ineffectual assignments
+    - nilerr         # don't return nil after observing a non-nil error
+    - rowserrcheck   # sql.Rows.Err() is checked
+    - sqlclosecheck  # sql.Rows/Stmt are closed
+    - staticcheck
+    - unused

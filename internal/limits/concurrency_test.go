@@ -8,8 +8,11 @@ import (
 
 func TestConcurrencyLimiter_AcquireRelease(t *testing.T) {
 	cl := NewConcurrencyLimiter(2)
-	if !cl.acquire("a") || !cl.acquire("a") {
-		t.Fatal("first two acquires for a key should succeed")
+	if !cl.acquire("a") {
+		t.Fatal("first acquire should succeed")
+	}
+	if !cl.acquire("a") {
+		t.Fatal("second acquire (still under the limit of 2) should succeed")
 	}
 	if cl.acquire("a") {
 		t.Fatal("third acquire over the limit must fail")

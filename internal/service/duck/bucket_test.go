@@ -2,7 +2,6 @@ package duck
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -11,10 +10,6 @@ const (
 	testSubject1 = "did:erc721:137:0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF:1"
 	testSubject2 = "did:erc721:137:0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF:2"
 )
-
-func date(y int, m time.Month, d int) time.Time {
-	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-}
 
 func TestHashBucket(t *testing.T) {
 	// Hardcoded FNV-1a 32-bit reference values. These pin the on-disk
