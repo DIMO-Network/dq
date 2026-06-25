@@ -406,23 +406,32 @@ func (m *DuckLakeMaterializer) maybeReportProgress(ctx context.Context, snapshot
 // reportProgress upserts dq's processed snapshot id into din's consumer-floor
 // table so the maintainer never expires snapshots dq hasn't read.
 func (m *DuckLakeMaterializer) reportProgress(ctx context.Context, snapshotID int64) {
+	// Best-effort: the batch is already durable and the floor is conservative, so a
+	// failure here only holds expiry back slightly. But count + log it so a persistent
+	// failure is visible on the dq side immediately, not only via din's DinConsumerStale
+	// ~1h later (which misattributes the cause).
+	if err := m.tryReportProgress(ctx, snapshotID); err != nil {
+		progressReportErrorsTotal.Inc()
+		m.log.Warn().Err(err).Msg("consumer progress report failed; expiry floor not advanced")
+	}
+}
+
+func (m *DuckLakeMaterializer) tryReportProgress(ctx context.Context, snapshotID int64) error {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
-		m.log.Warn().Err(err).Msg("consumer progress report: begin failed (expiry floor not advanced)")
-		return
+		return fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, "DELETE FROM meta.din_consumer_progress WHERE consumer = ?", consumerName); err != nil {
-		m.log.Warn().Err(err).Msg("consumer progress report: delete failed")
-		return
+		return fmt.Errorf("delete: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO meta.din_consumer_progress VALUES (?, ?, now())", consumerName, snapshotID); err != nil {
-		m.log.Warn().Err(err).Msg("consumer progress report: insert failed")
-		return
+		return fmt.Errorf("insert: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		m.log.Warn().Err(err).Msg("consumer progress report: commit failed (expiry floor not advanced)")
+		return fmt.Errorf("commit: %w", err)
 	}
+	return nil
 }
 
 // eventDecoder is the materializer's decode surface (implemented by *Runner).

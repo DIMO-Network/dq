@@ -80,6 +80,14 @@ var (
 		Name: "dq_materializer_blob_missing_total",
 		Help: "raw_events rows skipped because their externalized blob payload was permanently missing (S3 404).",
 	})
+	// progressReportErrorsTotal counts failures writing dq's snapshot floor to
+	// meta.din_consumer_progress. Decode keeps succeeding (a separate txn) so dq's own
+	// lag/cursor gauges stay healthy — without this counter the only signal is din's
+	// DinConsumerStale ~1h later, which misattributes the cause to a dropped consumer.
+	progressReportErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dq_materializer_progress_report_errors_total",
+		Help: "Failures writing the consumer-progress floor; din's snapshot expiry stops advancing for dq.",
+	})
 )
 
 // lakeMetricType is the single value of the "type" label on the materializer
