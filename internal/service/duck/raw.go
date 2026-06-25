@@ -63,12 +63,6 @@ type RawFilter struct {
 	TimestampAsc bool
 }
 
-// whereClause builds a WHERE fragment for filter with unqualified column names.
-// It delegates to whereClauseQ with an empty prefix.
-func whereClause(filter RawFilter) (string, []any) {
-	return whereClauseQ(filter, "")
-}
-
 // whereClauseQ builds a WHERE fragment qualifying each column name with prefix
 // (e.g. "e." → "e.subject", "e.type", …). Use "" for unqualified columns.
 // ExcludeVoided is NOT applied here — it requires a correlated subquery that
@@ -177,13 +171,18 @@ type rowScanner interface {
 
 // restoreNonColumnFieldsSafe wraps cloudevent.RestoreNonColumnFields, which rebuilds
 // non-column header fields (Tags, etc.) from the producer-supplied extras map via
-// unchecked type assertions — a malformed element (e.g. {"tags":[42]}) panics. The
-// fetch gRPC path has no recover middleware, so an unguarded panic on a poisoned
-// raw_events row would take down the server goroutine; contain it and keep the row
-// (the malformed non-column field is simply not restored). din validates Tags as a
-// typed []string at ingest, so this is defense-in-depth at the din→dq boundary.
+// unchecked type assertions — a malformed element (e.g. {"tags":[42]}) panics.
+// Containing the panic keeps the row (the malformed field simply not restored)
+// instead of aborting the whole multi-row fetch; the gRPC recovery interceptor
+// (app.go) would catch an escaped panic, but that fails the entire request. din
+// validates Tags as a typed []string at ingest, so this is defense-in-depth at the
+// din→dq boundary; the counter makes a poisoned row alertable rather than silent.
 func restoreNonColumnFieldsSafe(hdr *cloudevent.CloudEventHeader) {
-	defer func() { _ = recover() }()
+	defer func() {
+		if recover() != nil {
+			fetchMalformedRowTotal.Inc()
+		}
+	}()
 	cloudevent.RestoreNonColumnFields(hdr)
 }
 

@@ -15,10 +15,10 @@ func ListCloudEventsFromIndexes(ctx context.Context, evtSvc eventrepo.EventServi
 	if len(indexKeys) == 0 {
 		return nil, nil
 	}
-	return evtSvc.ListCloudEventsFromIndexes(ctx, indexKeys, "")
+	return evtSvc.ListCloudEventsFromIndexes(ctx, indexKeys)
 }
 
 // GetCloudEventFromIndex resolves a single index to a cloud event.
 func GetCloudEventFromIndex(ctx context.Context, evtSvc eventrepo.EventService, indexKey *cloudevent.CloudEvent[eventrepo.ObjectInfo]) (cloudevent.RawEvent, error) {
-	return evtSvc.GetCloudEventFromIndex(ctx, indexKey, "")
+	return evtSvc.GetCloudEventFromIndex(ctx, indexKey)
 }

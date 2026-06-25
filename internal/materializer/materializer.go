@@ -191,10 +191,12 @@ func (r *Runner) decodeEvents(ctx context.Context, events []cloudevent.RawEvent)
 	jobs := make([]*cloudevent.RawEvent, 0, len(events))
 	for i := range events {
 		ev := &events[i]
-		if _, dup := seen[ev.Key()]; dup {
+		// Key() formats the time + builds a string; compute once per event.
+		key := ev.Key()
+		if _, dup := seen[key]; dup {
 			continue
 		}
-		seen[ev.Key()] = struct{}{}
+		seen[key] = struct{}{}
 		switch ev.Type {
 		case cloudevent.TypeStatus:
 			if !r.isVehicleSignalMessage(ev) {

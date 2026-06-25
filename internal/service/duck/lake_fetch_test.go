@@ -36,10 +36,6 @@ func (f *fakeBlobGetter) GetObject(_ context.Context, in *s3.GetObjectInput, _ .
 	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(b)), ContentLength: &n}, nil
 }
 
-func (f *fakeBlobGetter) PutObject(_ context.Context, _ *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
-	return &s3.PutObjectOutput{}, nil
-}
-
 // newLakeEventServiceForTest opens a DuckLake file catalog, creates the
 // lake.raw_events table, and returns a LakeEventService ready for testing.
 func newLakeEventServiceForTest(t *testing.T) (*LakeEventService, *Service) {
@@ -365,7 +361,7 @@ func TestLakeEventService_GetCloudEventFromIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, indexes, 1)
 
-	raw, err := lsvc.GetCloudEventFromIndex(ctx, &indexes[0], "")
+	raw, err := lsvc.GetCloudEventFromIndex(ctx, &indexes[0])
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"speed":42}`, string(raw.Data))
 	assert.Equal(t, "ev-inline", raw.ID)
@@ -462,7 +458,7 @@ func TestLakeEventService_GetCloudEventFromIndex_ErrNotFound(t *testing.T) {
 		},
 		Data: eventrepo.ObjectInfo{Key: "lake://" + lakeRawSubj + "/does-not-exist"},
 	}
-	_, err := lsvc.GetCloudEventFromIndex(ctx, ghost, "")
+	_, err := lsvc.GetCloudEventFromIndex(ctx, ghost)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrNotFound))
 }
@@ -775,7 +771,7 @@ func TestLakeEventService_GetCloudEventFromIndex_BlobFetchesFromS3(t *testing.T)
 	require.Len(t, indexes, 1)
 	require.Equal(t, blobKey, indexes[0].Data.Key, "blob index key must route to the blob object")
 
-	raw, err := lsvc.GetCloudEventFromIndex(ctx, &indexes[0], "")
+	raw, err := lsvc.GetCloudEventFromIndex(ctx, &indexes[0])
 	require.NoError(t, err)
 	require.Equal(t, blobBytes, []byte(raw.Data),
 		"blob payload must be downloaded from S3 into Data (proto carries Data only)")
@@ -803,7 +799,7 @@ func TestLakeEventService_GetCloudEventFromIndex_BlobNoGetter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, indexes, 1)
 
-	_, err = lsvc.GetCloudEventFromIndex(ctx, &indexes[0], "")
+	_, err = lsvc.GetCloudEventFromIndex(ctx, &indexes[0])
 	require.Error(t, err, "blob event with no object store must error, not return empty data")
 }
 

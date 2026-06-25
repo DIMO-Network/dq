@@ -7,11 +7,11 @@ import (
 )
 
 func TestWhereClauseTagsAndDataVersion(t *testing.T) {
-	where, args := whereClause(RawFilter{
+	where, args := whereClauseQ(RawFilter{
 		Subject:      "did:1",
 		DataVersions: []string{"v1"},
 		Tags:         []string{"a", "b"},
-	})
+	}, "")
 	require.Contains(t, where, "data_version IN")
 	require.Contains(t, where, "list_has_any") // tags JSON array overlap
 	require.Contains(t, args, "did:1")

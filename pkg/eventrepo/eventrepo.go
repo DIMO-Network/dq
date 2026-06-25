@@ -19,7 +19,6 @@ type ObjectInfo struct {
 // ObjectGetter is an interface for getting an object from S3.
 type ObjectGetter interface {
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
-	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 }
 
 // Presigner generates presigned S3 GET URLs.

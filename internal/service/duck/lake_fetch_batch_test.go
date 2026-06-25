@@ -34,7 +34,7 @@ func TestLakeEventService_ListCloudEventsFromIndexes_OrderAcrossSubjects(t *test
 	}
 	in := []cloudevent.CloudEvent[eventrepo.ObjectInfo]{idx(a1), idx(b1), idx(a2)}
 
-	out, err := lsvc.ListCloudEventsFromIndexes(ctx, in, "")
+	out, err := lsvc.ListCloudEventsFromIndexes(ctx, in)
 	require.NoError(t, err)
 	require.Len(t, out, 3)
 	assert.Equal(t, "a1", out[0].ID, "input order preserved across subjects")
@@ -58,6 +58,6 @@ func TestLakeEventService_ListCloudEventsFromIndexes_MissingIsNotFound(t *testin
 	}
 	in := []cloudevent.CloudEvent[eventrepo.ObjectInfo]{idx(lakeRawSubj, "a1"), idx(lakeRawSubj, "does-not-exist")}
 
-	_, err := lsvc.ListCloudEventsFromIndexes(ctx, in, "")
+	_, err := lsvc.ListCloudEventsFromIndexes(ctx, in)
 	require.ErrorIs(t, err, ErrNotFound)
 }

@@ -30,3 +30,11 @@ var fetchBlobMissingTotal = promauto.NewCounter(prometheus.CounterOpts{
 	Name: "dq_fetch_blob_missing_total",
 	Help: "Fetch reads whose externalized blob payload was permanently missing (returned empty, not errored).",
 })
+
+// fetchMalformedRowTotal makes a poisoned raw_events row (one whose extras panic
+// cloudevent.RestoreNonColumnFields) alertable instead of silently dropped on the
+// read path. See restoreNonColumnFieldsSafe.
+var fetchMalformedRowTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "dq_fetch_malformed_row_total",
+	Help: "raw_events rows whose non-column fields could not be restored (malformed extras); the row is kept without them.",
+})

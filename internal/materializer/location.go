@@ -105,7 +105,7 @@ func (c *coordinateStore) processSignals() ([]vss.Signal, error) {
 	// a location.
 	c.tryCreateLocation()
 
-	var out []vss.Signal
+	out := make([]vss.Signal, 0, len(c.signals))
 	for _, sig := range c.signals {
 		if sig.Data.Name != pruneSignalName {
 			out = append(out, sig)

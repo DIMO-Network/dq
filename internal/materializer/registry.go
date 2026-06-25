@@ -60,8 +60,8 @@ func (r *registry[T]) Override(source string, module T) {
 	r.modules[source] = module
 }
 
-// Get returns the module for a source.
-func (r *registry[T]) Get(source string) (T, bool) {
+// lookup returns the module for a source (raw map lookup; ok is false if absent).
+func (r *registry[T]) lookup(source string) (T, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	m, ok := r.modules[source]
@@ -70,9 +70,9 @@ func (r *registry[T]) Get(source string) (T, bool) {
 
 // get returns the module for source, falling back to the default ("").
 func (r *registry[T]) get(source string) (T, error) {
-	module, ok := r.Get(source)
+	module, ok := r.lookup(source)
 	if !ok {
-		module, ok = r.Get("")
+		module, ok = r.lookup("")
 		if !ok {
 			var zero T
 			return zero, fmt.Errorf("module '%s' not found and no default module registered", source)

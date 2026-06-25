@@ -36,10 +36,6 @@ func (f *fakeBlobStore) GetObject(_ context.Context, in *s3.GetObjectInput, _ ..
 	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(b)), ContentLength: &n}, nil
 }
 
-func (f *fakeBlobStore) PutObject(_ context.Context, _ *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
-	return &s3.PutObjectOutput{}, nil
-}
-
 func TestDuckLake_MaterializeBlobPayload(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

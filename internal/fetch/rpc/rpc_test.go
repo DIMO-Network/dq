@@ -35,10 +35,10 @@ func (emptyEventService) ListIndexesAdvanced(context.Context, int, *grpc.Advance
 func (emptyEventService) GetCloudEventTypeSummariesAdvanced(context.Context, *grpc.AdvancedSearchOptions) ([]eventrepo.CloudEventTypeSummary, error) {
 	return nil, nil
 }
-func (emptyEventService) GetCloudEventFromIndex(context.Context, *cloudevent.CloudEvent[eventrepo.ObjectInfo], string) (cloudevent.RawEvent, error) {
+func (emptyEventService) GetCloudEventFromIndex(context.Context, *cloudevent.CloudEvent[eventrepo.ObjectInfo]) (cloudevent.RawEvent, error) {
 	return cloudevent.RawEvent{}, sql.ErrNoRows
 }
-func (emptyEventService) ListCloudEventsFromIndexes(context.Context, []cloudevent.CloudEvent[eventrepo.ObjectInfo], string) ([]cloudevent.RawEvent, error) {
+func (emptyEventService) ListCloudEventsFromIndexes(context.Context, []cloudevent.CloudEvent[eventrepo.ObjectInfo]) ([]cloudevent.RawEvent, error) {
 	return nil, nil
 }
 func (emptyEventService) PresignBlobURL(context.Context, string) (string, error) { return "", nil }

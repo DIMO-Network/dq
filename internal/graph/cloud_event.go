@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 
 	"github.com/99designs/gqlgen/graphql"
@@ -21,8 +22,13 @@ type CloudEventWrapper struct {
 type RawJSON []byte
 
 // MarshalGQL writes the raw JSON bytes to w so the response contains unescaped JSON.
+// Stored raw_events.data is device-supplied (validated at ingest, but legacy or
+// corrupt rows are possible); invalid bytes written verbatim would break the whole
+// response body — one poison row would corrupt every event in the same query — so
+// fall back to null. json.Valid is O(len) but inline data is small (large blobs go
+// via dataUrl).
 func (r RawJSON) MarshalGQL(w io.Writer) {
-	if len(r) == 0 {
+	if len(r) == 0 || !json.Valid(r) {
 		_, _ = w.Write([]byte("null"))
 		return
 	}

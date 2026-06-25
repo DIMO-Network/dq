@@ -21,8 +21,8 @@ type EventService interface {
 	GetCloudEventTypeSummariesAdvanced(ctx context.Context, opts *grpc.AdvancedSearchOptions) ([]CloudEventTypeSummary, error)
 
 	// Payload resolution from an index entry.
-	GetCloudEventFromIndex(ctx context.Context, index *cloudevent.CloudEvent[ObjectInfo], bucketName string) (cloudevent.RawEvent, error)
-	ListCloudEventsFromIndexes(ctx context.Context, indexes []cloudevent.CloudEvent[ObjectInfo], bucketName string) ([]cloudevent.RawEvent, error)
+	GetCloudEventFromIndex(ctx context.Context, index *cloudevent.CloudEvent[ObjectInfo]) (cloudevent.RawEvent, error)
+	ListCloudEventsFromIndexes(ctx context.Context, indexes []cloudevent.CloudEvent[ObjectInfo]) ([]cloudevent.RawEvent, error)
 
 	// Blob payloads served as presigned URLs.
 	PresignBlobURL(ctx context.Context, key string) (string, error)

@@ -51,7 +51,7 @@ func TestLakeEventService_DefaultScanWindow(t *testing.T) {
 	// A point lookup by id bypasses the window: the old event is still fetchable.
 	got, err := lsvc.GetCloudEventFromIndex(ctx, &cloudevent.CloudEvent[eventrepo.ObjectInfo]{
 		CloudEventHeader: cloudevent.CloudEventHeader{Subject: lakeRawSubj, ID: "old-ev"},
-	}, "")
+	})
 	require.NoError(t, err)
 	assert.Equal(t, "old-ev", got.ID)
 }

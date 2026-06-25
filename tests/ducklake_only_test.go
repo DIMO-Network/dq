@@ -116,7 +116,7 @@ func TestDuckLakeOnly_FetchQueriesWork(t *testing.T) {
 	assert.Equal(t, uint64(1), sumByType[typeFingerprint].Count)
 
 	// --- GetCloudEventFromIndex (inline data round-trip) ---
-	raw, err := svc.GetCloudEventFromIndex(ctx, &indexes[2], "") // fetch-1
+	raw, err := svc.GetCloudEventFromIndex(ctx, &indexes[2]) // fetch-1
 	require.NoError(t, err, "GetCloudEventFromIndex must succeed")
 	require.NotNil(t, raw.Data)
 	var payload map[string]any

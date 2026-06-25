@@ -252,7 +252,7 @@ func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Contex
 // downloaded from S3 so the gRPC fetch path returns a non-empty payload. The
 // GraphQL path presigns blobs via PresignBlobURL instead and never reaches the
 // download here.
-func (l *LakeEventService) GetCloudEventFromIndex(ctx context.Context, index *cloudevent.CloudEvent[eventrepo.ObjectInfo], _ string) (cloudevent.RawEvent, error) {
+func (l *LakeEventService) GetCloudEventFromIndex(ctx context.Context, index *cloudevent.CloudEvent[eventrepo.ObjectInfo]) (cloudevent.RawEvent, error) {
 	evs, err := l.queryLakeRaw(ctx, RawFilter{
 		Subject:       index.Subject,
 		IDs:           []string{index.ID},
@@ -308,7 +308,7 @@ const indexBlobConcurrency = 25
 // is a single raw_events query, not N. Blob payloads are resolved concurrently
 // (each needs its own bytes). A requested index with no row is ErrNotFound,
 // matching the old per-index path.
-func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, indexes []cloudevent.CloudEvent[eventrepo.ObjectInfo], _ string) ([]cloudevent.RawEvent, error) {
+func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, indexes []cloudevent.CloudEvent[eventrepo.ObjectInfo]) ([]cloudevent.RawEvent, error) {
 	if len(indexes) == 0 {
 		return nil, nil
 	}
