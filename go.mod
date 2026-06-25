@@ -6,7 +6,7 @@ toolchain go1.26.4
 
 require (
 	github.com/99designs/gqlgen v0.17.89
-	github.com/DIMO-Network/cloudevent v0.2.7
+	github.com/DIMO-Network/cloudevent v0.2.11
 	github.com/DIMO-Network/model-garage v1.0.11
 	github.com/DIMO-Network/server-garage v0.1.1
 	github.com/DIMO-Network/shared v1.1.7
@@ -128,5 +128,3 @@ tool (
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc
 	google.golang.org/protobuf/cmd/protoc-gen-go
 )
-
-replace github.com/DIMO-Network/cloudevent => ../cloudevent
