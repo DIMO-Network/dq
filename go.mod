@@ -20,7 +20,7 @@ require (
 	github.com/ethereum/go-ethereum v1.17.1
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.2
 	github.com/modelcontextprotocol/go-sdk v1.4.1
-	github.com/parquet-go/parquet-go v0.28.0
+	github.com/parquet-go/parquet-go v0.30.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
