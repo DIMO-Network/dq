@@ -20,7 +20,11 @@ func ReadyHandler(ready func(context.Context) error) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), readyProbeTimeout)
 		defer cancel()
 		if err := ready(ctx); err != nil {
-			http.Error(w, "not ready: "+err.Error(), http.StatusServiceUnavailable)
+			// Generic body on the public mux: ready() surfaces a catalog-attach error
+			// that can name the catalog host/dbname/table — internal topology that
+			// shouldn't leak to an unauthenticated probe (matches din). The failure
+			// itself is observable via the probe status + catalog metrics.
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
