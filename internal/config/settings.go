@@ -3,12 +3,12 @@ package config
 
 // Settings contains the application config.
 type Settings struct {
-	LogLevel                  string `yaml:"LOG_LEVEL"`
-	Port                      int    `yaml:"PORT"`
-	GRPCPort                  int    `yaml:"GRPC_PORT"`
-	MonPort                   int    `yaml:"MON_PORT"`
-	EnablePprof               bool   `yaml:"ENABLE_PPROF"`
-	MaxRequestDuration        string `yaml:"MAX_REQUEST_DURATION"`
+	LogLevel           string `yaml:"LOG_LEVEL"`
+	Port               int    `yaml:"PORT"`
+	GRPCPort           int    `yaml:"GRPC_PORT"`
+	MonPort            int    `yaml:"MON_PORT"`
+	EnablePprof        bool   `yaml:"ENABLE_PPROF"`
+	MaxRequestDuration string `yaml:"MAX_REQUEST_DURATION"`
 	// MaxConcurrentPerSubject bounds in-flight HTTP requests per authenticated JWT
 	// subject so one caller can't pin the whole DuckDB pool and starve co-tenants on
 	// a replica. 0 (default) disables it — opt-in, since the right ceiling depends on
