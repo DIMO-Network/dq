@@ -1,9 +1,15 @@
+# Requires the cloudevent repo checked out as a sibling until it is released:
+# the build context must be the PARENT directory so the `replace => ../cloudevent`
+# in go.mod resolves. Build with `make docker` (which sets the parent context), or:
+#   docker build -f dq/Dockerfile <parent-dir>
 FROM golang:1.26-bookworm AS build
 
 RUN useradd -u 10001 dimo
 
 WORKDIR /build
-COPY . ./
+COPY cloudevent/ ./cloudevent/
+COPY dq/ ./dq/
+WORKDIR /build/dq
 
 RUN make tidy
 RUN make build
@@ -22,7 +28,7 @@ LABEL maintainer="DIMO <hello@dimo.zone>"
 
 USER nonroot:nonroot
 
-COPY --from=build --chown=nonroot:nonroot /build/bin/dq /
+COPY --from=build --chown=nonroot:nonroot /build/dq/bin/dq /
 COPY --from=build --chown=nonroot:nonroot /duckdb/extensions /duckdb/extensions
 
 ENV DUCKDB_EXTENSION_DIR=/duckdb/extensions

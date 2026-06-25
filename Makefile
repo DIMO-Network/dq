@@ -48,8 +48,8 @@ test-gated: ## Run the cutover-gate suites (PG concurrency, chaos, perf, MinIO).
 lint: ## Run linter
 	@golangci-lint run
 
-docker: ## Build Docker image
-	@docker build -f ./Dockerfile . -t dimozone/$(BIN_NAME):$(VER_CUT)
+docker: ## Build Docker image (parent context so the ../cloudevent replace resolves)
+	@docker build -f Dockerfile .. -t dimozone/$(BIN_NAME):$(VER_CUT)
 	@docker tag dimozone/$(BIN_NAME):$(VER_CUT) dimozone/$(BIN_NAME):latest
 
 gqlgen: ## Generate gqlgen server code
