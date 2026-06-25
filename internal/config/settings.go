@@ -1,6 +1,8 @@
 // Package config holds application configuration settings.
 package config
 
+import "fmt"
+
 // Settings contains the application config.
 type Settings struct {
 	LogLevel           string `yaml:"LOG_LEVEL"`
@@ -78,4 +80,21 @@ type Settings struct {
 	VehicleNFTAddress     string `yaml:"VEHICLE_NFT_ADDRESS"`
 	AftermarketNFTAddress string `yaml:"AFTERMARKET_NFT_ADDRESS"`
 	SyntheticNFTAddress   string `yaml:"SYNTHETIC_NFT_ADDRESS"`
+}
+
+// Validate checks the boot-critical numeric settings. The shared env loader swallows
+// per-field parse errors and silently leaves the field zero (e.g. DUCKDB_THREADS=four or
+// MATERIALIZER_ENABLED=ture), so a malformed value never fails LoadConfig — these checks
+// turn the dangerous ones into a loud boot failure. A zero port binds ":0" and black-holes
+// traffic; a zero chain id decodes every vehicle DID wrong.
+func (s *Settings) Validate() error {
+	for name, port := range map[string]int{"PORT": s.Port, "GRPC_PORT": s.GRPCPort, "MON_PORT": s.MonPort} {
+		if port <= 0 {
+			return fmt.Errorf("%s must be > 0, got %d (missing or malformed env?)", name, port)
+		}
+	}
+	if s.DIMORegistryChainID == 0 {
+		return fmt.Errorf("DIMO_REGISTRY_CHAIN_ID must be non-zero (missing or malformed env?)")
+	}
+	return nil
 }

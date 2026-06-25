@@ -51,6 +51,12 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Couldn't load settings.")
 	}
+	// The shared env loader silently leaves a field zero on a malformed value (it swallows
+	// per-field parse errors), so boot-critical numerics never fail LoadConfig — validate
+	// them loud here (a zero port black-holes traffic; a zero chain id mis-decodes DIDs).
+	if err := cfg.Validate(); err != nil {
+		logger.Fatal().Err(err).Msg("Invalid configuration.")
+	}
 
 	if cfg.LogLevel != "" {
 		level, err := zerolog.ParseLevel(cfg.LogLevel)

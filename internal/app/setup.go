@@ -19,14 +19,16 @@ const s3RequestTimeout = 30 * time.Second
 
 func s3ClientFromSettings(settings *config.Settings) *s3.Client {
 	conf := aws.Config{
-		Region: settings.S3AWSRegion,
-		Credentials: credentials.NewStaticCredentialsProvider(
-			settings.S3AWSAccessKeyID,
-			settings.S3AWSSecretAccessKey,
-			"",
-		),
+		Region:           settings.S3AWSRegion,
 		HTTPClient:       awshttp.NewBuildableClient().WithTimeout(s3RequestTimeout),
 		RetryMaxAttempts: 3,
+	}
+	// Static creds when provided; otherwise fall through to the AWS default chain (IRSA /
+	// instance profile), matching the DuckDB-secret credential_chain fallback — so the
+	// aws-sdk blob/presign path doesn't 403 while the lake path works on a keyless deploy.
+	if settings.S3AWSAccessKeyID != "" && settings.S3AWSSecretAccessKey != "" {
+		conf.Credentials = credentials.NewStaticCredentialsProvider(
+			settings.S3AWSAccessKeyID, settings.S3AWSSecretAccessKey, "")
 	}
 	return s3.NewFromConfig(conf)
 }
