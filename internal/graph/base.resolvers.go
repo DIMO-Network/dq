@@ -33,14 +33,63 @@ func (r *queryResolver) SignalsLatest(ctx context.Context, subject string, filte
 	return r.SignalRepo.GetSignalLatest(ctx, latestArgs)
 }
 
+// permissionsFromCtx returns the caller's token permissions, or nil when unauthenticated.
+func permissionsFromCtx(ctx context.Context) []string {
+	if tok, _ := ctx.Value(ClaimsContextKey{}).(*tokenclaims.Token); tok != nil {
+		return tok.Permissions
+	}
+	return nil
+}
+
 // AvailableSignals is the resolver for the availableSignals field.
 func (r *queryResolver) AvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
-	return r.SignalRepo.GetAvailableSignals(ctx, subject, filter)
+	names, err := r.SignalRepo.GetAvailableSignals(ctx, subject, filter)
+	if err != nil {
+		return nil, err
+	}
+	// Don't reveal the EXISTENCE of location (or other privileged) signals to a caller
+	// lacking the privilege — gate the name list the same way signalsSnapshot gates values
+	// (a VEHICLE_NON_LOCATION_DATA-only token would otherwise see currentLocationCoordinates
+	// in the list, leaking that the vehicle has location data).
+	perms := permissionsFromCtx(ctx)
+	out := names[:0]
+	for _, n := range names {
+		if hasPrivilegesForSignal(r.SignalRepo, n, perms) {
+			out = append(out, n)
+		}
+	}
+	return out, nil
 }
 
 // DataSummary is the resolver for the dataSummary field.
 func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter *model.SignalFilter) (*model.DataSummary, error) {
-	return r.SignalRepo.GetDataSummary(ctx, subject, filter)
+	summary, err := r.SignalRepo.GetDataSummary(ctx, subject, filter)
+	if err != nil {
+		return nil, err
+	}
+	// Same leak as availableSignals: the per-signal summary exposes the count + first/last-
+	// seen of every signal, including location, without the privilege. Filter the name list
+	// + per-signal summaries and recompute the aggregate count so it doesn't reveal the
+	// location data-point count either.
+	perms := permissionsFromCtx(ctx)
+	names := summary.AvailableSignals[:0]
+	for _, n := range summary.AvailableSignals {
+		if hasPrivilegesForSignal(r.SignalRepo, n, perms) {
+			names = append(names, n)
+		}
+	}
+	summary.AvailableSignals = names
+	var total uint64
+	sds := summary.SignalDataSummary[:0]
+	for _, s := range summary.SignalDataSummary {
+		if hasPrivilegesForSignal(r.SignalRepo, s.Name, perms) {
+			sds = append(sds, s)
+			total += s.NumberOfSignals
+		}
+	}
+	summary.SignalDataSummary = sds
+	summary.NumberOfSignals = total
+	return summary, nil
 }
 
 // SignalsSnapshot is the resolver for the signalsSnapshot field.
@@ -49,11 +98,7 @@ func (r *queryResolver) SignalsSnapshot(ctx context.Context, subject string, fil
 	if err != nil {
 		return nil, err
 	}
-	tok, _ := ctx.Value(ClaimsContextKey{}).(*tokenclaims.Token)
-	var permissions []string
-	if tok != nil {
-		permissions = tok.Permissions
-	}
+	permissions := permissionsFromCtx(ctx)
 	filtered := make([]*model.LatestSignal, 0, len(resp.Signals))
 	for _, sig := range resp.Signals {
 		if hasPrivilegesForSignal(r.SignalRepo, sig.Name, permissions) {
