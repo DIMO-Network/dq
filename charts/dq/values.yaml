@@ -23,9 +23,6 @@ securityContext:
   capabilities:
     drop:
       - all
-cronJob:
-  enabled: false
-  schedule: 0 0 * * 0
 prometheusRule:
   # Set true ONLY in the single-writer materializer release so the
   # absent-metric liveness alert (DQMaterializerDown) does not false-fire on
@@ -61,8 +58,6 @@ env:
   # here. MUST equal din's BLOB_BUCKET (dimo-blob-storage-*), where din writes
   # them; the lake-data bucket (dimo-storage-*) holds parquet, not blobs.
   PARQUET_BUCKET: dimo-blob-storage-dev
-  CLOUDEVENT_BUCKET: dimo-blob-storage-dev
-  EPHEMERAL_BUCKET: dimo-blob-storage-dev
   # JWT auth (token-exchange) + identity-api for the cross-subject link check.
   TOKEN_EXCHANGE_JWK_KEY_SET_URL: https://auth.dev.dimo.zone/keys
   TOKEN_EXCHANGE_ISSUER_URL: https://auth.dev.dimo.zone
@@ -147,9 +142,6 @@ tolerations: []
 affinity: {}
 podDisruptionBudget:
   minAvailable: 0
-kafka:
-  clusterName: kafka-dev-dimo-kafka
-  topics: []
 serviceMonitor:
   enabled: true
   path: /metrics

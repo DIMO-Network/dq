@@ -95,7 +95,9 @@ func New(settings config.Settings) (*App, error) {
 		return nil, fmt.Errorf("couldn't create event service: %w", err)
 	}
 
-	buckets := []string{settings.CloudEventBucket, settings.EphemeralBucket, settings.ParquetBucket}
+	// The lake backend resolves blobs from its own (ParquetBucket) config and
+	// ignores this list; it survives only for the legacy per-key JSON fallback.
+	buckets := []string{settings.ParquetBucket}
 
 	var identityClient identity.Client
 	if settings.IdentityAPIURL != "" {
