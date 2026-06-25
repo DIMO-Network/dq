@@ -62,10 +62,24 @@ func validateAggSigArgs(args *model.AggregatedSignalArgs) error {
 			if len(fil.InPolygon) != 0 && len(fil.InPolygon) < 3 {
 				return ValidationError("not enough points in geofence filter")
 			}
+			for _, pt := range fil.InPolygon {
+				// Validate every vertex. A GraphQL Float! accepts the JSON strings
+				// "NaN"/"Inf", and an unfinite or out-of-range coordinate would
+				// otherwise be inlined into the ST_GeomFromText WKT and 500 at the DB
+				// (or silently match nothing).
+				if !isFilterLocationValid(pt) {
+					return ValidationError("invalid geofence polygon vertex")
+				}
+			}
 
 			if fil.InCircle != nil {
 				if !isFilterLocationValid(fil.InCircle.Center) {
 					return ValidationError("invalid circle filter location")
+				}
+				// Radius is inlined into the haversine SQL: a NaN/Inf radius 500s, a
+				// negative one silently matches nothing.
+				if r := fil.InCircle.Radius; math.IsNaN(r) || math.IsInf(r, 0) || r < 0 {
+					return ValidationError("invalid circle filter radius")
 				}
 			}
 		}
@@ -74,8 +88,11 @@ func validateAggSigArgs(args *model.AggregatedSignalArgs) error {
 	return validateSignalArgs(&args.SignalArgs)
 }
 
+// isFilterLocationValid reports whether loc is non-nil with finite, in-range
+// coordinates. NaN/Inf fail the range comparisons (e.g. -90 <= NaN is false), so this
+// also rejects the unfinite values a GraphQL Float! can carry.
 func isFilterLocationValid(loc *model.FilterLocation) bool {
-	return -90 <= loc.Latitude && loc.Latitude <= 90 && -180 <= loc.Longitude && loc.Longitude <= 180
+	return loc != nil && -90 <= loc.Latitude && loc.Latitude <= 90 && -180 <= loc.Longitude && loc.Longitude <= 180
 }
 
 func validateLatestSigArgs(args *model.LatestSignalsArgs) error {
