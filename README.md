@@ -55,10 +55,6 @@ The service reads from a DuckLake catalog: decoded signals/events in `lake.signa
 
 Configure the catalog with `DUCKLAKE_CATALOG_DSN` (a Postgres DSN in prod for concurrent writers, or a local catalog-file path for single-node/tests) and `DUCKLAKE_DATA_PATH` (where parquet data files live — an `s3://` prefix in prod, a local directory in tests). `PARQUET_BUCKET` is the bucket the fetch path presigns/downloads externalized cloudevent payloads from.
 
-### Clone layout (required until cloudevent is released)
-
-This branch builds against a local cloudevent checkout via a `replace` directive — clone `cloudevent` as a sibling directory and check out `feat/parquet-sort-zstd-bloom`.
-
 ### Single-node quickstart
 
 Run against a local DuckLake catalog file; the materializer decodes din's raw_events into it:
