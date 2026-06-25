@@ -1,14 +1,47 @@
 # Copy to settings.yaml and fill in values. settings.yaml is the primary config
 # (environment variables can override individual fields).
+LOG_LEVEL: info
 PORT: 3000
 MON_PORT: 8888
 GRPC_PORT: 3001
 ENABLE_PPROF: false
 MAX_REQUEST_DURATION: 30s
+# Per-JWT-subject in-flight request cap; 0 disables it (opt-in — see settings.go).
+MAX_CONCURRENT_REQUESTS_PER_SUBJECT: 0
 
-# DuckLake is the only query backend.
+# DuckLake is the only query backend. CATALOG_DSN + DATA_PATH are REQUIRED
+# (boot fails fast if the DSN is empty): a Postgres connection string in prod, or
+# a local catalog-file path for single-node dev.
 DUCKLAKE_CATALOG_DSN: ""
 DUCKLAKE_DATA_PATH: ""
+# Read-only reader role: attach the catalog (+ an optional read replica)
+# read-only. Leave false + empty on the materializer/writer.
+DUCKLAKE_READ_ONLY: false
+DUCKLAKE_CATALOG_READ_DSN: ""
+
+# Embedded DuckDB query engine knobs (all optional; empty/0 keeps defaults).
+DUCKDB_MEMORY_LIMIT: ""
+DUCKDB_THREADS: 0
+DUCKDB_MAX_CONNS: 0
+DUCKDB_EXTENSION_DIR: ""
+DUCKDB_TEMP_DIRECTORY: ""
+DUCKDB_S3_ENDPOINT: ""
+
+# Materializer (post-fact decode loop: din raw_events -> decoded lake tables).
+# Enable on exactly one single-writer replica.
+MATERIALIZER_ENABLED: false
+MATERIALIZER_POLL_INTERVAL: 15s
+MATERIALIZER_WORKERS: 0
+# Read only to REJECT sharding (> 1 is refused — single writer only).
+MATERIALIZER_SHARD_COUNT: 1
+# Decoded-row retention (Go duration, e.g. 8760h); empty disables pruning.
+LAKE_DECODED_RETENTION: ""
+# Rebuild signals_latest from full base on boot (disaster recovery only; O(history)).
+LAKE_REBUILD_ROLLUP_ON_BOOT: false
+
+# Require a valid DIMO JWT on the fetch gRPC port. False admits a missing token
+# (invalid tokens are always rejected); pair with a NetworkPolicy until true.
+FETCH_GRPC_REQUIRE_JWT: false
 
 TOKEN_EXCHANGE_JWK_KEY_SET_URL: http://127.0.0.1:3050/keys
 TOKEN_EXCHANGE_ISSUER_URL: xpp
@@ -21,3 +54,9 @@ S3_AWS_ACCESS_KEY_ID: ""
 S3_AWS_SECRET_ACCESS_KEY: ""
 
 IDENTITY_API_URL: ""
+
+# DIMO registry chain + NFT contracts for vendor-module DID construction.
+DIMO_REGISTRY_CHAIN_ID: 0
+VEHICLE_NFT_ADDRESS: ""
+AFTERMARKET_NFT_ADDRESS: ""
+SYNTHETIC_NFT_ADDRESS: ""
