@@ -110,7 +110,10 @@ func findRefuelTroughAndPeak(samples []LevelSample, riseStart, riseEnd time.Time
 	troughIdx := -1
 	troughVal := 0.0
 	for i := startIdx; i >= 0; i-- {
-		if troughIdx == -1 || samples[i].Value <= troughVal {
+		// Strictly-decreasing (`<`, not `<=`): stop at the local min nearest the rise.
+		// `<=` walked back across a flat trough to the EARLIEST equal sample, pulling the
+		// segment start far earlier than the refuel and inflating its reported duration.
+		if troughIdx == -1 || samples[i].Value < troughVal {
 			troughIdx = i
 			troughVal = samples[i].Value
 		} else {

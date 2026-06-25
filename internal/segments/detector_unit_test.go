@@ -237,6 +237,21 @@ func TestFindRefuelTroughAndPeakEdgeCases(t *testing.T) {
 		// Peak should be at min(5) since min(60) is past the 30-min deadline from min(5).
 		require.Equal(t, min(5), peak)
 	})
+
+	t.Run("flat trough uses the local min nearest the rise, not the earliest equal", func(t *testing.T) {
+		// Fuel sits flat at 20 for 15 min, then refuels to 80. The trough must be the last
+		// low before the rise (min 15), not the plateau start (min 0) — walking the whole
+		// flat back would inflate the segment start and reported duration.
+		samples := []LevelSample{
+			{TS: min(0), Value: 20}, {TS: min(5), Value: 20},
+			{TS: min(10), Value: 20}, {TS: min(15), Value: 20},
+			{TS: min(20), Value: 80},
+		}
+		trough, peak, absRise := findRefuelTroughAndPeak(samples, min(15), min(20))
+		require.Equal(t, min(15), trough, "trough must be the last low before the rise, not the plateau start")
+		require.Equal(t, min(20), peak)
+		require.InDelta(t, 60.0, absRise, 1e-9)
+	})
 }
 
 // ---------------------------------------------------------------------------
