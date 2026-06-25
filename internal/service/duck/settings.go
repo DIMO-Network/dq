@@ -1,6 +1,7 @@
 package duck
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -110,10 +111,34 @@ func (c Config) CatalogIsPostgres() bool {
 		strings.Contains(dsn, "host=") || strings.Contains(dsn, "dbname=")
 }
 
+// pgCatalogConnectTimeout bounds the libpq connect on the catalog/meta ATTACH (seconds).
+const pgCatalogConnectTimeout = 10
+
+// withCatalogConnectTimeout adds a libpq connect_timeout to a Postgres catalog DSN so a
+// boot against an unreachable catalog fails in seconds (pod restarts + retries) instead
+// of blocking on the OS TCP timeout. No-op when already set or for a file catalog.
+// Mirrors din lake.withCatalogConnectTimeout. Uses an inline Postgres check (not
+// CatalogIsPostgres) to stay a pure DSN→DSN transform.
+func withCatalogConnectTimeout(dsn string) string {
+	isPG := strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") ||
+		strings.Contains(dsn, "host=") || strings.Contains(dsn, "dbname=")
+	if !isPG || strings.Contains(dsn, "connect_timeout") {
+		return dsn
+	}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		sep := "?"
+		if strings.ContainsRune(dsn, '?') {
+			sep = "&"
+		}
+		return fmt.Sprintf("%s%sconnect_timeout=%d", dsn, sep, pgCatalogConnectTimeout)
+	}
+	return fmt.Sprintf("%s connect_timeout=%d", dsn, pgCatalogConnectTimeout)
+}
+
 // catalogURI maps the DSN onto a ducklake ATTACH URI, matching din.catalogURI.
 func (c Config) catalogURI() string {
 	if c.CatalogIsPostgres() {
-		return "ducklake:postgres:" + c.effectiveCatalogDSN()
+		return "ducklake:postgres:" + withCatalogConnectTimeout(c.effectiveCatalogDSN())
 	}
 	return "ducklake:" + c.effectiveCatalogDSN()
 }
@@ -124,7 +149,7 @@ func (c Config) catalogURI() string {
 // exactly so both attach the same database.
 func (c Config) MetaTarget() string {
 	if c.CatalogIsPostgres() {
-		return c.effectiveCatalogDSN()
+		return withCatalogConnectTimeout(c.effectiveCatalogDSN())
 	}
 	return c.effectiveCatalogDSN() + ".progress.db"
 }

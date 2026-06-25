@@ -16,7 +16,7 @@ func TestAttachDuckLakeSQL_Writer(t *testing.T) {
 		DataPath:   "s3://dimo-storage-prod/lake/",
 	}
 	got := attachDuckLakeSQL(cfg)
-	want := "ATTACH IF NOT EXISTS 'ducklake:postgres:postgresql://host=primary dbname=dq' AS lake (DATA_PATH 's3://dimo-storage-prod/lake/')"
+	want := "ATTACH IF NOT EXISTS 'ducklake:postgres:postgresql://host=primary dbname=dq?connect_timeout=10' AS lake (DATA_PATH 's3://dimo-storage-prod/lake/')"
 	if got != want {
 		t.Fatalf("writer attach:\n got: %s\nwant: %s", got, want)
 	}
@@ -32,7 +32,7 @@ func TestAttachDuckLakeSQL_ReaderReadOnly(t *testing.T) {
 		ReadOnly:   true,
 	}
 	got := attachDuckLakeSQL(cfg)
-	want := "ATTACH IF NOT EXISTS 'ducklake:postgres:postgresql://host=primary dbname=dq' AS lake (DATA_PATH 's3://dimo-storage-prod/lake/', READ_ONLY)"
+	want := "ATTACH IF NOT EXISTS 'ducklake:postgres:postgresql://host=primary dbname=dq?connect_timeout=10' AS lake (DATA_PATH 's3://dimo-storage-prod/lake/', READ_ONLY)"
 	if got != want {
 		t.Fatalf("reader attach:\n got: %s\nwant: %s", got, want)
 	}
