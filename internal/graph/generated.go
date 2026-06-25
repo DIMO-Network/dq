@@ -3275,11 +3275,6 @@ just like the blockchain, and in UTC.
 scalar Time
 
 """
-A 20-byte Ethereum address, encoded as a checksummed hex string with 0x prefix.
-"""
-scalar Address
-
-"""
 A 64-bit unsigned integer.
 """
 scalar Uint64
