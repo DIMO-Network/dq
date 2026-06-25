@@ -1,0 +1,50 @@
+# dq MATERIALIZER release overlay — the single-writer decode loop. Deploy as a
+# SEPARATE release layered on values-prod.yaml:
+#
+#   helm upgrade --install dq-materializer ./charts/dq \
+#     -f charts/dq/values-prod.yaml -f charts/dq/values-materializer.yaml
+#
+# It creates and fills the decoded tables (lake.signals / lake.events /
+# lake.signals_latest / lake.ingest_progress) that the query fleet reads — the
+# query fleet's readiness probe (SELECT 1 FROM lake.signals) cannot pass until
+# this release has run at least once. Exactly one replica (the deployment guard
+# rejects >1; the chart default strategy Recreate prevents a rolling overlap).
+
+replicaCount: 1
+autoscaling:
+  enabled: false
+podDisruptionBudget:
+  # Single writer — don't keep a replica available across disruptions.
+  minAvailable: 0
+
+# Not a public API: only the decode loop + /metrics + /ready. No ingress.
+ingress:
+  enabled: false
+
+# The materializer-liveness alert (DQMaterializerDown) only makes sense here,
+# where the materializer metrics are actually emitted.
+prometheusRule:
+  materializerEnabled: true
+
+env:
+  MATERIALIZER_ENABLED: 'true'
+  # The single writer attaches the catalog read-write (backend.go also force-
+  # disables read-only when MATERIALIZER_ENABLED, but set it explicitly). It uses
+  # the primary catalog DSN, never a read replica.
+  DUCKLAKE_READ_ONLY: 'false'
+  # Bound decoded-table growth: prune lake.signals/events older than this (Go
+  # duration; ~1y). Empty lets them grow unbounded.
+  LAKE_DECODED_RETENTION: 8760h
+  # Decode + rollup recompute are memory-heavy (one pod). Size memory_limit to
+  # ~75% of the pod memory limit; threads to the CPU limit.
+  DUCKDB_MEMORY_LIMIT: 6GiB
+  DUCKDB_THREADS: 4
+
+resources:
+  limits:
+    cpu: 4
+    memory: 8Gi
+  requests:
+    cpu: 1
+    memory: 2Gi
+duckdbTempSizeLimit: 20Gi

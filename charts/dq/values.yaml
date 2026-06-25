@@ -53,7 +53,23 @@ env:
   MON_PORT: 8888
   GRPC_PORT: 8086
   ENVIRONMENT: dev
-  PARQUET_BUCKET: dimo-storage-dev
+  # DuckLake catalog. DUCKLAKE_CATALOG_DSN comes from the secret (required — the
+  # service fatals on boot if empty). DUCKLAKE_DATA_PATH MUST match din's
+  # LAKE_DATA_PATH (the same lake) and is immutable once the catalog exists.
+  DUCKLAKE_DATA_PATH: s3://dimo-storage-dev/lake/
+  # Externalized cloudevent payloads (large blobs) — dq presigns/downloads from
+  # here. MUST equal din's BLOB_BUCKET (dimo-blob-storage-*), where din writes
+  # them; the lake-data bucket (dimo-storage-*) holds parquet, not blobs.
+  PARQUET_BUCKET: dimo-blob-storage-dev
+  CLOUDEVENT_BUCKET: dimo-blob-storage-dev
+  EPHEMERAL_BUCKET: dimo-blob-storage-dev
+  # JWT auth (token-exchange) + identity-api for the cross-subject link check.
+  TOKEN_EXCHANGE_JWK_KEY_SET_URL: https://auth.dev.dimo.zone/keys
+  TOKEN_EXCHANGE_ISSUER_URL: https://auth.dev.dimo.zone
+  IDENTITY_API_URL: https://identity-api.dev.dimo.zone/query
+  # The fetch gRPC port has no per-request authz. Leave false in dev (or set the
+  # NetworkPolicy); values-prod requires a JWT.
+  FETCH_GRPC_REQUIRE_JWT: 'false'
   MATERIALIZER_ENABLED: 'false'
   MATERIALIZER_POLL_INTERVAL: 15s
   # DuckDB runtime sizing (CHD-20). memory_limit must be ~75% of the pod memory

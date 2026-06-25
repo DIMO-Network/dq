@@ -20,6 +20,23 @@ env:
   # backend.go force-disables it on the materializer release so the writer can
   # never come up read-only.
   DUCKLAKE_READ_ONLY: 'true'
+  # Prod lake (must match din's prod LAKE_DATA_PATH) + the prod externalized-blob
+  # bucket (din's prod BLOB_BUCKET).
+  DUCKLAKE_DATA_PATH: s3://dimo-storage-prod/lake/
+  PARQUET_BUCKET: dimo-blob-storage-prod
+  CLOUDEVENT_BUCKET: dimo-blob-storage-prod
+  EPHEMERAL_BUCKET: dimo-blob-storage-prod
+  # Prod auth + identity-api + registry (chain 137), mirroring din's prod values.
+  TOKEN_EXCHANGE_JWK_KEY_SET_URL: https://auth.dimo.zone/keys
+  TOKEN_EXCHANGE_ISSUER_URL: https://auth.dimo.zone
+  IDENTITY_API_URL: https://identity-api.dimo.zone/query
+  DIMO_REGISTRY_CHAIN_ID: 137
+  VEHICLE_NFT_ADDRESS: '0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF'
+  AFTERMARKET_NFT_ADDRESS: '0x9c94C395cBcBDe662235E0A9d3bB87Ad708561BA'
+  SYNTHETIC_NFT_ADDRESS: '0x4804e8D1661cd1a1e5dDdE1ff458A7f878c0aC6D'
+  # Lock down the unauthenticated gRPC fetch port in prod (it returns any
+  # subject's raw data). Require a JWT; optionally also enable the NetworkPolicy.
+  FETCH_GRPC_REQUIRE_JWT: 'true'
 ingress:
   enabled: true
   className: nginx
