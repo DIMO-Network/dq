@@ -14,6 +14,7 @@ package materializer
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"time"
 
@@ -87,6 +88,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
 	lastPrune := time.Now()
+	var firstFailure time.Time
 	for {
 		processed, err := r.RunOnce(ctx)
 		if err != nil {
@@ -94,9 +96,21 @@ func (r *Runner) Run(ctx context.Context) error {
 				return nil
 			}
 			passErrorsTotal.Inc()
+			if firstFailure.IsZero() {
+				firstFailure = time.Now()
+			} else if time.Since(firstFailure) >= materializerMaxFailureWindow {
+				// Every pass has failed for the whole window — the decode loop is
+				// durably broken (catalog down, attach poisoned). Return so the pod
+				// restarts and re-attaches rather than retrying silently forever with
+				// the pod Ready, mirroring din's maintainer backstop.
+				return fmt.Errorf("materializer failing for over %s, last pass: %w", materializerMaxFailureWindow, err)
+			}
 			r.log.Error().Err(err).Msg("materializer pass failed")
-		} else if processed > 0 {
-			continue // drain the backlog without waiting
+		} else {
+			firstFailure = time.Time{} // reset the failure streak on any success
+			if processed > 0 {
+				continue // drain the backlog without waiting
+			}
 		}
 		// The decoded tables (lake.signals/events) are merged + expired by din's
 		// catalog-wide maintenance (one maintenance process per catalog), so dq
@@ -112,6 +126,13 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // pruneInterval is how often the ducklake path enforces DecodedRetention.
 const pruneInterval = time.Hour
+
+// materializerMaxFailureWindow bounds how long the decode loop may fail every pass
+// before Run returns an error so the (dedicated, single-writer) pod restarts and
+// re-attaches the catalog. Long enough to ride out a transient catalog blip + the
+// connection recycle, short enough that a durably-broken catalog self-heals via a
+// restart instead of wedging Ready-but-not-decoding.
+const materializerMaxFailureWindow = time.Hour
 
 // maybePrune runs the decoded-retention prune at most once per pruneInterval
 // when a retention window is configured (CHD-38). A no-op when DecodedRetention

@@ -214,7 +214,11 @@ func runMaterializerLoop(runner *materializer.Runner, mat *materializer.DuckLake
 			}
 		}
 		if err := runner.Run(ctx); err != nil {
-			logger.Error().Err(err).Msg("materializer exited with error")
+			// Run returns an error only when the decode loop is durably broken (the
+			// consecutive-failure backstop tripped) — never on graceful shutdown, which
+			// returns nil. Exit so K8s restarts this dedicated materializer pod and
+			// re-attaches the catalog, rather than leaving it Ready-but-not-decoding.
+			logger.Fatal().Err(err).Msg("materializer durably failed; exiting to restart the pod")
 		}
 	}()
 	logger.Info().Msg("materializer started")
