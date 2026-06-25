@@ -2,6 +2,8 @@ module github.com/DIMO-Network/dq
 
 go 1.26.2
 
+toolchain go1.26.4
+
 require (
 	github.com/99designs/gqlgen v0.17.89
 	github.com/DIMO-Network/cloudevent v0.2.7
