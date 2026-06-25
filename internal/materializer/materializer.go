@@ -88,7 +88,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
 	lastPrune := time.Now()
-	var firstFailure time.Time
+	failures := failureTracker{window: materializerMaxFailureWindow}
 	for {
 		processed, err := r.RunOnce(ctx)
 		if err != nil {
@@ -96,9 +96,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				return nil
 			}
 			passErrorsTotal.Inc()
-			if firstFailure.IsZero() {
-				firstFailure = time.Now()
-			} else if time.Since(firstFailure) >= materializerMaxFailureWindow {
+			if failures.record(false, time.Now()) {
 				// Every pass has failed for the whole window — the decode loop is
 				// durably broken (catalog down, attach poisoned). Return so the pod
 				// restarts and re-attaches rather than retrying silently forever with
@@ -107,7 +105,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			r.log.Error().Err(err).Msg("materializer pass failed")
 		} else {
-			firstFailure = time.Time{} // reset the failure streak on any success
+			failures.record(true, time.Now()) // any success clears the failure streak
 			if processed > 0 {
 				continue // drain the backlog without waiting
 			}
@@ -133,6 +131,28 @@ const pruneInterval = time.Hour
 // connection recycle, short enough that a durably-broken catalog self-heals via a
 // restart instead of wedging Ready-but-not-decoding.
 const materializerMaxFailureWindow = time.Hour
+
+// failureTracker bounds how long the decode loop may fail continuously before the pod
+// should restart. record reports the streak status: any success clears it; the first
+// failure starts it (never trips); a failure that has persisted for at least window
+// trips. Pulled out of Run so the streak/window logic is unit-testable without a clock
+// or a real catalog (the failure path is otherwise only reachable via a broken catalog).
+type failureTracker struct {
+	first  time.Time
+	window time.Duration
+}
+
+func (f *failureTracker) record(ok bool, now time.Time) (tripped bool) {
+	if ok {
+		f.first = time.Time{}
+		return false
+	}
+	if f.first.IsZero() {
+		f.first = now
+		return false
+	}
+	return now.Sub(f.first) >= f.window
+}
 
 // maybePrune runs the decoded-retention prune at most once per pruneInterval
 // when a retention window is configured (CHD-38). A no-op when DecodedRetention
