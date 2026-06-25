@@ -278,6 +278,13 @@ func (l *LakeEventService) resolvePayload(ctx context.Context, ev cloudevent.Sto
 	}
 	data, err := eventrepo.DownloadObject(ctx, l.getter, l.bucket, ev.DataIndexKey)
 	if err != nil {
+		if eventrepo.IsObjectNotFound(err) {
+			// A permanently-missing blob (aged out of retention) must not fail the whole
+			// multi-event fetch — return the event with an empty payload, mirroring the
+			// materializer's skip-and-count on a 404. Transient errors still propagate.
+			fetchBlobMissingTotal.Inc()
+			return raw, nil
+		}
 		return cloudevent.RawEvent{}, fmt.Errorf("fetch blob payload %s: %w", ev.DataIndexKey, err)
 	}
 	raw.Data = data

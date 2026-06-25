@@ -22,3 +22,11 @@ func observeLakePath(rollup bool) {
 	}
 	lakeLatestServedTotal.WithLabelValues("scan").Inc()
 }
+
+// fetchBlobMissingTotal counts fetch reads whose externalized blob payload was
+// permanently missing (404 / aged out of retention) and was returned as an empty
+// payload rather than failing the whole multi-event fetch.
+var fetchBlobMissingTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "dq_fetch_blob_missing_total",
+	Help: "Fetch reads whose externalized blob payload was permanently missing (returned empty, not errored).",
+})
