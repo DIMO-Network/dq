@@ -53,7 +53,8 @@ const RawEventColumns = `subject, "time", type, id, source, producer, ` +
 func voidingClause(ref string) string {
 	return fmt.Sprintf(
 		" AND (%[1]s.voids_id IS NULL OR %[1]s.voids_id = '')"+
-			" AND NOT EXISTS (SELECT 1 FROM %[2]s t WHERE t.subject = %[1]s.subject AND t.voids_id = %[1]s.id)",
+			" AND NOT EXISTS (SELECT 1 FROM %[2]s t WHERE t.voids_id IS NOT NULL AND t.voids_id <> ''"+
+			" AND t.subject = %[1]s.subject AND t.voids_id = %[1]s.id)",
 		ref, lakeRawEvents)
 }
 

@@ -251,7 +251,9 @@ func (m *DuckLakeMaterializer) processChunk(ctx context.Context, cur, head int64
 		to = cur + m.maxSnapshotSpan
 	}
 
+	tReadDelta := time.Now()
 	events, err := m.readDelta(ctx, cur, to)
+	PerfStats.addDur(&PerfStats.readDelta, time.Since(tReadDelta))
 	if err != nil {
 		// Any feed-read failure might mean din's maintenance expired the cursor
 		// range. Decide on retention (the oldest retained snapshot), not on the
@@ -266,7 +268,10 @@ func (m *DuckLakeMaterializer) processChunk(ctx context.Context, cur, head int64
 
 	if len(events) > 0 {
 		observeLakeLag(events) // decode lag = age of the oldest pending event
+		tDecode := time.Now()
 		decoded := dec.decodeEvents(ctx, events)
+		PerfStats.addDur(&PerfStats.decode, time.Since(tDecode))
+		PerfStats.addPass(int64(len(events)), int64(decoded.signalCount), int64(decoded.eventCount), int64(len(distinctSubjects(decoded.signals))))
 		if cerr := m.commit(ctx, decoded, cur, to); cerr != nil {
 			if errors.Is(cerr, errSnapshotMoved) {
 				return 0, cur, true, nil // another decoder won this range; retry next pass
@@ -625,9 +630,17 @@ func scanRawEvent(rows *sql.Rows) (cloudevent.RawEvent, string, error) {
 	if extras.Valid && extras.String != "" && extras.String != "{}" {
 		ev.Extras = map[string]any{}
 		if err := json.Unmarshal([]byte(extras.String), &ev.Extras); err != nil {
-			return ev, "", fmt.Errorf("decoding extras for %s: %w", ev.ID, err)
+			// Malformed extras is a poison pill at the din→dq trust boundary: a hard
+			// error here aborts the entire delta scan and crash-loops the single
+			// writer on the same row forever (cursor never advances). Salvage exactly
+			// like restoreNonColumnFieldsSafe's panic path — the core columns and Data
+			// are already scanned and still decode; only the non-column header restore
+			// is lost. Count it, drop the partial extras, and keep the event.
+			errorsTotal.Inc()
+			ev.Extras = nil
+		} else {
+			restoreNonColumnFieldsSafe(&ev.CloudEventHeader)
 		}
-		restoreNonColumnFieldsSafe(&ev.CloudEventHeader)
 	}
 	if len(dataBase64) > 0 {
 		ev.DataBase64 = string(dataBase64)
@@ -665,30 +678,43 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 	defer func() { _ = tx.Rollback() }()
 
 	if len(dec.signals) > 0 {
+		tw := time.Now()
 		tmp, err := writeTempParquet(m.tempDir, writeSignalParquet, dec.signals)
+		PerfStats.addDur(&PerfStats.writeTmp, time.Since(tw))
 		if err != nil {
 			return err
 		}
 		cleanup = append(cleanup, tmp)
-		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp)); err != nil {
-			return fmt.Errorf("insert signals: %w", err)
+		ta := time.Now()
+		_, aerr := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp))
+		PerfStats.addDur(&PerfStats.antiSig, time.Since(ta))
+		if aerr != nil {
+			return fmt.Errorf("insert signals: %w", aerr)
 		}
 	}
 	if len(dec.events) > 0 {
+		tw := time.Now()
 		tmp, err := writeTempParquet(m.tempDir, writeEventParquet, dec.events)
+		PerfStats.addDur(&PerfStats.writeTmp, time.Since(tw))
 		if err != nil {
 			return err
 		}
 		cleanup = append(cleanup, tmp)
-		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp)); err != nil {
-			return fmt.Errorf("insert events: %w", err)
+		ta := time.Now()
+		_, aerr := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp))
+		PerfStats.addDur(&PerfStats.antiEvt, time.Since(ta))
+		if aerr != nil {
+			return fmt.Errorf("insert events: %w", aerr)
 		}
 	}
 
 	// Refresh the latest/summary rollup for the subjects this batch touched, in
 	// the same transaction so it advances atomically with the base rows (CHD-3).
 	if len(dec.signals) > 0 {
-		if err := m.refreshRollup(ctx, tx, dec.signals); err != nil {
+		tr := time.Now()
+		err := m.refreshRollup(ctx, tx, dec.signals)
+		PerfStats.addDur(&PerfStats.rollup, time.Since(tr))
+		if err != nil {
 			return err
 		}
 	}
@@ -707,11 +733,14 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		return errSnapshotMoved
 	}
 
-	if err := tx.Commit(); err != nil {
-		if isCommitConflict(err) {
+	tc := time.Now()
+	cerr := tx.Commit()
+	PerfStats.addDur(&PerfStats.commitTx, time.Since(tc))
+	if cerr != nil {
+		if isCommitConflict(cerr) {
 			return errSnapshotMoved
 		}
-		return fmt.Errorf("commit: %w", err)
+		return fmt.Errorf("commit: %w", cerr)
 	}
 	return nil
 }

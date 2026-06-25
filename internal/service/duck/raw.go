@@ -204,9 +204,15 @@ func scanStoredEvent(row rowScanner) (cloudevent.StoredEvent, error) {
 	if extras != nil && *extras != "" && *extras != "{}" {
 		ev.Extras = map[string]any{}
 		if err := json.Unmarshal([]byte(*extras), &ev.Extras); err != nil {
-			return ev, fmt.Errorf("decoding extras for %s: %w", ev.ID, err)
+			// Malformed extras must not fail the whole multi-row fetch — that is the
+			// exact poison-row outcome the restoreNonColumnFieldsSafe containment
+			// (panic path) exists to prevent. Salvage identically: count it, drop the
+			// partial extras, keep the row (core columns + payload are intact).
+			fetchMalformedRowTotal.Inc()
+			ev.Extras = nil
+		} else {
+			restoreNonColumnFieldsSafe(&ev.CloudEventHeader)
 		}
-		restoreNonColumnFieldsSafe(&ev.CloudEventHeader)
 	}
 	if len(dataBase64) > 0 {
 		ev.DataBase64 = string(dataBase64)

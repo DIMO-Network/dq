@@ -257,6 +257,25 @@ func TestGetAggregatedSignalsFloatValueFilter(t *testing.T) {
 		assert.InDelta(t, 10, signals[0].ValueNumber, 1e-9)
 		assert.InDelta(t, 50, signals[1].ValueNumber, 1e-9)
 	})
+
+	t.Run("base and or combine as OR not AND", func(t *testing.T) {
+		// {Gt:25, Or:[{Lt:15}]} means value>25 OR value<15. The pre-fix code
+		// AND-ed the Or group onto the base (value>25 AND value<15) → always
+		// false → zero rows. The correct (stringFilterSQL-consistent) reading
+		// keeps minute 0 (10,30 — both branches) and minute 1 (50 > 25); minute
+		// 2 (20) matches neither.
+		gt2, lt2 := 25.0, 15.0
+		aggArgs := floatArgsAggArgs(t, d1(t, "00:00:00"), d1(t, "00:03:00"), time.Minute, &src, []model.FloatSignalArgs{
+			{Name: sigSpeed, Agg: model.FloatAggregationAvg, Filter: &model.SignalFloatFilter{
+				Gt: &gt2, Or: []*model.SignalFloatFilter{{Lt: &lt2}},
+			}},
+		})
+		signals, err := q.GetAggregatedSignals(context.Background(), testSubject1, aggArgs)
+		require.NoError(t, err)
+		require.Len(t, signals, 2, "minute 0 (10,30) and minute 1 (50) match; minute 2 (20) matches neither")
+		assert.InDelta(t, 20, signals[0].ValueNumber, 1e-9, "avg(10,30): both satisfy value>25 OR value<15")
+		assert.InDelta(t, 50, signals[1].ValueNumber, 1e-9)
+	})
 }
 
 func TestGetAggregatedSignalsRand(t *testing.T) {

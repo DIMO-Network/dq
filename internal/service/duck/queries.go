@@ -73,8 +73,8 @@ func signalSourceCond(col string, filter *model.SignalFilter) (string, []any) {
 }
 
 // floatFilterSQL builds a float value filter: leaf conditions are AND-joined,
-// and the Or list becomes one additional AND-ed group of OR-ed sub-filters:
-// base1 AND base2 AND ((or1) OR (or2)).
+// and Or clauses are OR-ed against that AND-ed base (operator precedence),
+// matching stringFilterSQL / stringArrayFilterSQL: (base1 AND base2) OR (or1) OR (or2).
 func floatFilterSQL(col string, fil *model.SignalFloatFilter) (string, []any) {
 	if fil == nil {
 		return "", nil
@@ -120,10 +120,15 @@ func floatFilterSQL(col string, fil *model.SignalFloatFilter) (string, []any) {
 			args = append(args, a...)
 		}
 	}
-	if len(orParts) != 0 {
-		conds = append(conds, "("+strings.Join(orParts, " OR ")+")")
+	if len(orParts) == 0 {
+		return strings.Join(conds, " AND "), args
 	}
-	return strings.Join(conds, " AND "), args
+	parts := make([]string, 0, 1+len(orParts))
+	if len(conds) != 0 {
+		parts = append(parts, strings.Join(conds, " AND "))
+	}
+	parts = append(parts, orParts...)
+	return "(" + strings.Join(parts, " OR ") + ")", args
 }
 
 // stringFilterSQL builds a string value filter. Leaf conditions are AND-joined;
