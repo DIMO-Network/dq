@@ -7,7 +7,7 @@ import (
 
 // FuzzSQLString guards the no-breakout invariant of the SQL string escaper: for ANY
 // input, the result must be a single-quoted literal in which every interior quote is
-// part of a '' pair — so no input can terminate the literal early and inject SQL. The
+// part of a ” pair — so no input can terminate the literal early and inject SQL. The
 // escaping was proven complete against the real DuckDB in the security review; this is a
 // fast regression guard over arbitrary input (the query builders inline sqlString for
 // signal names, sources, etc.).
