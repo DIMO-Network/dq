@@ -445,6 +445,26 @@ func TestLakeEventService_VoidingExcludes(t *testing.T) {
 	assert.EqualValues(t, 1, summaries[0].Count)
 }
 
+// TestQueryLakeRaw_BeforeOnlyAnchorsLookbackFloor pins the default-window guard:
+// a subject-less, id-less search bounded only by an old Before must anchor its
+// lookback floor to Before, not to now. Before the fix the floor was now-window
+// (later than Before), so the window was empty and the query silently returned
+// nothing.
+func TestQueryLakeRaw_BeforeOnlyAnchorsLookbackFloor(t *testing.T) {
+	ctx := context.Background()
+	lsvc, svc := newLakeEventServiceForTest(t)
+
+	old := time.Now().UTC().Add(-2 * defaultFetchScanWindow).Truncate(time.Millisecond)
+	insertRawEvent(t, svc, mkStoredEvent("old-1", "dimo.status", lakeRawSubj, old))
+
+	// Upper bound just after the event; no subject, no ids → only the default
+	// window guard applies. The floor must follow Before so the event is in range.
+	evs, err := lsvc.queryLakeRaw(ctx, RawFilter{Before: old.Add(time.Hour), ExcludeVoided: true}, 10)
+	require.NoError(t, err)
+	require.Len(t, evs, 1, "event before the requested upper bound must be returned, not clamped out")
+	assert.Equal(t, "old-1", evs[0].ID)
+}
+
 // TestLakeEventService_GetCloudEventFromIndex_ErrNotFound checks that
 // fetching by a non-existent ID returns ErrNotFound.
 func TestLakeEventService_GetCloudEventFromIndex_ErrNotFound(t *testing.T) {

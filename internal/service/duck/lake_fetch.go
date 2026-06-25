@@ -94,7 +94,15 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 	// vehicle whose newest event predates the window otherwise wrongly looked
 	// empty (SR review #4). Only a subject-less, id-less search keeps the guard.
 	if filter.After.IsZero() && len(filter.IDs) == 0 && filter.Subject == "" && len(filter.Subjects) == 0 {
-		filter.After = time.Now().Add(-defaultFetchScanWindow)
+		// Anchor the lookback floor to the requested upper bound when one is set,
+		// else to now. A subject-less search that supplies only Before (an old
+		// instant) would otherwise get After = now-window, which is later than
+		// Before — an empty window that silently returns nothing.
+		anchor := time.Now()
+		if !filter.Before.IsZero() {
+			anchor = filter.Before
+		}
+		filter.After = anchor.Add(-defaultFetchScanWindow)
 	}
 	where, args := whereClauseQ(filter, "e.")
 	voiding := ""
@@ -328,12 +336,20 @@ func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, index
 	type key struct{ subject, id string }
 	found := make(map[key]cloudevent.StoredEvent, len(indexes))
 	for subject, ids := range idsBySubject {
-		evs, err := l.queryLakeRaw(ctx, RawFilter{Subject: subject, IDs: ids, ExcludeVoided: true}, len(ids))
-		if err != nil {
-			return nil, err
-		}
-		for _, ev := range evs {
-			found[key{ev.Subject, ev.ID}] = ev
+		// Chunk per subject so the IN-list and the LIMIT stay within
+		// maxLakeQueryLimit. This method is on the exported EventService and is
+		// callable from the gRPC fetch path with an arbitrarily large index batch,
+		// where an uncapped len(ids) would build a giant IN-list and an unbounded
+		// LIMIT.
+		for start := 0; start < len(ids); start += maxLakeQueryLimit {
+			batch := ids[start:min(start+maxLakeQueryLimit, len(ids))]
+			evs, err := l.queryLakeRaw(ctx, RawFilter{Subject: subject, IDs: batch, ExcludeVoided: true}, len(batch))
+			if err != nil {
+				return nil, err
+			}
+			for _, ev := range evs {
+				found[key{ev.Subject, ev.ID}] = ev
+			}
 		}
 	}
 
