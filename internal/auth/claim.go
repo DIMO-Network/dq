@@ -31,3 +31,11 @@ func getDQClaim(ctx context.Context) (*DQClaim, error) {
 	}
 	return claim, nil
 }
+
+// DQClaimFromContext returns the validated DQ claim stored by the gRPC fetch
+// interceptor or the HTTP middleware, and false if none is present. Used by the
+// gRPC fetch RPCs to scope reads to the token's own (or a linked) subject.
+func DQClaimFromContext(ctx context.Context) (*DQClaim, bool) {
+	claim, ok := ctx.Value(DQClaimContextKey{}).(*DQClaim)
+	return claim, ok && claim != nil
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // emptyEventService returns empty results from every list/index method — the
@@ -47,7 +48,7 @@ func (emptyEventService) PresignBlobURL(context.Context, string) (string, error)
 // index key containing a path-traversal sequence is rejected before it is
 // dereferenced (CHD-22 defense-in-depth).
 func TestListCloudEventsFromIndex_RejectsTraversalKey(t *testing.T) {
-	s := NewServer(emptyEventService{})
+	s := NewServer(emptyEventService{}, nil)
 	_, err := s.ListCloudEventsFromIndex(context.Background(), &grpc.ListCloudEventsFromKeysRequest{
 		Indexes: []*grpc.CloudEventIndex{
 			{Data: &grpc.ObjectInfo{Key: "cloudevent/../../etc/secret"}},
@@ -61,7 +62,7 @@ func TestListCloudEventsFromIndex_RejectsTraversalKey(t *testing.T) {
 // oversized index list would fan out into that many fetches from one call
 // (SR-4). It must be rejected, not processed.
 func TestListCloudEventsFromIndex_RejectsTooManyKeys(t *testing.T) {
-	s := NewServer(emptyEventService{})
+	s := NewServer(emptyEventService{}, nil)
 	idxs := make([]*grpc.CloudEventIndex, maxIndexKeysPerRequest+1)
 	for i := range idxs {
 		idxs[i] = &grpc.CloudEventIndex{Data: &grpc.ObjectInfo{Key: "cloudevent/blobs/x"}}
@@ -76,9 +77,11 @@ func TestListCloudEventsFromIndex_RejectsTooManyKeys(t *testing.T) {
 // returns an empty slice with no error, which silently broke clients expecting
 // NotFound.
 func TestListIndexes_EmptyReturnsNotFound(t *testing.T) {
-	s := NewServer(emptyEventService{})
-	_, err := s.ListIndexes(context.Background(), &grpc.ListIndexesRequest{
-		Options: &grpc.SearchOptions{},
+	s := NewServer(emptyEventService{}, nil)
+	// A valid own-subject request passes authz, so the empty backend result is what maps
+	// to NotFound (the point of this test).
+	_, err := s.ListIndexes(ctxWithSubject(authSubjA), &grpc.ListIndexesRequest{
+		Options: &grpc.SearchOptions{Subject: wrapperspb.String(authSubjA)},
 	})
 	require.Error(t, err)
 	assert.Equal(t, codes.NotFound, status.Code(err), "empty list result maps to NotFound")

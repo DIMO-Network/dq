@@ -47,6 +47,10 @@ type App struct {
 	// it instead of opening a second duck.Service + S3 client in the same process
 	// (SR-9). Owned by this App — Cleanup closes it.
 	eventService eventrepo.EventService
+	// identityClient (may be nil) lets the gRPC fetch server scope reads to the
+	// token's own subject + verify cross-subject device links, the same way the
+	// GraphQL resolver does. Shared with the resolver.
+	identityClient identity.Client
 }
 
 // New creates a new application.
@@ -168,11 +172,12 @@ func New(settings config.Settings) (*App, error) {
 
 	ok = true // App now owns backendCleanup + stopMaterializer; disarm the deferred cleanup
 	return &App{
-		Handler:      authChain(gqlSrv),
-		MCPHandler:   authChain(mcpHandler),
-		readyCheck:   readyCheck,
-		eventService: eventService,
-		cleanup:      cleanup,
+		Handler:        authChain(gqlSrv),
+		MCPHandler:     authChain(mcpHandler),
+		readyCheck:     readyCheck,
+		eventService:   eventService,
+		identityClient: identityClient,
+		cleanup:        cleanup,
 	}, nil
 }
 
@@ -192,7 +197,7 @@ func noOp(ctx context.Context, obj interface{}, next graphql.Resolver) (res inte
 // in the same process (SR-9). The App owns that backend, so there is no separate
 // cleanup to return.
 func CreateGRPCServer(logger *zerolog.Logger, application *App, settings config.Settings) (*grpc.Server, error) {
-	rpcServer := rpc.NewServer(application.eventService)
+	rpcServer := rpc.NewServer(application.eventService, application.identityClient)
 
 	grpcPanic := metrics.GRPCPanicker{Logger: logger}
 	interceptors := []grpc.UnaryServerInterceptor{
