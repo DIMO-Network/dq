@@ -32,6 +32,10 @@ DUCKDB_S3_ENDPOINT: ""
 MATERIALIZER_ENABLED: false
 MATERIALIZER_POLL_INTERVAL: 15s
 MATERIALIZER_WORKERS: 0
+# Backfill tuning for a large one-time catch-up (initial load / long downtime):
+# skips the cross-batch dedup anti-join and flushes signals_latest once on
+# catch-up. Set for the initial backfill, then unset for steady state.
+MATERIALIZER_BACKFILL_MODE: false
 # Read only to REJECT sharding (> 1 is refused — single writer only).
 MATERIALIZER_SHARD_COUNT: 1
 # Decoded-row retention (Go duration, e.g. 8760h); empty disables pruning.

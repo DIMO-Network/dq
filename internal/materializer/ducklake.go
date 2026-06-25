@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,6 +60,26 @@ type DuckLakeMaterializer struct {
 	// they would otherwise be a data race.
 	lastProgressReport   time.Time
 	lastReportedSnapshot int64
+
+	// backfillMode tunes the writer for a large one-time catch-up: it skips the
+	// cross-batch dedup anti-join on insert (a clean historical load carries no
+	// redeliveries, and the read path dedups regardless). Steady state leaves it
+	// false so the bounded anti-join still guards against NATS redeliveries.
+	backfillMode bool
+	// dirtyBuckets accumulates the subject_buckets whose lake.signals changed
+	// since the last FlushRollup. The rollup is maintained OFF the decode commit
+	// (a materialized view should never block the writer); FlushRollup recomputes
+	// only these partitions. Single-writer: mutated only on the decode-loop
+	// goroutine (commit/FlushRollup), so unsynchronized like the progress fields.
+	dirtyBuckets map[int]struct{}
+}
+
+// WithBackfillMode toggles backfill tuning (skip the cross-batch dedup anti-join;
+// the caller defers rollup maintenance to a single FlushRollup at catch-up).
+// Returns m for chaining.
+func (m *DuckLakeMaterializer) WithBackfillMode(on bool) *DuckLakeMaterializer {
+	m.backfillMode = on
+	return m
 }
 
 // snapshotCursorPartition is the single ingest_progress key holding the last
@@ -79,6 +99,7 @@ func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger
 		db:              db,
 		log:             log.With().Str("component", "ducklake-materializer").Logger(),
 		maxSnapshotSpan: defaultMaxSnapshotSpan,
+		dirtyBuckets:    map[int]struct{}{},
 	}
 	if err := m.ensureSchema(ctx); err != nil {
 		return nil, err
@@ -138,10 +159,11 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 		`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
 		// signals_latest is the per-(subject,name) latest+summary rollup (CHD-3):
 		// it makes latest/summary/availableSignals O(distinct-names) instead of a
-		// full-history GROUP BY per request. Maintained per batch (refreshRollup)
-		// by recomputing affected subjects from the deduped base table, so it is
-		// a materialized view of getAllLatestSignalsLake (no source filter) —
-		// parity is by construction. Partitioned by subject_bucket like the base.
+		// full-history GROUP BY per request. Maintained OFF the decode commit by
+		// FlushRollup, which recomputes the touched subject_buckets from the deduped
+		// base table, so it is a materialized view of getAllLatestSignalsLake (no
+		// source filter) — parity is by construction. Partitioned by subject_bucket
+		// like the base.
 		`CREATE TABLE IF NOT EXISTS lake.signals_latest (
 			subject VARCHAR, subject_bucket INTEGER, name VARCHAR,
 			"timestamp" TIMESTAMP WITH TIME ZONE,
@@ -694,7 +716,8 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 			return err
 		}
 		cleanup = append(cleanup, tmp)
-		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp)); err != nil {
+		tsMin, tsMax := timeRange(dec.signals, func(r SignalRow) time.Time { return r.Timestamp })
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp, tsMin, tsMax, m.backfillMode)); err != nil {
 			return fmt.Errorf("insert signals: %w", err)
 		}
 	}
@@ -704,18 +727,17 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 			return err
 		}
 		cleanup = append(cleanup, tmp)
-		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp)); err != nil {
+		tsMin, tsMax := timeRange(dec.events, func(r EventRow) time.Time { return r.Timestamp })
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp, tsMin, tsMax, m.backfillMode)); err != nil {
 			return fmt.Errorf("insert events: %w", err)
 		}
 	}
 
-	// Refresh the latest/summary rollup for the subjects this batch touched, in
-	// the same transaction so it advances atomically with the base rows (CHD-3).
-	if len(dec.signals) > 0 {
-		if err := m.refreshRollup(ctx, tx, dec.signals); err != nil {
-			return err
-		}
-	}
+	// NOTE: the lake.signals_latest rollup is no longer maintained here. It is a
+	// materialized view; recomputing it inside the decode commit made the writer
+	// O(history-per-bucket) per batch and OOM-killed on a backlog. The rollup is
+	// now maintained OFF this path by FlushRollup (bucket-partitioned recompute);
+	// commit only records which buckets changed (after the commit succeeds, below).
 
 	// Advance the cursor as a compare-and-swap against the seeded row (from=0
 	// matches the seeded '0'). RowsAffected==0 means another writer advanced it
@@ -737,7 +759,27 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		}
 		return fmt.Errorf("commit: %w", err)
 	}
+	// The base rows are durable. Mark the buckets this batch wrote so the
+	// decoupled FlushRollup recomputes only those partitions. Done after commit
+	// so a rolled-back batch never dirties the rollup.
+	for i := range dec.signals {
+		m.dirtyBuckets[int(dec.signals[i].SubjectBucket)] = struct{}{}
+	}
 	return nil
+}
+
+// timeRange returns the min and max ts(row) over rows (both zero when empty).
+func timeRange[T any](rows []T, ts func(T) time.Time) (minT, maxT time.Time) {
+	for i := range rows {
+		t := ts(rows[i])
+		if i == 0 || t.Before(minT) {
+			minT = t
+		}
+		if i == 0 || t.After(maxT) {
+			maxT = t
+		}
+	}
+	return minT, maxT
 }
 
 func isCommitConflict(err error) bool {
@@ -816,79 +858,6 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 	return total, nil
 }
 
-// refreshRollup recomputes lake.signals_latest for every subject the batch
-// touched, inside the commit transaction (CHD-3). It deletes the affected
-// subjects' rollup rows and re-inserts a fresh per-(subject,name) latest+summary
-// computed from the deduped base table, so the rollup is always a materialized
-// view of getAllLatestSignalsLake (no source filter). Bounded to the batch's
-// subjects, which prune by subject_bucket.
-func (m *DuckLakeMaterializer) refreshRollup(ctx context.Context, tx *sql.Tx, signals []SignalRow) error {
-	subjects := distinctSubjects(signals)
-	if len(subjects) == 0 {
-		return nil
-	}
-	start := time.Now()
-	ph := strings.TrimSuffix(strings.Repeat("?,", len(subjects)), ",")
-	args := make([]any, len(subjects))
-	for i, s := range subjects {
-		args[i] = s
-	}
-	// Prune the rollup delete and the base recompute to the batch's hash buckets.
-	// signals_latest and lake.signals are PARTITIONED BY subject_bucket, so this
-	// skips every partition but the batch's (SR-6) — the recompute reads only the
-	// touched buckets' files, not the whole table. (The recompute is still
-	// O(history within those buckets); the SR-1 incremental-merge follow-up would
-	// make it O(batch), but that must replicate the (subject,name,timestamp)
-	// read-dedup exactly, so it is deferred over correctness risk.)
-	buckets := distinctBucketClause(subjects)
-	where := "WHERE subject IN (" + ph + ")" + buckets
-	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest "+where, args...); err != nil {
-		return fmt.Errorf("rollup delete: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest"+signalsLatestColumns+rollupSelectSQL(where), args...); err != nil {
-		return fmt.Errorf("rollup insert: %w", err)
-	}
-	rollupRefreshSeconds.Set(time.Since(start).Seconds())
-	return nil
-}
-
-// distinctBucketClause returns " AND subject_bucket IN (b1,b2,...)" for the hash
-// buckets of the given subjects, or "" when empty. Buckets are small ints — a
-// deterministic function of subject — so they are inlined like the read path's
-// subjectBucketPredicate; no injection risk. duck.HashBucket matches the
-// subject_bucket the decoder stamped (decode.go), so the partitions line up.
-func distinctBucketClause(subjects []string) string {
-	seen := make(map[int]struct{}, len(subjects))
-	bs := make([]string, 0, len(subjects))
-	for _, s := range subjects {
-		b := duck.HashBucket(s)
-		if _, ok := seen[b]; ok {
-			continue
-		}
-		seen[b] = struct{}{}
-		bs = append(bs, strconv.Itoa(b))
-	}
-	if len(bs) == 0 {
-		return ""
-	}
-	return " AND subject_bucket IN (" + strings.Join(bs, ",") + ")"
-}
-
-// distinctSubjects returns the unique subjects in a decoded signal batch.
-func distinctSubjects(signals []SignalRow) []string {
-	seen := make(map[string]struct{}, len(signals))
-	var out []string
-	for i := range signals {
-		s := signals[i].Subject
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
-}
-
 // rollupSelectSQL builds the per-(subject,name) latest+summary SELECT over the
 // deduped base table, restricted by whereClause (the full "WHERE …" string, or ""
 // for the whole table). It mirrors getAllLatestSignalsLake's aggregation exactly
@@ -921,25 +890,79 @@ func rollupSelectSQL(whereClause string) string {
 	GROUP BY subject, name`, locNonzero, whereClause)
 }
 
+// FlushRollup recomputes lake.signals_latest for every subject_bucket whose base
+// rows changed since the last flush (the decoupled, off-commit rollup
+// maintenance). A no-op when nothing is dirty. Each bucket is recomputed in its
+// own transaction so the aggregate/window is bounded to one partition's data; a
+// failure leaves already-flushed buckets refreshed and the rest dirty for the
+// next pass. Single-writer: called only on the decode-loop goroutine.
+func (m *DuckLakeMaterializer) FlushRollup(ctx context.Context) error {
+	if len(m.dirtyBuckets) == 0 {
+		return nil
+	}
+	buckets := make([]int, 0, len(m.dirtyBuckets))
+	for b := range m.dirtyBuckets {
+		buckets = append(buckets, b)
+	}
+	sort.Ints(buckets)
+	start := time.Now()
+	done, err := m.recomputeBuckets(ctx, buckets)
+	for _, b := range done {
+		delete(m.dirtyBuckets, b) // keep undone buckets dirty for retry
+	}
+	rollupRefreshSeconds.Set(time.Since(start).Seconds())
+	return err
+}
+
 // RecomputeRollup rebuilds lake.signals_latest from scratch over the ENTIRE
-// lake.signals base in one transaction — the O(history) full recompute, byte-
-// identical to the per-batch refreshRollup but unrestricted. The per-batch path
-// only recomputes subjects present in a batch, so a rollup that was dropped or
-// truncated leaves dormant (no-longer-reporting) vehicles permanently missing from
-// the latest/summary reads. This is the disaster-recovery rebuild for that case;
-// it is opt-in (LAKE_REBUILD_ROLLUP_ON_BOOT) because over deep history it is
-// expensive. Safe to run while the single-writer materializer is offline.
+// lake.signals base, byte-identical to the per-bucket FlushRollup but for every
+// bucket. The per-batch/flush path only touches buckets that changed, so a rollup
+// that was dropped or truncated leaves dormant (no-longer-reporting) vehicles
+// permanently missing from the latest/summary reads. This is the disaster-recovery
+// rebuild for that case; it is opt-in (LAKE_REBUILD_ROLLUP_ON_BOOT). Partitioned
+// over the 256 buckets (one txn each) so it stays memory-bounded over deep history
+// instead of materializing the whole-table QUALIFY window at once. Safe to run
+// while the single-writer materializer is offline.
 func (m *DuckLakeMaterializer) RecomputeRollup(ctx context.Context) error {
+	buckets := make([]int, duck.NumLatestBuckets)
+	for i := range buckets {
+		buckets[i] = i
+	}
+	_, err := m.recomputeBuckets(ctx, buckets)
+	return err
+}
+
+// recomputeBuckets DELETEs+recomputes lake.signals_latest for each given
+// subject_bucket, one transaction per bucket. Bounding each recompute to a single
+// partition keeps the GROUP BY / QUALIFY window memory-bounded (the whole-table
+// recompute OOMs on deep history). Returns the buckets that committed successfully
+// (so the caller can clear exactly those from the dirty set) alongside the first
+// error.
+func (m *DuckLakeMaterializer) recomputeBuckets(ctx context.Context, buckets []int) (done []int, err error) {
+	for _, b := range buckets {
+		if err = ctx.Err(); err != nil {
+			return done, err
+		}
+		where := fmt.Sprintf("WHERE subject_bucket = %d", b)
+		if rerr := m.recomputeOneBucket(ctx, where); rerr != nil {
+			return done, fmt.Errorf("rollup recompute bucket %d: %w", b, rerr)
+		}
+		done = append(done, b)
+	}
+	return done, nil
+}
+
+func (m *DuckLakeMaterializer) recomputeOneBucket(ctx context.Context, where string) error {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest"); err != nil {
-		return fmt.Errorf("rollup rebuild delete: %w", err)
+	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest "+where); err != nil {
+		return fmt.Errorf("delete: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest"+signalsLatestColumns+rollupSelectSQL("")); err != nil {
-		return fmt.Errorf("rollup rebuild insert: %w", err)
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest"+signalsLatestColumns+rollupSelectSQL(where)); err != nil {
+		return fmt.Errorf("insert: %w", err)
 	}
 	return tx.Commit()
 }
@@ -954,12 +977,32 @@ func (m *DuckLakeMaterializer) RecomputeRollup(ctx context.Context) error {
 // case. subject_bucket is a deterministic function of the (cloudevent-derived)
 // subject, so adding it to the predicate is always satisfied for a true
 // duplicate and lets DuckLake probe only the subject's partition.
-func antiJoinInsert(table, parquetPath string) string {
+//
+// The probe is additionally bounded to the batch's own [tsMin, tsMax] timestamp
+// window. A redelivered row carries the SAME timestamp as the original, so every
+// possible duplicate falls inside the batch's range — the bound can never miss
+// one. What it does is let DuckLake prune the probe to the day-partitions the
+// batch actually spans (it is PARTITIONED BY day("timestamp")) instead of
+// scanning the whole table, which is what made the anti-join O(history)/batch and
+// the dominant steady-state cost on a backlog. skipDedup drops the guard entirely
+// for a backfill of a known-clean dump (the read path dedups regardless).
+func antiJoinInsert(table, parquetPath string, tsMin, tsMax time.Time, skipDedup bool) string {
+	if skipDedup {
+		return fmt.Sprintf("INSERT INTO %s SELECT * FROM read_parquet(%s)", table, sqlLit(parquetPath))
+	}
 	return fmt.Sprintf(
 		"INSERT INTO %[1]s SELECT * FROM read_parquet(%[2]s) AS src "+
 			"WHERE NOT EXISTS (SELECT 1 FROM %[1]s AS t "+
 			"WHERE t.subject_bucket = src.subject_bucket "+
+			`AND t."timestamp" >= %[3]s AND t."timestamp" <= %[4]s `+
 			"AND t.cloud_event_id = src.cloud_event_id "+
 			"AND t.name = src.name AND t.timestamp = src.timestamp)",
-		table, sqlLit(parquetPath))
+		table, sqlLit(parquetPath), sqlTimestampLit(tsMin), sqlTimestampLit(tsMax))
+}
+
+// sqlTimestampLit renders t as a DuckDB TIMESTAMPTZ literal in UTC, for inlining
+// as a constant the planner can use for day-partition pruning (no injection risk:
+// the value is a formatted timestamp).
+func sqlTimestampLit(t time.Time) string {
+	return "TIMESTAMPTZ '" + t.UTC().Format("2006-01-02 15:04:05.999999-07:00") + "'"
 }

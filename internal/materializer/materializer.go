@@ -40,6 +40,16 @@ type Config struct {
 	// tables (CHD-38). Zero (default) disables it — a row-level TTL on customer
 	// history is a product decision.
 	DecodedRetention time.Duration
+	// BackfillMode tunes the materializer for a large one-time catch-up (initial
+	// load, long downtime): the writer skips the cross-batch dedup anti-join, and
+	// the rollup is flushed once on catch-up instead of periodically mid-drain.
+	// Steady state leaves it false.
+	BackfillMode bool
+	// RollupInterval bounds how often the decoupled signals_latest flush runs
+	// while the decoder is continuously busy (never reaching a caught-up poll). On
+	// catch-up the rollup is always flushed regardless. Defaults to PollInterval;
+	// ignored in BackfillMode (one flush at catch-up).
+	RollupInterval time.Duration
 }
 
 const defaultPollInterval = 15 * time.Second
@@ -50,6 +60,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Workers <= 0 {
 		c.Workers = runtime.GOMAXPROCS(0)
+	}
+	if c.RollupInterval <= 0 {
+		c.RollupInterval = c.PollInterval
 	}
 	return c
 }
@@ -85,9 +98,14 @@ func (r *Runner) WithDuckLake(m *DuckLakeMaterializer) *Runner {
 // events without error it polls again immediately to drain the backlog;
 // otherwise it waits PollInterval.
 func (r *Runner) Run(ctx context.Context) error {
+	// Apply the backfill tuning to the writer (skip the cross-batch dedup
+	// anti-join). The flush-cadence half of backfill mode lives in this loop.
+	r.lake.WithBackfillMode(r.cfg.BackfillMode)
+
 	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
 	lastPrune := time.Now()
+	lastRollup := time.Now()
 	failures := failureTracker{window: materializerMaxFailureWindow}
 	for {
 		processed, err := r.RunOnce(ctx)
@@ -107,8 +125,20 @@ func (r *Runner) Run(ctx context.Context) error {
 		} else {
 			failures.record(true, time.Now()) // any success clears the failure streak
 			if processed > 0 {
+				// Still draining. signals_latest is maintained off this path
+				// (FlushRollup), so a long catch-up doesn't block the writer; bound the
+				// view's staleness with a periodic flush (steady state only — backfill
+				// defers to the single catch-up flush so the drain runs flat-out).
+				if !r.cfg.BackfillMode {
+					r.maybeFlushRollup(ctx, &lastRollup)
+				}
 				continue // drain the backlog without waiting
 			}
+			// Caught up: the decode backlog is drained, so flush the decoupled rollup
+			// for every bucket touched since the last flush. Bucket-partitioned and
+			// off the commit, so it can't OOM the writer or stall decode.
+			r.flushRollup(ctx)
+			lastRollup = time.Now()
 		}
 		// The decoded tables (lake.signals/events) are merged + expired by din's
 		// catalog-wide maintenance (one maintenance process per catalog), so dq
@@ -120,6 +150,37 @@ func (r *Runner) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// FlushRollup recomputes signals_latest for every bucket dirtied since the last
+// flush (the decoupled maintenance pass). Exposed so a one-shot driver (tests,
+// backfill harness) can refresh the view after draining. Safe to call when caught
+// up; a no-op when nothing is dirty.
+func (r *Runner) FlushRollup(ctx context.Context) error {
+	return r.lake.FlushRollup(ctx)
+}
+
+// flushRollup runs the decoupled rollup maintenance, logging (not propagating) a
+// failure: the base tables are already durable and the rollup self-heals on the
+// next flush, so a transient failure must not wedge the decode loop.
+func (r *Runner) flushRollup(ctx context.Context) {
+	if err := r.lake.FlushRollup(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		rollupFlushErrorsTotal.Inc()
+		r.log.Error().Err(err).Msg("signals_latest flush failed; latest/summary may be stale until the next flush")
+	}
+}
+
+// maybeFlushRollup runs flushRollup at most once per RollupInterval, to bound how
+// stale the latest/summary view gets during a long continuous drain.
+func (r *Runner) maybeFlushRollup(ctx context.Context, last *time.Time) {
+	if time.Since(*last) < r.cfg.RollupInterval {
+		return
+	}
+	*last = time.Now()
+	r.flushRollup(ctx)
 }
 
 // pruneInterval is how often the ducklake path enforces DecodedRetention.

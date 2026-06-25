@@ -180,6 +180,7 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
 		Workers:           settings.MaterializerWorkers,
 		DecodedRetention:  decodedRetention,
+		BackfillMode:      settings.MaterializerBackfillMode,
 	}, logger).WithDuckLake(mat)
 
 	// rebuildRollup is the opt-in disaster-recovery rebuild (LAKE_REBUILD_ROLLUP_ON_BOOT):

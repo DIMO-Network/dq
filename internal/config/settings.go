@@ -61,6 +61,11 @@ type Settings struct {
 	MaterializerEnabled      bool   `yaml:"MATERIALIZER_ENABLED"`
 	MaterializerPollInterval string `yaml:"MATERIALIZER_POLL_INTERVAL"`
 	MaterializerWorkers      int    `yaml:"MATERIALIZER_WORKERS"`
+	// MaterializerBackfillMode tunes the writer for a large one-time catch-up
+	// (initial historical load, long downtime): it skips the cross-batch dedup
+	// anti-join and flushes signals_latest once on catch-up instead of mid-drain.
+	// Default false (steady state). Set it for the initial backfill, then unset.
+	MaterializerBackfillMode bool `yaml:"MATERIALIZER_BACKFILL_MODE"`
 	// LakeDecodedRetention is a Go duration (e.g. "8760h"); decoded rows older
 	// than this are pruned from lake.signals/events (CHD-38). Empty disables it.
 	LakeDecodedRetention string `yaml:"LAKE_DECODED_RETENTION"`

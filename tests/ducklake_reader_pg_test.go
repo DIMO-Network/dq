@@ -79,6 +79,14 @@ func TestDuckLakePostgres_ReadDuringMaterialize(t *testing.T) {
 				matErr = e
 				return
 			}
+			// signals_latest is maintained off the decode commit now; flush it each
+			// pass (per-bucket DELETE+INSERT in one txn) so concurrent readers observe
+			// the rollup being populated and atomically swapped, which is what the
+			// torn-read assertion below checks.
+			if fe := runner.FlushRollup(ctx); fe != nil {
+				matErr = fe
+				return
+			}
 			if n == 0 {
 				return
 			}

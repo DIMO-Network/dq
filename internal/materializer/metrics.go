@@ -42,14 +42,22 @@ var (
 		Name: "dq_materializer_pass_errors_total",
 		Help: "RunOnce passes that returned an error (readDelta/commit/CAS); a sustained increase means the decode loop is wedged.",
 	})
-	// rollupRefreshSeconds tracks the per-batch latest/summary rollup refresh
-	// cost. The refresh recomputes affected subjects from the deduped base
-	// (subject_bucket-pruned, SR-6); this gauge makes its growth with history
-	// visible so the O(history) recompute can be caught before it gates decode
-	// throughput (the SR-1 incremental-merge follow-up).
+	// rollupRefreshSeconds tracks the cost of the decoupled signals_latest
+	// maintenance pass (FlushRollup): a bucket-partitioned recompute of every
+	// subject_bucket dirtied since the last flush, run OFF the decode commit. This
+	// gauge makes its growth with history visible (the SR-1 incremental-merge
+	// follow-up would make it O(batch)).
 	rollupRefreshSeconds = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dq_materializer_rollup_refresh_seconds",
-		Help: "Wall-clock of the most recent signals_latest rollup refresh.",
+		Help: "Wall-clock of the most recent signals_latest rollup flush (bucket-partitioned recompute of dirty buckets).",
+	})
+	// rollupFlushErrorsTotal counts decoupled signals_latest flush failures. The
+	// base tables stay durable and the rollup self-heals on the next flush, so a
+	// flush failure is non-fatal — but a sustained increase means latest/summary
+	// reads are going stale; alert on it.
+	rollupFlushErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dq_materializer_rollup_flush_errors_total",
+		Help: "signals_latest flush passes that failed; a sustained increase means the latest/summary view is stale.",
 	})
 	cursorResetsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dq_materializer_cursor_resets_total",

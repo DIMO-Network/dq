@@ -112,6 +112,10 @@ func drainRunner(t *testing.T, ctx context.Context, r *materializer.Runner) int 
 		require.NoError(t, err)
 		total += n
 		if n == 0 {
+			// signals_latest is maintained off the decode commit now; the live loop
+			// flushes it on catch-up, so this drain-to-completion helper does the same
+			// so rollup assertions observe a current view.
+			require.NoError(t, r.FlushRollup(ctx))
 			return total
 		}
 	}
