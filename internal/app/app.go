@@ -129,13 +129,25 @@ func New(settings config.Settings) (*App, error) {
 		return nil, fmt.Errorf("couldn't create request time limit middleware: %w", err)
 	}
 
+	concLimiter := limits.NewConcurrencyLimiter(settings.MaxConcurrentPerSubject)
+	// subjectKey limits by the authenticated JWT subject (the developer/caller). It is
+	// applied just inside CheckJWT, which has populated the claims by that point.
+	subjectKey := func(r *http.Request) string {
+		if claims, ok := auth.GetValidatedClaims(r.Context()); ok {
+			return claims.RegisteredClaims.Subject
+		}
+		return ""
+	}
+
 	authChain := func(inner http.Handler) http.Handler {
 		return PanicRecoveryMiddleware(
 			LoggerMiddleware(
 				limiter.AddRequestTimeout(
 					jwtMiddleware.CheckJWT(
-						authLoggerMiddleware(
-							auth.AddClaimHandler(inner),
+						concLimiter.Middleware(subjectKey)(
+							authLoggerMiddleware(
+								auth.AddClaimHandler(inner),
+							),
 						),
 					),
 				),

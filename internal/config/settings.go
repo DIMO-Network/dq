@@ -9,6 +9,11 @@ type Settings struct {
 	MonPort                   int    `yaml:"MON_PORT"`
 	EnablePprof               bool   `yaml:"ENABLE_PPROF"`
 	MaxRequestDuration        string `yaml:"MAX_REQUEST_DURATION"`
+	// MaxConcurrentPerSubject bounds in-flight HTTP requests per authenticated JWT
+	// subject so one caller can't pin the whole DuckDB pool and starve co-tenants on
+	// a replica. 0 (default) disables it — opt-in, since the right ceiling depends on
+	// the pool size + real query mix. A rejected request gets 429.
+	MaxConcurrentPerSubject   int    `yaml:"MAX_CONCURRENT_REQUESTS_PER_SUBJECT"`
 	TokenExchangeJWTKeySetURL string `yaml:"TOKEN_EXCHANGE_JWK_KEY_SET_URL"`
 	TokenExchangeIssuer       string `yaml:"TOKEN_EXCHANGE_ISSUER_URL"`
 	// FetchGRPCRequireJWT makes a valid DIMO JWT mandatory on the fetch gRPC port.
