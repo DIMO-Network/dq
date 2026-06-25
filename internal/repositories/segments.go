@@ -194,16 +194,21 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	if err := validateSegmentLimit(limit); err != nil {
 		return nil, errorhandler.NewBadRequestError(ctx, err)
 	}
-	if after != nil && after.Before(to) {
-		cursorFrom := (*after).Add(time.Nanosecond)
-		if cursorFrom.After(from) {
-			from = cursorFrom
-		}
-	}
-
 	segments, err := r.query.GetSegments(ctx, did, from, to, mechanism, config)
 	if err != nil {
 		return nil, handleDBError(ctx, err)
+	}
+	// Cursor pagination: keep only segments starting strictly after the cursor. We must
+	// NOT advance `from` to do this. A segment whose true start is at or before `from`
+	// (an ongoing trip, or one already in progress at `from` — the common first segment of
+	// any range) is reported with its start CLIPPED to `from`. Advancing `from` to
+	// after+1ns would re-clip that same segment to the new `from`, giving it a start just
+	// past the cursor that re-passes this filter forever — the same segment re-emitted
+	// every page, 1ns later each time (infinite loop). Detecting from the original `from`
+	// keeps the clipped start stable, so the filter retires the segment once the cursor
+	// reaches it.
+	if after != nil {
+		segments = segmentsStartingAfter(segments, *after)
 	}
 	// For IDLING, the post-summary speed filter (below) drops moving segments, so
 	// truncating here would under-return and, under cursor pagination, permanently
@@ -274,6 +279,20 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 		segments = truncateToLimit(segments, limit)
 	}
 	return segments, nil
+}
+
+// segmentsStartingAfter drops segments whose start is at or before the cursor. Paired
+// with detecting from the original (un-advanced) `from`, this gives stable cursor
+// pagination: a started-before-range / ongoing segment has a clipped-but-stable start, so
+// it is returned once and then retired once the cursor passes it — never re-emitted.
+func segmentsStartingAfter(segments []*model.Segment, after time.Time) []*model.Segment {
+	out := segments[:0]
+	for _, s := range segments {
+		if s.Start != nil && s.Start.Timestamp.After(after) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // truncateToLimit caps segments at *limit (nil = no cap). For IDLING this must run
@@ -507,7 +526,9 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 		return nil, errorhandler.NewBadRequestError(ctx, err)
 	}
 	rangeStart := fromDate
-	rangeEnd := toDate.Add(24 * time.Hour)
+	// AddDate(0,0,1) advances one CALENDAR day in loc — a DST day is 23h/25h, so a flat
+	// Add(24h) would drift off local midnight and clip/overrun the trailing day.
+	rangeEnd := toDate.AddDate(0, 0, 1)
 
 	defaultReqs := defaultSegmentSignalSet(mechanism)
 	signalReqs := mergeSegmentSignalRequests(defaultReqs, signalRequests)
@@ -524,8 +545,12 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 	// Each result's SegIndex maps back to the day's position in `days`.
 	floatArgs, locationArgs := buildAggArgs(signalReqs)
 	var days []dayWindow
-	for d := fromDate; !d.After(toDate); d = d.Add(24 * time.Hour) {
-		days = append(days, dayWindow{start: d.UTC(), end: d.Add(24 * time.Hour).UTC()})
+	// Iterate by CALENDAR day in loc (AddDate), not a flat 24h: across a DST transition a
+	// civil day is 23h or 25h. A flat Add(24h) drifts d off local midnight after the
+	// transition, makes the DST day's window overlap the next day, and terminates a day
+	// early — dropping the last calendar day and mis-bucketing post-transition segments.
+	for d := fromDate; !d.After(toDate); d = d.AddDate(0, 0, 1) {
+		days = append(days, dayWindow{start: d.UTC(), end: d.AddDate(0, 0, 1).UTC()})
 	}
 	aggsByDay, eventCountsByDay, err := r.batchDaySummaries(ctx, did, days, floatArgs, locationArgs, eventNames)
 	if err != nil {
