@@ -302,12 +302,6 @@ func (l *LakeEventService) resolvePayload(ctx context.Context, ev cloudevent.Sto
 // ListCloudEventsFromIndexes.
 const indexBlobConcurrency = 25
 
-// BatchesAllIndexes is true for the lake backend: ListCloudEventsFromIndexes
-// groups any index by subject and issues one query per subject, so internal/fetch
-// routes every index through it (a 1000-key single-subject fetch is one query,
-// not 1000 per-key queries).
-func (l *LakeEventService) BatchesAllIndexes() bool { return true }
-
 // ListCloudEventsFromIndexes fetches the payload for each index entry, in input
 // order. It groups the requested ids by subject and issues one query per
 // subject instead of one per index (SR-4) — a list of N indexes for one vehicle

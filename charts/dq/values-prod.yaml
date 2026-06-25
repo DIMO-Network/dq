@@ -20,7 +20,7 @@ env:
   # Prod lake (must match din's prod LAKE_DATA_PATH) + the prod externalized-blob
   # bucket (din's prod BLOB_BUCKET).
   DUCKLAKE_DATA_PATH: s3://dimo-storage-prod/lake/
-  PARQUET_BUCKET: dimo-blob-storage-prod
+  BLOB_BUCKET: dimo-blob-storage-prod
   # Prod auth + identity-api + registry (chain 137), mirroring din's prod values.
   TOKEN_EXCHANGE_JWK_KEY_SET_URL: https://auth.dimo.zone/keys
   TOKEN_EXCHANGE_ISSUER_URL: https://auth.dimo.zone

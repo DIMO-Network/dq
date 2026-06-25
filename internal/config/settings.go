@@ -22,11 +22,10 @@ type Settings struct {
 	// callers until they send a token); set true once callers are updated. Pair
 	// with the NetworkPolicy — the fetch RPCs return any subject's raw data.
 	FetchGRPCRequireJWT bool `yaml:"FETCH_GRPC_REQUIRE_JWT"`
-	// ParquetBucket is the S3 bucket holding externalized cloudevent payloads
-	// (large blobs din writes); dq presigns/downloads from it. (Named PARQUET_BUCKET
-	// for historical reasons — it holds blobs, not parquet; the lake parquet lives at
-	// DUCKLAKE_DATA_PATH.)
-	ParquetBucket        string `yaml:"PARQUET_BUCKET"`
+	// BlobBucket is the S3 bucket holding externalized cloudevent payloads (large
+	// blobs din writes); dq presigns/downloads from it. Same bucket as din's
+	// BLOB_BUCKET (the lake parquet lives separately at DUCKLAKE_DATA_PATH).
+	BlobBucket           string `yaml:"BLOB_BUCKET"`
 	S3AWSRegion          string `yaml:"S3_AWS_REGION"`
 	S3AWSAccessKeyID     string `yaml:"S3_AWS_ACCESS_KEY_ID"`
 	S3AWSSecretAccessKey string `yaml:"S3_AWS_SECRET_ACCESS_KEY"`

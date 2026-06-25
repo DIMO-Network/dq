@@ -35,7 +35,6 @@ func (emptyEventService) ListIndexesAdvanced(context.Context, int, *grpc.Advance
 func (emptyEventService) GetCloudEventTypeSummariesAdvanced(context.Context, *grpc.AdvancedSearchOptions) ([]eventrepo.CloudEventTypeSummary, error) {
 	return nil, nil
 }
-func (emptyEventService) BatchesAllIndexes() bool { return false }
 func (emptyEventService) GetCloudEventFromIndex(context.Context, *cloudevent.CloudEvent[eventrepo.ObjectInfo], string) (cloudevent.RawEvent, error) {
 	return cloudevent.RawEvent{}, sql.ErrNoRows
 }
@@ -48,7 +47,7 @@ func (emptyEventService) PresignBlobURL(context.Context, string) (string, error)
 // index key containing a path-traversal sequence is rejected before it is
 // dereferenced (CHD-22 defense-in-depth).
 func TestListCloudEventsFromIndex_RejectsTraversalKey(t *testing.T) {
-	s := NewServer([]string{"bucket"}, emptyEventService{})
+	s := NewServer(emptyEventService{})
 	_, err := s.ListCloudEventsFromIndex(context.Background(), &grpc.ListCloudEventsFromKeysRequest{
 		Indexes: []*grpc.CloudEventIndex{
 			{Data: &grpc.ObjectInfo{Key: "cloudevent/../../etc/secret"}},
@@ -62,7 +61,7 @@ func TestListCloudEventsFromIndex_RejectsTraversalKey(t *testing.T) {
 // oversized index list would fan out into that many fetches from one call
 // (SR-4). It must be rejected, not processed.
 func TestListCloudEventsFromIndex_RejectsTooManyKeys(t *testing.T) {
-	s := NewServer(nil, emptyEventService{})
+	s := NewServer(emptyEventService{})
 	idxs := make([]*grpc.CloudEventIndex, maxIndexKeysPerRequest+1)
 	for i := range idxs {
 		idxs[i] = &grpc.CloudEventIndex{Data: &grpc.ObjectInfo{Key: "cloudevent/blobs/x"}}
@@ -77,7 +76,7 @@ func TestListCloudEventsFromIndex_RejectsTooManyKeys(t *testing.T) {
 // returns an empty slice with no error, which silently broke clients expecting
 // NotFound.
 func TestListIndexes_EmptyReturnsNotFound(t *testing.T) {
-	s := NewServer(nil, emptyEventService{})
+	s := NewServer(emptyEventService{})
 	_, err := s.ListIndexes(context.Background(), &grpc.ListIndexesRequest{
 		Options: &grpc.SearchOptions{},
 	})

@@ -25,14 +25,12 @@ const maxIndexKeysPerRequest = 1000
 type Server struct {
 	eventService eventrepo.EventService
 	grpc.UnimplementedFetchServiceServer
-	buckets []string
 }
 
 // NewServer creates a new Server instance.
-func NewServer(buckets []string, eventService eventrepo.EventService) *Server {
+func NewServer(eventService eventrepo.EventService) *Server {
 	return &Server{
 		eventService: eventService,
-		buckets:      buckets,
 	}
 }
 
@@ -126,7 +124,7 @@ func (s *Server) ListCloudEvents(ctx context.Context, req *grpc.ListCloudEventsR
 	if len(metaList) == 0 {
 		return nil, status.Error(codes.NotFound, "no index keys found") // CHD-22
 	}
-	data, err := fetch.ListCloudEventsFromIndexes(ctx, s.eventService, metaList, s.buckets)
+	data, err := fetch.ListCloudEventsFromIndexes(ctx, s.eventService, metaList)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to get objects: %v", err)
 	}
@@ -155,7 +153,7 @@ func (s *Server) GetLatestCloudEvent(ctx context.Context, req *grpc.GetLatestClo
 		}
 		return nil, status.Errorf(codes.Internal, "failed to get latest index: %v", err)
 	}
-	latestData, err := fetch.GetCloudEventFromIndex(ctx, s.eventService, &metadata, s.buckets)
+	latestData, err := fetch.GetCloudEventFromIndex(ctx, s.eventService, &metadata)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to get latest object: %v", err)
 	}
@@ -180,7 +178,7 @@ func (s *Server) ListCloudEventsFromIndex(ctx context.Context, req *grpc.ListClo
 			},
 		}
 	}
-	data, err := fetch.ListCloudEventsFromIndexes(ctx, s.eventService, events, s.buckets)
+	data, err := fetch.ListCloudEventsFromIndexes(ctx, s.eventService, events)
 	if err != nil {
 		notFoundErr := &types.NoSuchKey{}
 		if errors.As(err, &notFoundErr) {

@@ -62,7 +62,7 @@ func (r *queryResolver) LatestCloudEvent(ctx context.Context, subject string, fi
 	if !dataFieldsRequested(ctx) {
 		return &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}}, nil
 	}
-	ce, err := fetch.GetCloudEventFromIndex(ctx, r.EventService, &idx, r.Buckets)
+	ce, err := fetch.GetCloudEventFromIndex(ctx, r.EventService, &idx)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func (r *queryResolver) CloudEvents(ctx context.Context, subject string, limit *
 	}
 
 	if len(nonBlobIdxs) > 0 {
-		events, err := fetch.ListCloudEventsFromIndexes(ctx, r.EventService, nonBlobIdxs, r.Buckets)
+		events, err := fetch.ListCloudEventsFromIndexes(ctx, r.EventService, nonBlobIdxs)
 		if err != nil {
 			return nil, err
 		}

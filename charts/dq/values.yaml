@@ -57,7 +57,7 @@ env:
   # Externalized cloudevent payloads (large blobs) — dq presigns/downloads from
   # here. MUST equal din's BLOB_BUCKET (dimo-blob-storage-*), where din writes
   # them; the lake-data bucket (dimo-storage-*) holds parquet, not blobs.
-  PARQUET_BUCKET: dimo-blob-storage-dev
+  BLOB_BUCKET: dimo-blob-storage-dev
   # JWT auth (token-exchange) + identity-api for the cross-subject link check.
   TOKEN_EXCHANGE_JWK_KEY_SET_URL: https://auth.dev.dimo.zone/keys
   TOKEN_EXCHANGE_ISSUER_URL: https://auth.dev.dimo.zone

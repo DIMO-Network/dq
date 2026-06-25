@@ -24,12 +24,6 @@ type EventService interface {
 	GetCloudEventFromIndex(ctx context.Context, index *cloudevent.CloudEvent[ObjectInfo], bucketName string) (cloudevent.RawEvent, error)
 	ListCloudEventsFromIndexes(ctx context.Context, indexes []cloudevent.CloudEvent[ObjectInfo], bucketName string) ([]cloudevent.RawEvent, error)
 
-	// BatchesAllIndexes reports whether ListCloudEventsFromIndexes resolves ANY
-	// index efficiently in one batched call (the lake backend groups by subject →
-	// one query per subject). When true, internal/fetch routes every index through
-	// it instead of the per-key fallback.
-	BatchesAllIndexes() bool
-
 	// Blob payloads served as presigned URLs.
 	PresignBlobURL(ctx context.Context, key string) (string, error)
 }

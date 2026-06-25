@@ -43,11 +43,10 @@ type App struct {
 	// readyCheck probes backend health for the /ready endpoint; nil = always
 	// ready (e.g. a backend with no health probe).
 	readyCheck func(context.Context) error
-	// eventService and buckets are the query backend New already built; the gRPC
-	// server reuses them instead of opening a second duck.Service + S3 client in
-	// the same process (SR-9). Owned by this App — Cleanup closes them.
+	// eventService is the query backend New already built; the gRPC server reuses
+	// it instead of opening a second duck.Service + S3 client in the same process
+	// (SR-9). Owned by this App — Cleanup closes it.
 	eventService eventrepo.EventService
-	buckets      []string
 }
 
 // New creates a new application.
@@ -95,10 +94,6 @@ func New(settings config.Settings) (*App, error) {
 		return nil, fmt.Errorf("couldn't create event service: %w", err)
 	}
 
-	// The lake backend resolves blobs from its own (ParquetBucket) config and
-	// ignores this list; it survives only for the legacy per-key JSON fallback.
-	buckets := []string{settings.ParquetBucket}
-
 	var identityClient identity.Client
 	if settings.IdentityAPIURL != "" {
 		identityClient = identity.New(settings.IdentityAPIURL)
@@ -107,7 +102,6 @@ func New(settings config.Settings) (*App, error) {
 	resolver := &graph.Resolver{
 		SignalRepo:     signalRepo,
 		EventService:   eventService,
-		Buckets:        buckets,
 		IdentityClient: identityClient,
 	}
 
@@ -178,7 +172,6 @@ func New(settings config.Settings) (*App, error) {
 		MCPHandler:   authChain(mcpHandler),
 		readyCheck:   readyCheck,
 		eventService: eventService,
-		buckets:      buckets,
 		cleanup:      cleanup,
 	}, nil
 }
@@ -199,7 +192,7 @@ func noOp(ctx context.Context, obj interface{}, next graphql.Resolver) (res inte
 // in the same process (SR-9). The App owns that backend, so there is no separate
 // cleanup to return.
 func CreateGRPCServer(logger *zerolog.Logger, application *App, settings config.Settings) (*grpc.Server, error) {
-	rpcServer := rpc.NewServer(application.buckets, application.eventService)
+	rpcServer := rpc.NewServer(application.eventService)
 
 	grpcPanic := metrics.GRPCPanicker{Logger: logger}
 	interceptors := []grpc.UnaryServerInterceptor{

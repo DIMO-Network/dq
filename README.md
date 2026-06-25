@@ -53,7 +53,7 @@ The queries `indexes` and `latestIndex` have been removed. If a client does not 
 
 The service reads from a DuckLake catalog: decoded signals/events in `lake.signals`/`lake.events` and raw cloudevents in `lake.raw_events`, written by din and the materializer. DuckLake is the only backend — there is no query-backend switch.
 
-Configure the catalog with `DUCKLAKE_CATALOG_DSN` (a Postgres DSN in prod for concurrent writers, or a local catalog-file path for single-node/tests) and `DUCKLAKE_DATA_PATH` (where parquet data files live — an `s3://` prefix in prod, a local directory in tests). `PARQUET_BUCKET` is the bucket the fetch path presigns/downloads externalized cloudevent payloads from.
+Configure the catalog with `DUCKLAKE_CATALOG_DSN` (a Postgres DSN in prod for concurrent writers, or a local catalog-file path for single-node/tests) and `DUCKLAKE_DATA_PATH` (where parquet data files live — an `s3://` prefix in prod, a local directory in tests). `BLOB_BUCKET` is the bucket the fetch path presigns/downloads externalized cloudevent payloads from.
 
 ### Single-node quickstart
 
@@ -62,7 +62,7 @@ Run against a local DuckLake catalog file; the materializer decodes din's raw_ev
 ```bash
 DUCKLAKE_CATALOG_DSN=/data/catalog.ducklake \
 DUCKLAKE_DATA_PATH=/data/lake \
-PARQUET_BUCKET=/data/pipeline \
+BLOB_BUCKET=/data/pipeline \
 MATERIALIZER_ENABLED=true \
 go run ./cmd/dq
 ```

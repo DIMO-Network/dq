@@ -18,6 +18,5 @@ type ClaimsContextKey struct{}
 type Resolver struct {
 	SignalRepo     *repositories.Repository
 	EventService   eventrepo.EventService
-	Buckets        []string
 	IdentityClient identity.Client
 }

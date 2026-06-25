@@ -28,7 +28,7 @@ func appLogger() zerolog.Logger {
 // duckConfigFromSettings maps the app settings into the DuckDB query-engine
 // config, reusing the shared S3/bucket settings.
 func duckConfigFromSettings(settings *config.Settings) duck.Config {
-	bucket := settings.ParquetBucket
+	bucket := settings.BlobBucket
 	return duck.Config{
 		DuckDBMemoryLimit:    settings.DuckDBMemoryLimit,
 		DuckDBThreads:        settings.DuckDBThreads,
@@ -89,7 +89,7 @@ func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (reposito
 // s3Client must be non-nil.
 func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client *s3.Client, _ zerolog.Logger) (eventrepo.EventService, error) {
 	presigner := s3.NewPresignClient(s3Client)
-	return duck.NewLakeEventService(duckSvc, s3Client, presigner, settings.ParquetBucket), nil
+	return duck.NewLakeEventService(duckSvc, s3Client, presigner, settings.BlobBucket), nil
 }
 
 func closeDuck(duckSvc *duck.Service, logger zerolog.Logger) func() {
@@ -161,9 +161,9 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 		return nil, fmt.Errorf("creating DuckLake materializer: %w", err)
 	}
 	// Resolve externalized blob payloads from the same bucket the fetch path
-	// presigns/downloads (settings.ParquetBucket): din writes payloads larger
+	// presigns/downloads (settings.BlobBucket): din writes payloads larger
 	// than the inline threshold to a blob and leaves only the key on the row.
-	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.ParquetBucket).
+	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.BlobBucket).
 		WithTempDir(settings.DuckDBTempDirectory) // stage batch parquet on the sized spill volume, not the root fs
 
 	var decodedRetention time.Duration
