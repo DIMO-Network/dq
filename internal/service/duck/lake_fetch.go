@@ -208,12 +208,16 @@ func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Contex
 	}
 	// Build base WHERE with unqualified columns for the aggregate query.
 	where, args := whereClauseQ(f, "")
-	// Exclude tombstones and voided events in the aggregate.
-	q := fmt.Sprintf(`SELECT type, count(*) AS cnt, min(time) AS first_seen, max(time) AS last_seen`+
-		` FROM %s`+
-		` WHERE %s%s`+
-		` GROUP BY type ORDER BY type`,
+	// Dedup redelivered duplicates (the same second-precision key the fetch path uses)
+	// BEFORE counting, so this count matches what cloudEvents returns — din's writer is
+	// a blind append, so duplicates can persist past the NATS DuplicateWindow on lag,
+	// failover, or replay, and a bare count(*) would inflate the per-type total. Excludes
+	// tombstones and voided events.
+	deduped := fmt.Sprintf(`SELECT type, time FROM %s WHERE %s%s`+
+		` QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, date_trunc('second', time), type, source, id ORDER BY time) = 1`,
 		lakeRawEvents, where, voidingClause(lakeRawEvents))
+	q := fmt.Sprintf(`SELECT type, count(*) AS cnt, min(time) AS first_seen, max(time) AS last_seen`+
+		` FROM (%s) GROUP BY type ORDER BY type`, deduped)
 
 	rows, err := l.svc.DB().QueryContext(ctx, q, args...)
 	if err != nil {
