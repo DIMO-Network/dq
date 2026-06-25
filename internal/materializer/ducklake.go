@@ -598,6 +598,8 @@ func (m *DuckLakeMaterializer) resolveBlob(ctx context.Context, ev *cloudevent.R
 // panic here would propagate to RunOnce and crash-loop the single-writer materializer
 // on that row forever (the cursor never advances). Contain it — keep the row with its
 // scanned columns, skip the non-column reconstruction, count it via errorsTotal.
+// TWIN: internal/service/duck.restoreNonColumnFieldsSafe (the fetch read path) has the
+// same body but its own counter (dq_fetch_malformed_row_total) — mirror any change here.
 func restoreNonColumnFieldsSafe(hdr *cloudevent.CloudEventHeader) {
 	defer func() {
 		if recover() != nil {
@@ -805,7 +807,7 @@ func (m *DuckLakeMaterializer) refreshRollup(ctx context.Context, tx *sql.Tx, si
 	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest "+where, args...); err != nil {
 		return fmt.Errorf("rollup delete: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest "+rollupSelectSQL(where), args...); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest"+signalsLatestColumns+rollupSelectSQL(where), args...); err != nil {
 		return fmt.Errorf("rollup insert: %w", err)
 	}
 	rollupRefreshSeconds.Set(time.Since(start).Seconds())
@@ -856,6 +858,14 @@ func distinctSubjects(signals []SignalRow) []string {
 // no-source-filter case the rollup serves. The QUALIFY dedup matches the read
 // path (CHD-2). refreshRollup passes a subject-IN + bucket clause for the per-batch
 // recompute; RecomputeRollup passes "" for a full rebuild.
+// signalsLatestColumns names lake.signals_latest's columns in CREATE order so the
+// rollup INSERTs below bind by name, not position. Without it, INSERT INTO … SELECT
+// maps by position and rollupSelectSQL's "AS …" aliases are decorative — a reordered
+// or appended SELECT column would silently shift every value one column over (data
+// corruption, not an error). Named columns make that drift fail loud instead.
+const signalsLatestColumns = ` (subject, subject_bucket, name, "timestamp", value_number, ` +
+	`value_string, loc_lat, loc_lon, loc_hdop, loc_heading, count, first_seen, last_seen) `
+
 func rollupSelectSQL(whereClause string) string {
 	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
 	return fmt.Sprintf(`SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
@@ -890,7 +900,7 @@ func (m *DuckLakeMaterializer) RecomputeRollup(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest"); err != nil {
 		return fmt.Errorf("rollup rebuild delete: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest "+rollupSelectSQL("")); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest"+signalsLatestColumns+rollupSelectSQL("")); err != nil {
 		return fmt.Errorf("rollup rebuild insert: %w", err)
 	}
 	return tx.Commit()

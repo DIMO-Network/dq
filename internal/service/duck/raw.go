@@ -177,6 +177,8 @@ type rowScanner interface {
 // (app.go) would catch an escaped panic, but that fails the entire request. din
 // validates Tags as a typed []string at ingest, so this is defense-in-depth at the
 // din→dq boundary; the counter makes a poisoned row alertable rather than silent.
+// TWIN: internal/materializer.restoreNonColumnFieldsSafe (the decode path) has the same
+// body but its own counter (errorsTotal) — mirror any change here there.
 func restoreNonColumnFieldsSafe(hdr *cloudevent.CloudEventHeader) {
 	defer func() {
 		if recover() != nil {
