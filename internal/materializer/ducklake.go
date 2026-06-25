@@ -383,9 +383,13 @@ func (m *DuckLakeMaterializer) reportProgressNow(ctx context.Context, snapshotID
 	if snapshotID == m.lastReportedSnapshot {
 		return
 	}
-	m.reportProgress(ctx, snapshotID)
+	// Stamp the throttle before the attempt so a failed write retries at the
+	// interval (not every batch); advance the reported cursor only on success so a
+	// transient failure is retried for the same snapshot, not skipped.
 	m.lastProgressReport = time.Now()
-	m.lastReportedSnapshot = snapshotID
+	if m.reportProgress(ctx, snapshotID) {
+		m.lastReportedSnapshot = snapshotID
+	}
 }
 
 // maybeReportProgress reports at most once per progressReportInterval on the hot
@@ -398,22 +402,26 @@ func (m *DuckLakeMaterializer) maybeReportProgress(ctx context.Context, snapshot
 	if !m.lastProgressReport.IsZero() && time.Since(m.lastProgressReport) < progressReportInterval {
 		return
 	}
-	m.reportProgress(ctx, snapshotID)
 	m.lastProgressReport = time.Now()
-	m.lastReportedSnapshot = snapshotID
+	if m.reportProgress(ctx, snapshotID) {
+		m.lastReportedSnapshot = snapshotID
+	}
 }
 
 // reportProgress upserts dq's processed snapshot id into din's consumer-floor
 // table so the maintainer never expires snapshots dq hasn't read.
-func (m *DuckLakeMaterializer) reportProgress(ctx context.Context, snapshotID int64) {
-	// Best-effort: the batch is already durable and the floor is conservative, so a
-	// failure here only holds expiry back slightly. But count + log it so a persistent
-	// failure is visible on the dq side immediately, not only via din's DinConsumerStale
-	// ~1h later (which misattributes the cause).
+// reportProgress writes the floor and reports whether it succeeded. Best-effort: the
+// batch is already durable and the floor is conservative, so a failure only holds expiry
+// back briefly — the caller leaves the reported cursor unadvanced so the next pass
+// retries. Count + log it so a persistent failure is visible on the dq side immediately,
+// not only via din's DinConsumerStale ~1h later (which misattributes the cause).
+func (m *DuckLakeMaterializer) reportProgress(ctx context.Context, snapshotID int64) bool {
 	if err := m.tryReportProgress(ctx, snapshotID); err != nil {
 		progressReportErrorsTotal.Inc()
-		m.log.Warn().Err(err).Msg("consumer progress report failed; expiry floor not advanced")
+		m.log.Warn().Err(err).Msg("consumer progress report failed; will retry next pass")
+		return false
 	}
+	return true
 }
 
 func (m *DuckLakeMaterializer) tryReportProgress(ctx context.Context, snapshotID int64) error {
