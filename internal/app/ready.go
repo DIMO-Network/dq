@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/service/duck"
@@ -11,6 +12,57 @@ import (
 // readyProbeTimeout bounds the catalog readiness query so a wedged catalog
 // surfaces as NotReady rather than hanging the probe.
 const readyProbeTimeout = 2 * time.Second
+
+// readyCacheTTL collapses a burst of probes into one backing catalog query so the
+// readiness check doesn't pile demand onto the shared query pool.
+const readyCacheTTL = 3 * time.Second
+
+// readyGraceWindow keeps a pod Ready through a TRANSIENT readiness failure once the
+// backend has succeeded at least once — a probe that times out because the connection
+// pool is saturated by query load (not a wedged catalog) is load, not ill health.
+// Without it, query load alone flips a healthy pod to NotReady; Kubernetes sheds its
+// traffic to siblings, they saturate, and the failure cascades across the fleet. Only a
+// SUSTAINED failure (no success within the window) reports NotReady; a cold pod that has
+// never been ready gets no grace (correctly NotReady until first success).
+const readyGraceWindow = 20 * time.Second
+
+// loadTolerantReadiness wraps check so a burst of probes reuses one result within ttl,
+// and a transient failure after a recent success stays Ready for graceWindow — breaking
+// the saturated-pool → NotReady → load-shed → cascade loop. Sustained failure still fails.
+func loadTolerantReadiness(check func(context.Context) error, ttl, graceWindow time.Duration) func(context.Context) error {
+	var (
+		mu      sync.Mutex
+		lastRun time.Time
+		lastErr error
+		lastOK  time.Time
+	)
+	verdict := func(err error, ok time.Time) error {
+		if err == nil || (!ok.IsZero() && time.Since(ok) < graceWindow) {
+			return nil
+		}
+		return err
+	}
+	return func(ctx context.Context) error {
+		mu.Lock()
+		if !lastRun.IsZero() && time.Since(lastRun) < ttl {
+			err, ok := lastErr, lastOK
+			mu.Unlock()
+			return verdict(err, ok)
+		}
+		mu.Unlock()
+
+		err := check(ctx)
+
+		mu.Lock()
+		lastRun, lastErr = time.Now(), err
+		if err == nil {
+			lastOK = lastRun
+		}
+		ok := lastOK
+		mu.Unlock()
+		return verdict(err, ok)
+	}
+}
 
 // ReadyHandler returns an HTTP handler reporting 200 when ready returns nil and
 // 503 otherwise. Unlike a static liveness 200, this lets a cold or

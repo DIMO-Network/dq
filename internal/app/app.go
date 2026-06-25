@@ -167,7 +167,8 @@ func New(settings config.Settings) (*App, error) {
 
 	var readyCheck func(context.Context) error
 	if duckSvc != nil {
-		readyCheck = duckReadiness(duckSvc)
+		// Wrap so query load can't flip a healthy pod to NotReady and cascade (CHD review).
+		readyCheck = loadTolerantReadiness(duckReadiness(duckSvc), readyCacheTTL, readyGraceWindow)
 	}
 
 	ok = true // App now owns backendCleanup + stopMaterializer; disarm the deferred cleanup
