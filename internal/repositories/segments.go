@@ -322,6 +322,13 @@ func buildSegmentRanges(segments []*model.Segment, to time.Time, extendSummaryEn
 		summaryTo := segTo
 		if extendSummaryEnd {
 			summaryTo = segTo.Add(summaryEndBuffer)
+			// Don't let the +buffer overrun the next segment's start. segmentIndexCaseSQL's
+			// CASE returns the FIRST matching range, so an overlap row would be assigned to
+			// this segment instead of the next — corrupting the next segment's FIRST values
+			// and start location. Segments are sorted ascending by start (mergeTimeRanges).
+			if i+1 < len(segments) && segments[i+1].Start != nil && summaryTo.After(segments[i+1].Start.Timestamp) {
+				summaryTo = segments[i+1].Start.Timestamp
+			}
 		}
 		aggRanges[i] = qtypes.TimeRange{From: seg.Start.Timestamp, To: summaryTo}
 		if i == 0 {
