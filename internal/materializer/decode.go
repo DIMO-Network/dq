@@ -193,7 +193,9 @@ func pruneFutureAndDuplicateSignals(signals []vss.Signal) ([]vss.Signal, error) 
 		}
 	}
 
-	var pruned []vss.Signal
+	// Filter in place: signals is already a cap==len slice from SignalConvert, so reuse
+	// its backing array instead of allocating a second []vss.Signal per decoded event.
+	pruned := signals[:0]
 	for _, signal := range signals {
 		if signal.Data.Name != pruneSignalName {
 			pruned = append(pruned, signal)

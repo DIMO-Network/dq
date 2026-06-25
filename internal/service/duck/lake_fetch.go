@@ -124,7 +124,10 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 	}
 	defer rows.Close() //nolint:errcheck
 
-	var events []cloudevent.StoredEvent
+	// Pre-size to the row cap (LIMIT bounds the result), bounded by maxLakeQueryLimit so
+	// a large limit can't amplify into a huge allocation. Avoids the grow-from-nil
+	// realloc+copy churn on the main event-fetch path.
+	events := make([]cloudevent.StoredEvent, 0, min(limit, maxLakeQueryLimit))
 	for rows.Next() {
 		ev, err := scanStoredEvent(rows)
 		if err != nil {
