@@ -9,6 +9,7 @@ import (
 
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/fetch"
+	"github.com/DIMO-Network/dq/internal/identity"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -23,14 +24,17 @@ const maxIndexKeysPerRequest = 1000
 
 // Server is used to implement grpc.FetchServiceServer.
 type Server struct {
-	eventService eventrepo.EventService
+	eventService   eventrepo.EventService
+	identityClient identity.Client // may be nil; cross-subject reads then always deny
 	grpc.UnimplementedFetchServiceServer
 }
 
-// NewServer creates a new Server instance.
-func NewServer(eventService eventrepo.EventService) *Server {
+// NewServer creates a new Server instance. identityClient (may be nil) is used to
+// verify cross-subject device links when authorizing a fetch.
+func NewServer(eventService eventrepo.EventService, identityClient identity.Client) *Server {
 	return &Server{
-		eventService: eventService,
+		eventService:   eventService,
+		identityClient: identityClient,
 	}
 }
 
@@ -49,8 +53,14 @@ func (s *Server) GetLatestIndex(ctx context.Context, req *grpc.GetLatestIndexReq
 	var err error
 
 	if req.GetAdvancedOptions() != nil {
+		if err = s.authorizeAdvancedOpts(ctx, req.GetAdvancedOptions()); err != nil {
+			return nil, err
+		}
 		index, err = s.eventService.GetLatestIndexAdvanced(ctx, req.GetAdvancedOptions())
 	} else {
+		if err = s.authorizeOpts(ctx, req.GetOptions()); err != nil {
+			return nil, err
+		}
 		index, err = s.eventService.GetLatestIndex(ctx, req.GetOptions())
 	}
 
@@ -76,8 +86,14 @@ func (s *Server) ListIndexes(ctx context.Context, req *grpc.ListIndexesRequest) 
 	var err error
 
 	if req.GetAdvancedOptions() != nil {
+		if err = s.authorizeAdvancedOpts(ctx, req.GetAdvancedOptions()); err != nil {
+			return nil, err
+		}
 		indexObjs, err = s.eventService.ListIndexesAdvanced(ctx, int(req.GetLimit()), req.GetAdvancedOptions())
 	} else {
+		if err = s.authorizeOpts(ctx, req.GetOptions()); err != nil {
+			return nil, err
+		}
 		indexObjs, err = s.eventService.ListIndexes(ctx, int(req.GetLimit()), req.GetOptions())
 	}
 
@@ -110,8 +126,14 @@ func (s *Server) ListCloudEvents(ctx context.Context, req *grpc.ListCloudEventsR
 	var err error
 
 	if req.GetAdvancedOptions() != nil {
+		if err = s.authorizeAdvancedOpts(ctx, req.GetAdvancedOptions()); err != nil {
+			return nil, err
+		}
 		metaList, err = s.eventService.ListIndexesAdvanced(ctx, int(req.GetLimit()), req.GetAdvancedOptions())
 	} else {
+		if err = s.authorizeOpts(ctx, req.GetOptions()); err != nil {
+			return nil, err
+		}
 		metaList, err = s.eventService.ListIndexes(ctx, int(req.GetLimit()), req.GetOptions())
 	}
 
@@ -142,8 +164,14 @@ func (s *Server) GetLatestCloudEvent(ctx context.Context, req *grpc.GetLatestClo
 	var err error
 
 	if req.GetAdvancedOptions() != nil {
+		if err = s.authorizeAdvancedOpts(ctx, req.GetAdvancedOptions()); err != nil {
+			return nil, err
+		}
 		metadata, err = s.eventService.GetLatestIndexAdvanced(ctx, req.GetAdvancedOptions())
 	} else {
+		if err = s.authorizeOpts(ctx, req.GetOptions()); err != nil {
+			return nil, err
+		}
 		metadata, err = s.eventService.GetLatestIndex(ctx, req.GetOptions())
 	}
 
@@ -170,6 +198,11 @@ func (s *Server) ListCloudEventsFromIndex(ctx context.Context, req *grpc.ListClo
 	for i, index := range protoIndexList {
 		if !validObjectKey(index.GetData().GetKey()) {
 			return nil, status.Error(codes.InvalidArgument, "invalid index key")
+		}
+		// The lake resolves each index by (subject, id); authorize the caller-supplied
+		// subject so a crafted index can't read another vehicle's payload.
+		if _, err := s.authorizeSubject(ctx, index.GetHeader().GetSubject()); err != nil {
+			return nil, err
 		}
 		events[i] = cloudevent.CloudEvent[eventrepo.ObjectInfo]{
 			CloudEventHeader: index.GetHeader().AsCloudEventHeader(),

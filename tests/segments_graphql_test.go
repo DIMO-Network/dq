@@ -627,8 +627,12 @@ func TestSegmentsGraphQL_LimitAndAfter(t *testing.T) {
 		assert.InDelta(t, 55.0, resp.Segments[1].Signals[0].Value, 1e-9)
 	})
 
-	t.Run("after advances from", func(t *testing.T) {
-		fake := &fakeSegments{}
+	t.Run("after filters by cursor without advancing from", func(t *testing.T) {
+		fake := &fakeSegments{canned: []*model.Segment{
+			cannedComplete(driveStart, driveEnd, driveLocStart, driveLocEnd, false),
+			cannedComplete(shortStart, shortEnd, nil, nil, false),
+			cannedComplete(idleStart, idleEnd, nil, nil, false),
+		}}
 		gql := newSegmentsGraphQLClient(t, svc, fake)
 
 		var resp segmentsResp
@@ -640,11 +644,18 @@ func TestSegmentsGraphQL_LimitAndAfter(t *testing.T) {
 			client.Var("after", driveStart.Format(time.RFC3339)),
 		)
 
+		// `from` must NOT advance. Advancing it to after+1ns re-clips a started-before /
+		// ongoing segment past the cursor on every page (the infinite-loop bug). Detection
+		// runs from the original queryFrom; the cursor filters the *results* instead.
 		require.Len(t, fake.calls, 1)
-		wantFrom := driveStart.Add(time.Nanosecond)
-		assert.True(t, fake.calls[0].from.Equal(wantFrom),
-			"after cursor must advance from to after+1ns: got %v want %v", fake.calls[0].from, wantFrom)
+		assert.True(t, fake.calls[0].from.Equal(queryFrom),
+			"from must stay at queryFrom, not advance to after+1ns: got %v", fake.calls[0].from)
 		assert.True(t, fake.calls[0].to.Equal(queryTo))
+
+		// after=driveStart retires the drive segment (start == cursor); only later survive.
+		require.Len(t, resp.Segments, 2, "after=driveStart drops drive, keeps short+idle")
+		assert.True(t, parseGQLTime(t, resp.Segments[0].Start.Timestamp).Equal(shortStart))
+		assert.True(t, parseGQLTime(t, resp.Segments[1].Start.Timestamp).Equal(idleStart))
 	})
 }
 
