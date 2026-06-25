@@ -313,6 +313,16 @@ func (r *Runner) convertJobs(ctx context.Context, dec *decodedBatch, jobs []*clo
 		})
 	}
 	_ = conv.Wait() // convert funcs never return error (failures are counted)
+	// Pre-size to the exact decoded totals: the per-worker counts are all known here, so
+	// the merge below appends into right-sized slices instead of regrowing-and-copying
+	// dec.signals/dec.events across this hot per-batch loop.
+	var totalSignals, totalEvents int
+	for i := range results {
+		totalSignals += len(results[i].signals)
+		totalEvents += len(results[i].events)
+	}
+	dec.signals = make([]SignalRow, 0, totalSignals)
+	dec.events = make([]EventRow, 0, totalEvents)
 	for i := range results {
 		dec.signals = append(dec.signals, results[i].signals...)
 		dec.signalCount += len(results[i].signals)
