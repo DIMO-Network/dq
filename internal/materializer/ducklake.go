@@ -251,9 +251,7 @@ func (m *DuckLakeMaterializer) processChunk(ctx context.Context, cur, head int64
 		to = cur + m.maxSnapshotSpan
 	}
 
-	tReadDelta := time.Now()
 	events, err := m.readDelta(ctx, cur, to)
-	PerfStats.addDur(&PerfStats.readDelta, time.Since(tReadDelta))
 	if err != nil {
 		// Any feed-read failure might mean din's maintenance expired the cursor
 		// range. Decide on retention (the oldest retained snapshot), not on the
@@ -268,10 +266,7 @@ func (m *DuckLakeMaterializer) processChunk(ctx context.Context, cur, head int64
 
 	if len(events) > 0 {
 		observeLakeLag(events) // decode lag = age of the oldest pending event
-		tDecode := time.Now()
 		decoded := dec.decodeEvents(ctx, events)
-		PerfStats.addDur(&PerfStats.decode, time.Since(tDecode))
-		PerfStats.addPass(int64(len(events)), int64(decoded.signalCount), int64(decoded.eventCount), int64(len(distinctSubjects(decoded.signals))))
 		if cerr := m.commit(ctx, decoded, cur, to); cerr != nil {
 			if errors.Is(cerr, errSnapshotMoved) {
 				return 0, cur, true, nil // another decoder won this range; retry next pass
@@ -678,43 +673,30 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 	defer func() { _ = tx.Rollback() }()
 
 	if len(dec.signals) > 0 {
-		tw := time.Now()
 		tmp, err := writeTempParquet(m.tempDir, writeSignalParquet, dec.signals)
-		PerfStats.addDur(&PerfStats.writeTmp, time.Since(tw))
 		if err != nil {
 			return err
 		}
 		cleanup = append(cleanup, tmp)
-		ta := time.Now()
-		_, aerr := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp))
-		PerfStats.addDur(&PerfStats.antiSig, time.Since(ta))
-		if aerr != nil {
-			return fmt.Errorf("insert signals: %w", aerr)
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp)); err != nil {
+			return fmt.Errorf("insert signals: %w", err)
 		}
 	}
 	if len(dec.events) > 0 {
-		tw := time.Now()
 		tmp, err := writeTempParquet(m.tempDir, writeEventParquet, dec.events)
-		PerfStats.addDur(&PerfStats.writeTmp, time.Since(tw))
 		if err != nil {
 			return err
 		}
 		cleanup = append(cleanup, tmp)
-		ta := time.Now()
-		_, aerr := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp))
-		PerfStats.addDur(&PerfStats.antiEvt, time.Since(ta))
-		if aerr != nil {
-			return fmt.Errorf("insert events: %w", aerr)
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp)); err != nil {
+			return fmt.Errorf("insert events: %w", err)
 		}
 	}
 
 	// Refresh the latest/summary rollup for the subjects this batch touched, in
 	// the same transaction so it advances atomically with the base rows (CHD-3).
 	if len(dec.signals) > 0 {
-		tr := time.Now()
-		err := m.refreshRollup(ctx, tx, dec.signals)
-		PerfStats.addDur(&PerfStats.rollup, time.Since(tr))
-		if err != nil {
+		if err := m.refreshRollup(ctx, tx, dec.signals); err != nil {
 			return err
 		}
 	}
@@ -733,14 +715,11 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		return errSnapshotMoved
 	}
 
-	tc := time.Now()
-	cerr := tx.Commit()
-	PerfStats.addDur(&PerfStats.commitTx, time.Since(tc))
-	if cerr != nil {
-		if isCommitConflict(cerr) {
+	if err := tx.Commit(); err != nil {
+		if isCommitConflict(err) {
 			return errSnapshotMoved
 		}
-		return fmt.Errorf("commit: %w", cerr)
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
@@ -803,6 +782,20 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 		}
 		n, _ := res.RowsAffected()
 		total += n
+	}
+	// Drop rollup rows whose base signals were ALL pruned away. signals_latest is only
+	// recomputed for subjects in a live batch (refreshRollup), so a (subject,name) that
+	// stopped reporting long enough ago to be fully pruned is never cleaned up — and the
+	// no-source latest/summary/availableSignals reads off the rollup (lake_rollup.go) would
+	// keep serving a phantom "latest" + count for data that no longer exists in lake.signals.
+	// The base table is PARTITIONED BY subject_bucket, so the per-row NOT EXISTS lookup is
+	// partition-pruned. (A surviving signal's count/first_seen can still reference pruned
+	// history until its next batch refreshes the rollup — a smaller, self-healing residual.)
+	if _, err := m.db.ExecContext(ctx,
+		`DELETE FROM lake.signals_latest sl WHERE NOT EXISTS (
+			SELECT 1 FROM lake.signals s
+			WHERE s.subject_bucket = sl.subject_bucket AND s.subject = sl.subject AND s.name = sl.name)`); err != nil {
+		return total, fmt.Errorf("pruning orphaned rollup rows: %w", err)
 	}
 	return total, nil
 }
