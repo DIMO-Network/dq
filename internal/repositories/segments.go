@@ -141,7 +141,13 @@ func (r *Repository) gapFillLocation(ctx context.Context, subject string, loc *m
 		return loc
 	}
 	if las, ok := r.query.(LocationAtSource); ok {
-		if got, err := las.LocationAt(ctx, subject, ts); err == nil && got != nil {
+		switch got, err := las.LocationAt(ctx, subject, ts); {
+		case err != nil:
+			// Best-effort: a transient lookup error must not fail the segment — fall back to
+			// (0,0) like the no-data case, but count it so a flaky location backend is visible
+			// rather than masquerading as genuinely location-less trips.
+			segmentGapFillErrorsTotal.Inc()
+		case got != nil:
 			return got
 		}
 	}
