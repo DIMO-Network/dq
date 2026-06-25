@@ -382,11 +382,27 @@ const consumerName = "dq"
 // ample and avoids a second catalog transaction on every committed batch.
 const progressReportInterval = 5 * time.Second
 
-// reportProgressNow publishes snapshotID immediately (and records it, resetting
-// the throttle). A no-op if that id was already the last reported. Used where the
+// progressKeepaliveInterval re-stamps the consumer floor's updated_at while dq is caught up
+// and idle. din's ConsumerFloor only counts consumers seen within LAKE_CONSUMER_STALENESS
+// (default 1h); without a keepalive the heartbeat is coupled to cursor MOVEMENT, so an idle
+// dq sitting at head stops refreshing updated_at and din presumes it dead and drops the
+// floor — defeating the floor's protection exactly when there's no new data. Must stay
+// comfortably under that staleness window.
+const progressKeepaliveInterval = 5 * time.Minute
+
+// reportProgressNow publishes snapshotID immediately (and records it, resetting the throttle).
+// When the id is unchanged (caught up / idle) it re-stamps updated_at on a keepalive cadence
+// rather than no-op'ing, so din's floor stays fresh while dq idles at head. Used where the
 // floor must be current: catch-up and expiry-reset.
 func (m *DuckLakeMaterializer) reportProgressNow(ctx context.Context, snapshotID int64) {
 	if snapshotID == m.lastReportedSnapshot {
+		// Same snapshot: re-stamp updated_at on the keepalive cadence (pure liveness; the
+		// cursor is unchanged) instead of no-op'ing, so din doesn't drop the floor while idle.
+		if !m.lastProgressReport.IsZero() && time.Since(m.lastProgressReport) < progressKeepaliveInterval {
+			return
+		}
+		m.lastProgressReport = time.Now()
+		m.reportProgress(ctx, snapshotID)
 		return
 	}
 	// Stamp the throttle before the attempt so a failed write retries at the
