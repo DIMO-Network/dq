@@ -85,6 +85,15 @@ func TestLakeEventService_PresignBlobURL(t *testing.T) {
 	_, err = failSvc.PresignBlobURL(ctx, blobKey)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sts denied")
+
+	// Guard (defense in depth): a key outside BlobKeyPrefix is refused without
+	// ever calling the presigner, so no caller can presign arbitrary objects
+	// (e.g. raw parquet) in the bucket.
+	guardPre := &fakePresigner{url: "https://should-not-be-reached"}
+	guardSvc := NewLakeEventService(svc, nil, guardPre, "blob-bucket")
+	_, err = guardSvc.PresignBlobURL(ctx, "lake/parquet/not-a-blob.parquet")
+	require.Error(t, err, "non-blob key must be rejected")
+	assert.Empty(t, guardPre.gotKey, "presigner must not be invoked for a non-blob key")
 }
 
 // TestLakeEventService_VoidingTombstoneBeforeEvent pins PR #4's tombstone

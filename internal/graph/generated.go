@@ -8262,7 +8262,7 @@ func (ec *executionContext) _CloudEvent_dataUrl(ctx context.Context, field graph
 			return obj.DataURL, nil
 		},
 		nil,
-		ec.marshalOString2string,
+		ec.marshalOString2ᚖstring,
 		true,
 		false,
 	)

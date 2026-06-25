@@ -368,6 +368,13 @@ func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, index
 
 // PresignBlobURL returns a short-lived presigned GET URL for the given S3 key.
 func (l *LakeEventService) PresignBlobURL(ctx context.Context, key string) (string, error) {
+	// Defense in depth: only ever presign keys under the blob prefix. Call sites
+	// already gate on this, but the method is on the exported EventService
+	// interface — without the guard a future caller could presign any object in
+	// the bucket (e.g. raw parquet) for an authenticated user.
+	if !strings.HasPrefix(key, eventrepo.BlobKeyPrefix) {
+		return "", fmt.Errorf("presign: key %q is not a blob ref (missing %q prefix)", key, eventrepo.BlobKeyPrefix)
+	}
 	if l.presigner == nil {
 		return "", fmt.Errorf("presigner not configured")
 	}

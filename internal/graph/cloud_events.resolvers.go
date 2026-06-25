@@ -57,7 +57,7 @@ func (r *queryResolver) LatestCloudEvent(ctx context.Context, subject string, fi
 		if err != nil {
 			return nil, err
 		}
-		return &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}, DataURL: url}, nil
+		return &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}, DataURL: &url}, nil
 	}
 	if !dataFieldsRequested(ctx) {
 		return &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}}, nil
@@ -95,7 +95,7 @@ func (r *queryResolver) CloudEvents(ctx context.Context, subject string, limit *
 			if err != nil {
 				return nil, err
 			}
-			out[i] = &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}, DataURL: url}
+			out[i] = &CloudEventWrapper{Raw: &cloudevent.RawEvent{CloudEventHeader: hdr}, DataURL: &url}
 		} else if fetchData {
 			nonBlobIdxs = append(nonBlobIdxs, idx)
 			nonBlobPos = append(nonBlobPos, i)
