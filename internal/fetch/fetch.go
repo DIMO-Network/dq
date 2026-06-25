@@ -54,9 +54,9 @@ func ListCloudEventsFromIndexes(ctx context.Context, evtSvc eventrepo.EventServi
 
 	group, errCtx := errgroup.WithContext(ctx)
 
-	// Parquet refs: delegate to eventrepo which shares S3ReaderAt and parquet
-	// Reader across rows from the same file. Bucket is embedded in the parquet
-	// ref or comes from config — the bucketName parameter is unused.
+	// Parquet refs: delegate to eventrepo, which reads the parquet file(s) and
+	// resolves the rows. Bucket is embedded in the parquet ref or comes from
+	// config — the bucketName parameter is unused.
 	if len(parquetIndexes) > 0 {
 		group.Go(func() error {
 			pqEvents, err := evtSvc.ListCloudEventsFromIndexes(errCtx, parquetIndexes, "")

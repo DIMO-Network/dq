@@ -76,35 +76,3 @@ func downloadS3Object(ctx context.Context, client ObjectGetter, bucket, key stri
 func DownloadObject(ctx context.Context, client ObjectGetter, bucket, key string) ([]byte, error) {
 	return downloadS3Object(ctx, client, bucket, key, maxObjectSize)
 }
-
-// S3ReaderAt implements io.ReaderAt by downloading the entire S3 object into
-// memory on creation. This avoids multiple round-trips (HeadObject + range
-// GETs) which is optimal for the expected file sizes (< 100 KB).
-type S3ReaderAt struct {
-	data []byte
-}
-
-// NewS3ReaderAt downloads the S3 object into memory and returns a ReaderAt.
-// Rejects objects larger than maxObjectSize.
-func NewS3ReaderAt(ctx context.Context, client ObjectGetter, bucket, key string) (*S3ReaderAt, error) {
-	data, err := downloadS3Object(ctx, client, bucket, key, maxObjectSize)
-	if err != nil {
-		return nil, err
-	}
-	return &S3ReaderAt{data: data}, nil
-}
-
-// ReadAt implements io.ReaderAt by reading from the in-memory buffer.
-func (r *S3ReaderAt) ReadAt(p []byte, off int64) (int, error) {
-	if off >= int64(len(r.data)) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.data[off:])
-	if n < len(p) {
-		return n, io.EOF
-	}
-	return n, nil
-}
-
-// Size returns the total size of the S3 object in bytes.
-func (r *S3ReaderAt) Size() int64 { return int64(len(r.data)) }
