@@ -1,17 +1,17 @@
-# Requires the cloudevent repo checked out as a sibling until it is released:
-# the build context must be the PARENT directory so the `replace => ../cloudevent`
-# in go.mod resolves. Build with `make docker` (which sets the parent context), or:
-#   docker build -f dq/Dockerfile <parent-dir>
+# Build context is the dq repo itself (cloudevent is a published public module now —
+# no sibling checkout, no replace). Build with `make docker`, or:
+#   docker build -f Dockerfile .
 FROM golang:1.26-bookworm AS build
 
 RUN useradd -u 10001 dimo
 
 WORKDIR /build
-COPY cloudevent/ ./cloudevent/
-COPY dq/ ./dq/
-WORKDIR /build/dq
+# Resolve modules first so the dep layer caches across source changes (cloudevent is
+# public — no auth needed to fetch it).
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . ./
 
-RUN make tidy
 RUN make build
 
 # Pre-install DuckDB extensions (httpfs, aws, spatial, ducklake, postgres) into a fixed directory.
@@ -28,7 +28,7 @@ LABEL maintainer="DIMO <hello@dimo.zone>"
 
 USER nonroot:nonroot
 
-COPY --from=build --chown=nonroot:nonroot /build/dq/bin/dq /
+COPY --from=build --chown=nonroot:nonroot /build/bin/dq /
 COPY --from=build --chown=nonroot:nonroot /duckdb/extensions /duckdb/extensions
 
 ENV DUCKDB_EXTENSION_DIR=/duckdb/extensions
