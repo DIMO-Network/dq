@@ -407,7 +407,11 @@ func buildSummaryFromAggs(aggs []*qtypes.AggSignal, floatArgs []model.FloatSigna
 				Value: a.ValueNumber,
 			})
 		}
-		if a.SignalType == qtypes.LocType {
+		// (0,0) is the "no GPS fix" sentinel, not a real location. The ranges aggregation
+		// (GetAggregatedSignalsForRanges) does NOT exclude it (unlike the single-window
+		// path), so skip it here and leave the slot nil — gapFillLocation then substitutes
+		// the nearest prior real fix instead of pinning the segment to null island.
+		if a.SignalType == qtypes.LocType && (a.ValueLocation.Latitude != 0 || a.ValueLocation.Longitude != 0) {
 			loc := &model.Location{
 				Latitude:  a.ValueLocation.Latitude,
 				Longitude: a.ValueLocation.Longitude,
