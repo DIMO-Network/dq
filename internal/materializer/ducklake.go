@@ -52,6 +52,12 @@ type DuckLakeMaterializer struct {
 	// lastProgressReport / lastReportedSnapshot throttle the per-batch
 	// expiry-floor heartbeat (see maybeReportProgress) and track what was last
 	// published so the tail is flushed exactly once on catch-up.
+	//
+	// These are deliberately unsynchronized: the materializer is a single writer
+	// (RunOnce/reportProgress run only on the one decode-loop goroutine, enforced by
+	// the MaterializerShardCount>1 refusal in backend.go). If a second concurrent
+	// caller of RunOnce/reportProgressNow is ever added, guard these with a mutex —
+	// they would otherwise be a data race.
 	lastProgressReport   time.Time
 	lastReportedSnapshot int64
 }
