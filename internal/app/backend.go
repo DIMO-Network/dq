@@ -10,6 +10,7 @@ import (
 	"github.com/DIMO-Network/dq/internal/materializer"
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/dq/internal/service/duck"
+	"github.com/DIMO-Network/dq/pkg/blobcrypt"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
@@ -50,6 +51,9 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		// Postgres read replica. Force read-only off for the materializer so the
 		// writer can never come up read-only.
 		ReadOnly: settings.DuckLakeReadOnly && !settings.MaterializerEnabled,
+		// Attach ENCRYPTED to match din. attachDuckLakeSQL only emits it on the
+		// writable (materializer) attach, so read-only query pods are unaffected.
+		Encrypted: settings.LakeEncryptionEnabled,
 		// Load spatial for the ST_* geofence filters. Default on for the query path;
 		// the materializer overrides it off (its delta read crashes under spatial's
 		// RTree optimizer) — see startDuckLakeMaterializer.
@@ -89,7 +93,11 @@ func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (reposito
 // s3Client must be non-nil.
 func newEventService(settings *config.Settings, duckSvc *duck.Service, s3Client *s3.Client, _ zerolog.Logger) (eventrepo.EventService, error) {
 	presigner := s3.NewPresignClient(s3Client)
-	return duck.NewLakeEventService(duckSvc, s3Client, presigner, settings.BlobBucket), nil
+	cipher, err := blobcrypt.NewCipher(settings.BlobEncryptionKey)
+	if err != nil {
+		return nil, err
+	}
+	return duck.NewLakeEventService(duckSvc, s3Client, presigner, settings.BlobBucket).WithBlobCipher(cipher), nil
 }
 
 func closeDuck(duckSvc *duck.Service, logger zerolog.Logger) func() {
@@ -163,7 +171,13 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	// Resolve externalized blob payloads from the same bucket the fetch path
 	// presigns/downloads (settings.BlobBucket): din writes payloads larger
 	// than the inline threshold to a blob and leaves only the key on the row.
+	blobCipher, err := blobcrypt.NewCipher(settings.BlobEncryptionKey)
+	if err != nil {
+		_ = duckSvc.Close()
+		return nil, fmt.Errorf("blob cipher: %w", err)
+	}
 	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.BlobBucket).
+		WithBlobCipher(blobCipher).
 		WithTempDir(settings.DuckDBTempDirectory) // stage batch parquet on the sized spill volume, not the root fs
 
 	var decodedRetention time.Duration

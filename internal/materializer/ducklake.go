@@ -13,6 +13,7 @@ import (
 
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/service/duck"
+	"github.com/DIMO-Network/dq/pkg/blobcrypt"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
@@ -39,6 +40,8 @@ type DuckLakeMaterializer struct {
 	// nothing. nil disables blob resolution (blobs not expected, e.g. tests).
 	blobs      eventrepo.ObjectGetter
 	blobBucket string
+	// blobCipher decrypts payloads din sealed client-side (nil = read as-is).
+	blobCipher *blobcrypt.Cipher
 	// maxSnapshotSpan bounds the snapshot span processed per RunOnce pass so a
 	// large backlog (lag, restart, historical backfill) is drained in
 	// memory-bounded chunks instead of materializing the entire (cur, head]
@@ -121,6 +124,13 @@ func (m *DuckLakeMaterializer) WithMaxSnapshotSpan(n int64) *DuckLakeMaterialize
 func (m *DuckLakeMaterializer) WithBlobStore(getter eventrepo.ObjectGetter, bucket string) *DuckLakeMaterializer {
 	m.blobs = getter
 	m.blobBucket = bucket
+	return m
+}
+
+// WithBlobCipher sets the cipher used to decrypt downloaded blob payloads (din
+// seals them client-side). A nil cipher leaves payloads untouched. Returns m.
+func (m *DuckLakeMaterializer) WithBlobCipher(c *blobcrypt.Cipher) *DuckLakeMaterializer {
+	m.blobCipher = c
 	return m
 }
 
@@ -680,6 +690,11 @@ func (m *DuckLakeMaterializer) resolveBlob(ctx context.Context, ev *cloudevent.R
 	data, err := eventrepo.DownloadObject(ctx, m.blobs, m.blobBucket, dataIndexKey)
 	if err != nil {
 		return fmt.Errorf("fetching blob payload %s: %w", dataIndexKey, err)
+	}
+	if m.blobCipher != nil {
+		if data, err = m.blobCipher.Open(dataIndexKey, data); err != nil {
+			return fmt.Errorf("decrypting blob payload %s: %w", dataIndexKey, err)
+		}
 	}
 	ev.Data = data
 	return nil

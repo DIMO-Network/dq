@@ -147,6 +147,13 @@ func attachDuckLakeSQL(cfg Config) string {
 	if cfg.DataPath != "" {
 		opts = append(opts, "DATA_PATH "+sqlString(cfg.DataPath))
 	}
+	if cfg.Encrypted && !cfg.ReadOnly {
+		// Only the writable (materializer) attach needs ENCRYPTED: it can't then
+		// create a plaintext catalog din rejects. Read-only query pods read an
+		// existing encrypted catalog transparently (the per-file keys come from the
+		// catalog), so they skip it and avoid any READ_ONLY+ENCRYPTED interaction.
+		opts = append(opts, "ENCRYPTED")
+	}
 	if cfg.ReadOnly {
 		opts = append(opts, "READ_ONLY")
 	}

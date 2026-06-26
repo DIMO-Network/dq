@@ -1,7 +1,10 @@
 // Package config holds application configuration settings.
 package config
 
-import "fmt"
+import (
+	"encoding/base64"
+	"fmt"
+)
 
 // Settings contains the application config.
 type Settings struct {
@@ -27,7 +30,12 @@ type Settings struct {
 	// BlobBucket is the S3 bucket holding externalized cloudevent payloads (large
 	// blobs din writes); dq presigns/downloads from it. Same bucket as din's
 	// BLOB_BUCKET (the lake parquet lives separately at DUCKLAKE_DATA_PATH).
-	BlobBucket           string `yaml:"BLOB_BUCKET"`
+	BlobBucket string `yaml:"BLOB_BUCKET"`
+	// BlobEncryptionKey is a base64-encoded 32-byte key. When set, dq decrypts
+	// blob payloads din sealed before upload (AES-256-GCM). MUST equal din's
+	// BLOB_ENCRYPTION_KEY or blob reads fail. Empty: blobs are read as-is (legacy
+	// plaintext blobs are passed through whether or not a key is set).
+	BlobEncryptionKey    string `yaml:"BLOB_ENCRYPTION_KEY"`
 	S3AWSRegion          string `yaml:"S3_AWS_REGION"`
 	S3AWSAccessKeyID     string `yaml:"S3_AWS_ACCESS_KEY_ID"`
 	S3AWSSecretAccessKey string `yaml:"S3_AWS_SECRET_ACCESS_KEY"`
@@ -48,6 +56,12 @@ type Settings struct {
 	// DuckLakeDataPath is where DuckLake parquet data files live (s3:// or
 	// a local dir). Must match din's LAKE_DATA_PATH.
 	DuckLakeDataPath string `yaml:"DUCKLAKE_DATA_PATH"`
+	// LakeEncryptionEnabled makes the materializer attach the DuckLake catalog
+	// ENCRYPTED so the decoded tables it writes are encrypted at rest, matching
+	// din. Read-only query pods don't pass it (an existing encrypted catalog reads
+	// transparently); only the writer needs it, so it also can't create a plaintext
+	// catalog din would then reject. Must agree with din's LAKE_ENCRYPTION_ENABLED.
+	LakeEncryptionEnabled bool `yaml:"LAKE_ENCRYPTION_ENABLED"`
 	// DuckLakeReadOnly attaches the DuckLake catalog read-only. Set it on the
 	// read/query fleet (which never writes the lake — only the single-writer
 	// materializer does) so the reader fleet can sit on a Postgres read replica
@@ -125,6 +139,13 @@ func (s *Settings) Validate() error {
 	}
 	if s.DIMORegistryChainID == 0 {
 		return fmt.Errorf("DIMO_REGISTRY_CHAIN_ID must be non-zero (missing or malformed env?)")
+	}
+	if s.BlobEncryptionKey != "" {
+		// Fail fast on a malformed key rather than 500ing on the first blob read.
+		// Must be base64 of exactly 32 bytes (AES-256) and match din's key.
+		if key, err := base64.StdEncoding.DecodeString(s.BlobEncryptionKey); err != nil || len(key) != 32 {
+			return fmt.Errorf("BLOB_ENCRYPTION_KEY must be base64 of exactly 32 bytes (AES-256)")
+		}
 	}
 	return nil
 }

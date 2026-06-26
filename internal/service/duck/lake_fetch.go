@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
+	"github.com/DIMO-Network/dq/pkg/blobcrypt"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -62,10 +63,11 @@ func voidingClause(ref string) string {
 // lake.raw_events. Index lookups return a header + an ObjectInfo locator;
 // payload resolution reads inline data (or presigns a blob).
 type LakeEventService struct {
-	svc       *Service
-	getter    eventrepo.ObjectGetter // fetches blob payload bytes from S3 (gRPC path)
-	presigner eventrepo.Presigner
-	bucket    string // parquet/blob bucket for presigning and blob download
+	svc        *Service
+	getter     eventrepo.ObjectGetter // fetches blob payload bytes from S3 (gRPC path)
+	presigner  eventrepo.Presigner
+	bucket     string // parquet/blob bucket for presigning and blob download
+	blobCipher *blobcrypt.Cipher
 }
 
 // NewLakeEventService constructs a LakeEventService backed by svc (which must
@@ -75,6 +77,14 @@ type LakeEventService struct {
 // nil and bucket empty when large-payload blobs are not expected.
 func NewLakeEventService(svc *Service, getter eventrepo.ObjectGetter, presigner eventrepo.Presigner, bucket string) *LakeEventService {
 	return &LakeEventService{svc: svc, getter: getter, presigner: presigner, bucket: bucket}
+}
+
+// WithBlobCipher sets the cipher used to decrypt downloaded blob payloads (din
+// seals them client-side). A nil cipher leaves payloads untouched. Returns the
+// service for chaining.
+func (l *LakeEventService) WithBlobCipher(c *blobcrypt.Cipher) *LakeEventService {
+	l.blobCipher = c
+	return l
 }
 
 var _ eventrepo.EventService = (*LakeEventService)(nil)
@@ -302,6 +312,11 @@ func (l *LakeEventService) resolvePayload(ctx context.Context, ev cloudevent.Sto
 			return raw, nil
 		}
 		return cloudevent.RawEvent{}, fmt.Errorf("fetch blob payload %s: %w", ev.DataIndexKey, err)
+	}
+	if l.blobCipher != nil {
+		if data, err = l.blobCipher.Open(ev.DataIndexKey, data); err != nil {
+			return cloudevent.RawEvent{}, fmt.Errorf("decrypt blob payload %s: %w", ev.DataIndexKey, err)
+		}
 	}
 	raw.Data = data
 	return raw, nil
