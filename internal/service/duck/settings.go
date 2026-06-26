@@ -68,6 +68,11 @@ type Config struct {
 	// DataPath is where DuckLake writes parquet data files: an s3:// prefix
 	// in prod, a local directory in tests.
 	DataPath string `yaml:"DUCKLAKE_DATA_PATH"`
+	// Encrypted attaches the catalog ENCRYPTED. Only a writable (non-read-only)
+	// attach carries it — the materializer — so it can't create a plaintext
+	// catalog din would reject, while read-only query pods read the existing
+	// encrypted catalog transparently. Must match din's LAKE_ENCRYPTION_ENABLED.
+	Encrypted bool `yaml:"LAKE_ENCRYPTION_ENABLED"`
 	// ReadOnly attaches the DuckLake catalog (and its meta side database) in
 	// READ_ONLY mode. Only the single-writer materializer writes the lake; the
 	// read/query fleet never does, so it attaches read-only. Besides being

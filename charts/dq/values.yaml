@@ -58,6 +58,13 @@ env:
   # here. MUST equal din's BLOB_BUCKET (dimo-blob-storage-*), where din writes
   # them; the lake-data bucket (dimo-storage-*) holds parquet, not blobs.
   BLOB_BUCKET: dimo-blob-storage-dev
+  # At-rest encryption — must match din. LAKE_ENCRYPTION_ENABLED makes the
+  # materializer attach the catalog ENCRYPTED (read-only query pods read the
+  # existing encrypted catalog transparently, so they don't pass it).
+  # BLOB_ENCRYPTION_KEY (base64 of 32 bytes, AES-256) decrypts the blob payloads
+  # din sealed: it is a SECRET supplied via the dq-secret (not here) and MUST
+  # equal din's BLOB_ENCRYPTION_KEY or blob reads fail.
+  LAKE_ENCRYPTION_ENABLED: 'true'
   # JWT auth (token-exchange) + identity-api for the cross-subject link check.
   TOKEN_EXCHANGE_JWK_KEY_SET_URL: https://auth.dev.dimo.zone/keys
   TOKEN_EXCHANGE_ISSUER_URL: https://auth.dev.dimo.zone
