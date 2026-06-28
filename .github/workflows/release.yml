@@ -1,0 +1,53 @@
+name: Release
+# Publish dimozone/dq to Docker Hub. Fires on every push to the default branch
+# (so deploys can always pull the tip) and on version tags. Each run pushes both
+# the 7-char short-SHA tag and `latest`. ci.yml still owns build/test/lint.
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - v*
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Get short SHA
+        id: slug
+        run: echo "sha7=$(echo ${GITHUB_SHA} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            dimozone/dq:${{ steps.slug.outputs.sha7 }}
+            dimozone/dq:latest
+
+      - name: Job summary
+        run: |
+          {
+            echo "### Pushed images"
+            echo ""
+            echo "- \`dimozone/dq:${{ steps.slug.outputs.sha7 }}\`"
+            echo "- \`dimozone/dq:latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
