@@ -30,5 +30,14 @@ func s3ClientFromSettings(settings *config.Settings) *s3.Client {
 		conf.Credentials = credentials.NewStaticCredentialsProvider(
 			settings.S3AWSAccessKeyID, settings.S3AWSSecretAccessKey, "")
 	}
+	// A custom endpoint (MinIO and friends) needs path-style addressing — the
+	// virtual-hosted bucket-as-subdomain form AWS defaults to doesn't resolve
+	// against a single-host store.
+	if settings.S3Endpoint != "" {
+		return s3.NewFromConfig(conf, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(settings.S3Endpoint)
+			o.UsePathStyle = true
+		})
+	}
 	return s3.NewFromConfig(conf)
 }

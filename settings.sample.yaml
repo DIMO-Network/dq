@@ -56,6 +56,9 @@ PARQUET_BUCKET: ""
 S3_AWS_REGION: ""
 S3_AWS_ACCESS_KEY_ID: ""
 S3_AWS_SECRET_ACCESS_KEY: ""
+# Custom S3 endpoint (full URL) for the blob presign/download path; e.g. MinIO.
+# Leave empty for AWS. Mirror in DUCKDB_S3_ENDPOINT for the lake path.
+S3_ENDPOINT: ""
 
 IDENTITY_API_URL: ""
 

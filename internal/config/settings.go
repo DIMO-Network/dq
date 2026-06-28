@@ -31,6 +31,12 @@ type Settings struct {
 	S3AWSRegion          string `yaml:"S3_AWS_REGION"`
 	S3AWSAccessKeyID     string `yaml:"S3_AWS_ACCESS_KEY_ID"`
 	S3AWSSecretAccessKey string `yaml:"S3_AWS_SECRET_ACCESS_KEY"`
+	// S3Endpoint is a custom endpoint (full URL, e.g. "http://minio:9000") for the
+	// aws-sdk S3 client that handles blob presign/download and the materializer blob
+	// GET. Empty uses AWS's default region-based resolution. Set it (path-style is
+	// forced) to point the blob path at MinIO; mirror it in DUCKDB_S3_ENDPOINT so the
+	// lake path resolves the same store.
+	S3Endpoint string `yaml:"S3_ENDPOINT"`
 	// Identity API for device→vehicle DID resolution
 	IdentityAPIURL string `yaml:"IDENTITY_API_URL"`
 	// DuckLakeCatalogDSN is the shared DuckLake catalog (Postgres DSN in
