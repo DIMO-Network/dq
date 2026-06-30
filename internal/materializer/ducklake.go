@@ -143,48 +143,19 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 	}
 	defer func() { _ = os.Remove(evTmp) }()
 
-	stmts := []string{
-		// CREATE then ALTER the partition/sort layout, mirroring din's
-		// raw_events (lake/ddl.go). Partitioning is catalog metadata applied to
-		// data DuckLake writes from here on; the decoded tables don't exist in
-		// prod yet (materializer disabled), so they are partitioned from the
-		// first write and no re-materialization of old rows is needed. ALTER
-		// SET is idempotent, so re-running on every boot is a no-op. "timestamp"
-		// is quoted because it is a DuckDB keyword.
-		fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.signals AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(sigTmp)),
-		`ALTER TABLE lake.signals SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
-		`ALTER TABLE lake.signals SET SORTED BY (subject, "timestamp")`,
-		fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.events AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(evTmp)),
-		`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
-		`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
-		// signals_latest is the per-(subject,name) latest+summary rollup (CHD-3):
-		// it makes latest/summary/availableSignals O(distinct-names) instead of a
-		// full-history GROUP BY per request. Maintained OFF the decode commit by
-		// FlushRollup, which recomputes the touched subject_buckets from the deduped
-		// base table, so it is a materialized view of getAllLatestSignalsLake (no
-		// source filter) — parity is by construction. Partitioned by subject_bucket
-		// like the base.
-		`CREATE TABLE IF NOT EXISTS lake.signals_latest (
-			subject VARCHAR, subject_bucket INTEGER, name VARCHAR,
-			"timestamp" TIMESTAMP WITH TIME ZONE,
-			value_number DOUBLE, value_string VARCHAR,
-			loc_lat DOUBLE, loc_lon DOUBLE, loc_hdop DOUBLE, loc_heading DOUBLE,
-			count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
-		`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
-		"CREATE TABLE IF NOT EXISTS lake.ingest_progress (partition VARCHAR, cursor VARCHAR)",
-		// Seed the cursor row once so every advance is a compare-and-swap UPDATE
-		// against a single row (CHD-9). Without a pre-seeded row the first writer
-		// does a guard-less INSERT, and two concurrent first-writers both insert
-		// and then both decode the same snapshot range. NOT EXISTS keeps
-		// re-bootstrap (restart, second replica) idempotent; the conflict-retry
-		// loop below serializes the rare concurrent first seed.
-		fmt.Sprintf("INSERT INTO lake.ingest_progress (partition, cursor) "+
-			"SELECT %s, '0' WHERE NOT EXISTS (SELECT 1 FROM lake.ingest_progress WHERE partition = %s)",
-			sqlLit(snapshotCursorPartition), sqlLit(snapshotCursorPartition)),
-		// din owns this table (the snapshot-expiry floor); create it defensively
-		// so dq can report progress before din has booted against a fresh catalog.
-		`CREATE TABLE IF NOT EXISTS meta.din_consumer_progress (consumer VARCHAR, snapshot_id BIGINT, updated_at TIMESTAMP WITH TIME ZONE)`,
+	// The partition/sort ALTERs must run ONLY when a table is first created, so
+	// check existence before building the DDL. The three decoded tables are only
+	// ever created by this block, so "exists" implies "already partitioned/sorted"
+	// (see setupStatements for why re-ALTERing is a crash, not a no-op).
+	exists := map[string]bool{}
+	for _, t := range []string{"signals", "events", "signals_latest"} {
+		ok, err := m.tableExists(ctx, "lake", t)
+		if err != nil {
+			return err
+		}
+		exists[t] = ok
 	}
+	stmts := setupStatements(exists, sigTmp, evTmp)
 	// IF NOT EXISTS still raises a commit conflict when two materializers
 	// bootstrap a fresh catalog at once (both transactions start before
 	// either commits). Retry: by the next attempt the other transaction has
@@ -206,6 +177,93 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// tableExists reports whether schema.name is already in the attached catalog.
+// Used to decide whether a decoded table needs its first-creation layout applied.
+func (m *DuckLakeMaterializer) tableExists(ctx context.Context, schema, name string) (bool, error) {
+	var n int
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM duckdb_tables() WHERE database_name = ? AND table_name = ?`,
+		schema, name).Scan(&n); err != nil {
+		return false, fmt.Errorf("checking table %s.%s exists: %w", schema, name, err)
+	}
+	return n > 0, nil
+}
+
+// setupStatements builds the ordered ensureSchema DDL given which of the three
+// decoded tables already exist (keyed "signals"/"events"/"signals_latest").
+//
+// The SET PARTITIONED BY / SET SORTED BY ALTERs are emitted ONLY for a table that
+// does not yet exist. They are NOT idempotent: DuckLake bumps the catalog
+// schema_version on every ALTER even when the spec is unchanged, and it names the
+// inline-data tables ducklake_inlined_data_<table_id>_<schema_version> — so each
+// re-ALTER renames them out from under din's maintenance, whose inline_flush then
+// drops the superseded ones; an in-flight inline read hits the missing table and
+// the ducklake extension throws a FATAL that invalidates the session and crash-
+// loops the materializer. Gating the ALTERs on first creation is what makes a
+// reboot mint zero new snapshots. Partitioning is catalog metadata that only
+// affects data written after it is set, so a genuinely fresh catalog must still
+// configure it on creation — which this does. "timestamp" is quoted because it is
+// a DuckDB keyword.
+//
+// Trade-off: a decoded table created WITHOUT this layout (older code, partial
+// setup) would not be re-laid-out. That can't happen here because this block is
+// their only creator, so the existence gate is sufficient and simpler than reading
+// the live partition spec and ALTERing on drift. setupStatements is pure so the
+// idempotency guarantee is unit-testable without a live DuckLake.
+func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
+	var stmts []string
+	if !exists["signals"] {
+		stmts = append(stmts,
+			fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.signals AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(sigTmp)),
+			`ALTER TABLE lake.signals SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
+			`ALTER TABLE lake.signals SET SORTED BY (subject, "timestamp")`,
+		)
+	}
+	if !exists["events"] {
+		stmts = append(stmts,
+			fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.events AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(evTmp)),
+			`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
+			`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
+		)
+	}
+	if !exists["signals_latest"] {
+		// signals_latest is the per-(subject,name) latest+summary rollup (CHD-3):
+		// it makes latest/summary/availableSignals O(distinct-names) instead of a
+		// full-history GROUP BY per request. Maintained OFF the decode commit by
+		// FlushRollup, which recomputes the touched subject_buckets from the deduped
+		// base table, so it is a materialized view of getAllLatestSignalsLake (no
+		// source filter) — parity is by construction. Partitioned by subject_bucket
+		// like the base.
+		stmts = append(stmts,
+			`CREATE TABLE IF NOT EXISTS lake.signals_latest (
+				subject VARCHAR, subject_bucket INTEGER, name VARCHAR,
+				"timestamp" TIMESTAMP WITH TIME ZONE,
+				value_number DOUBLE, value_string VARCHAR,
+				loc_lat DOUBLE, loc_lon DOUBLE, loc_hdop DOUBLE, loc_heading DOUBLE,
+				count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
+			`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
+		)
+	}
+	// The remaining statements are genuinely idempotent (CREATE IF NOT EXISTS /
+	// guarded INSERT) and mint no schema change, so they run on every boot.
+	stmts = append(stmts,
+		"CREATE TABLE IF NOT EXISTS lake.ingest_progress (partition VARCHAR, cursor VARCHAR)",
+		// Seed the cursor row once so every advance is a compare-and-swap UPDATE
+		// against a single row (CHD-9). Without a pre-seeded row the first writer
+		// does a guard-less INSERT, and two concurrent first-writers both insert
+		// and then both decode the same snapshot range. NOT EXISTS keeps
+		// re-bootstrap (restart, second replica) idempotent; the conflict-retry
+		// loop below serializes the rare concurrent first seed.
+		fmt.Sprintf("INSERT INTO lake.ingest_progress (partition, cursor) "+
+			"SELECT %s, '0' WHERE NOT EXISTS (SELECT 1 FROM lake.ingest_progress WHERE partition = %s)",
+			sqlLit(snapshotCursorPartition), sqlLit(snapshotCursorPartition)),
+		// din owns this table (the snapshot-expiry floor); create it defensively
+		// so dq can report progress before din has booted against a fresh catalog.
+		`CREATE TABLE IF NOT EXISTS meta.din_consumer_progress (consumer VARCHAR, snapshot_id BIGINT, updated_at TIMESTAMP WITH TIME ZONE)`,
+	)
+	return stmts
 }
 
 // errSnapshotMoved means a concurrent decoder advanced the cursor first; the
