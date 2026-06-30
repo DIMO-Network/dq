@@ -39,7 +39,7 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		S3AWSRegion:          settings.S3AWSRegion,
 		S3AWSAccessKeyID:     settings.S3AWSAccessKeyID,
 		S3AWSSecretAccessKey: settings.S3AWSSecretAccessKey,
-		S3Endpoint:           settings.DuckDBS3Endpoint,
+		S3Endpoint:           settings.LakeS3Endpoint(),
 		// DuckLake is the only backend — always attach the catalog.
 		DuckLakeEnabled: true,
 		CatalogDSN:      settings.DuckLakeCatalogDSN,

@@ -34,8 +34,10 @@ type Settings struct {
 	// S3Endpoint is a custom endpoint (full URL, e.g. "http://minio:9000") for the
 	// aws-sdk S3 client that handles blob presign/download and the materializer blob
 	// GET. Empty uses AWS's default region-based resolution. Set it (path-style is
-	// forced) to point the blob path at MinIO; mirror it in DUCKDB_S3_ENDPOINT so the
-	// lake path resolves the same store.
+	// forced) to point the blob path at MinIO/GCS. The DuckDB lake path
+	// (LakeS3Endpoint) falls back to this, so a single S3_ENDPOINT configures both
+	// paths against the same store — only set DUCKDB_S3_ENDPOINT when the lake store
+	// differs from the blob store.
 	S3Endpoint string `yaml:"S3_ENDPOINT"`
 	// Identity API for device→vehicle DID resolution
 	IdentityAPIURL string `yaml:"IDENTITY_API_URL"`
@@ -61,7 +63,9 @@ type Settings struct {
 	DuckDBExtensionDir  string `yaml:"DUCKDB_EXTENSION_DIR"`
 	DuckDBTempDirectory string `yaml:"DUCKDB_TEMP_DIRECTORY"`
 	DuckDBMaxConns      int    `yaml:"DUCKDB_MAX_CONNS"`
-	// DuckDBS3Endpoint is a custom S3 endpoint for DuckDB's httpfs (e.g. MinIO).
+	// DuckDBS3Endpoint overrides the S3 endpoint DuckDB's httpfs uses for the lake
+	// data path (DUCKLAKE_DATA_PATH). Empty falls back to S3Endpoint (see
+	// LakeS3Endpoint) — set it only when the lake store differs from the blob store.
 	DuckDBS3Endpoint string `yaml:"DUCKDB_S3_ENDPOINT"`
 	// Materializer (post-fact decode loop: din raw_events -> decoded lake tables).
 	MaterializerEnabled      bool   `yaml:"MATERIALIZER_ENABLED"`
@@ -91,6 +95,21 @@ type Settings struct {
 	VehicleNFTAddress     string `yaml:"VEHICLE_NFT_ADDRESS"`
 	AftermarketNFTAddress string `yaml:"AFTERMARKET_NFT_ADDRESS"`
 	SyntheticNFTAddress   string `yaml:"SYNTHETIC_NFT_ADDRESS"`
+}
+
+// LakeS3Endpoint is the S3 endpoint DuckDB's httpfs uses for the DuckLake data
+// path (DUCKLAKE_DATA_PATH). It prefers the explicit DUCKDB_S3_ENDPOINT but
+// falls back to S3Endpoint so a single S3_ENDPOINT configures both the aws-sdk
+// blob path and the DuckDB lake path against the same store — the common case
+// (both point at the same GCS S3-interop bucket or MinIO). Without this fallback
+// a deploy that sets only S3_ENDPOINT leaves the lake secret with no ENDPOINT, so
+// DuckDB resolves the AWS default host (s3.<region>.amazonaws.com) and the
+// materializer's lake reads fail with "Could not resolve hostname".
+func (s *Settings) LakeS3Endpoint() string {
+	if s.DuckDBS3Endpoint != "" {
+		return s.DuckDBS3Endpoint
+	}
+	return s.S3Endpoint
 }
 
 // Validate checks the boot-critical numeric settings. The shared env loader swallows
