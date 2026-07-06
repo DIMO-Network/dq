@@ -51,6 +51,12 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("failed to initialize duckdb connection: %w", err)
 	}
 
+	label := cfg.MetricsPoolLabel
+	if label == "" {
+		label = "query"
+	}
+	poolStats.track(label, db)
+
 	return &Service{db: db}, nil
 }
 

@@ -6,6 +6,42 @@ metadata:
     {{- include "dq.labels" . | nindent 4 }}
 spec:
   groups:
+    - name: dq-query
+      rules:
+        # Pool saturation (H4): WaitDuration is cumulative seconds spent
+        # waiting for a DuckDB connection — the direct signal that queries are
+        # queueing on the small pool. Sustained >0.5s of wait per second per
+        # pod means the admission cap is doing all the work; add replicas or
+        # raise DUCKDB_MAX_CONNS.
+        - alert: DQPoolSaturated
+          expr: sum by (pod) (rate(dq_db_pool_wait_duration_seconds_total{pool="query"}[5m])) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: DuckDB connection pool is saturated ({{ "{{ $labels.pod }}" }})
+            description: Queries are spending significant time queueing for a pooled connection; scale the query fleet or the pool.
+        # Load shedding (H4/H11): sustained global-cap rejections mean the
+        # fleet is undersized for offered load (the cap is per-pod).
+        - alert: DQRequestsShed
+          expr: sum(rate(dq_requests_rejected_global_total[5m])) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: requests are being shed by the in-flight cap
+            description: The process-wide admission cap is rejecting >1 req/s fleet-wide for 10m — sustained overload, not a burst. Scale out.
+        # Error-rate SLI over the gqlgen counter (status label: success/error).
+        - alert: DQGraphQLErrorRate
+          expr: >-
+            (sum(rate(graphql_request_total{status="error"}[10m])) or vector(0))
+            / (sum(rate(graphql_request_total[10m])) > 0) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: GraphQL error rate above 5%
+            description: More than 5% of GraphQL requests are erroring; check catalog/S3 health and recent deploys.
     - name: dq-materializer
       rules:
         - alert: DQMaterializerDecodeLag

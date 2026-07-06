@@ -159,6 +159,7 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	// DuckLake delta (ducklake_table_changes); spatial's RTreeIndexScanOptimizer
 	// crashes the planner on that read, so never load it here.
 	cfg.LoadSpatial = false
+	cfg.MetricsPoolLabel = "materializer" // separate dq_db_pool_* series from the query pool (H4)
 	duckSvc, err := duck.NewService(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating DuckLake service: %w", err)

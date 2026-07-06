@@ -37,6 +37,11 @@ type Config struct {
 	TempDirectory string `yaml:"DUCKDB_TEMP_DIRECTORY"`
 	// MaxConns caps sql.DB open connections. Zero means DefaultMaxConns.
 	MaxConns int `yaml:"DUCKDB_MAX_CONNS"`
+	// MetricsPoolLabel names this service's connection pool in the
+	// dq_db_pool_* stats (H4). A materializer pod runs two services (query
+	// backend + decode loop), so pools are labeled, not separate metric
+	// names. Empty = "query".
+	MetricsPoolLabel string `yaml:"-"`
 	// ConnMaxLifetime / ConnMaxIdleTime recycle pooled DuckDB connections so a
 	// connection whose DuckLake→Postgres catalog attach is poisoned by a PG blip
 	// is dropped and re-bootstrapped rather than staying broken (CHD-21). Zero
