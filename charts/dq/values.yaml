@@ -154,3 +154,14 @@ serviceMonitor:
   path: /metrics
   port: mon-http
   interval: 30s
+# Optional ExternalSecret entries. A remoteRef whose secretsmanager key does
+# not exist fails the WHOLE secret sync and blocks pod start, so optional keys
+# are flag-gated instead of requiring placeholder values.
+# - catalogReadDSN: flip once <namespace>/dq/ducklake_catalog_read_dsn exists
+#   (Postgres read replica for the query fleet).
+# - blobEncryptionKey: flip together with din's flag once
+#   <namespace>/din/blob_encryption_key exists — part of the encryption
+#   enablement checklist alongside LAKE_ENCRYPTION_ENABLED.
+secrets:
+  catalogReadDSN: false
+  blobEncryptionKey: false
