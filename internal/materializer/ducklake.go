@@ -871,6 +871,33 @@ func timeRange[T any](rows []T, ts func(T) time.Time) (minT, maxT time.Time) {
 			maxT = t
 		}
 	}
+	return clampProbeFloor(minT, maxT)
+}
+
+// dedupProbeFloor bounds how far back the insert anti-join's probe window may
+// reach (M5). Decode prunes only FUTURE clock skew (+5m); a single device
+// emitting a 1970/epoch timestamp dragged tsMin to 1970 and made the probe
+// scan every day-partition in the table — for every batch containing that
+// device, forever. The cost of the floor: a redelivered/crash-replayed row
+// whose EVENT timestamp is >30d old (an offline vehicle uploading months of
+// buffered history, replayed) can slip the write-side probe and store twice —
+// rare, storage-only, and collapsed by the read-path QUALIFY dedup, the
+// designed final guard on every query and on the rollup recompute.
+const dedupProbeFloor = 30 * 24 * time.Hour
+
+// clampProbeFloor floors minT at now-dedupProbeFloor (and keeps maxT >= minT
+// so an all-ancient batch yields an empty probe window, not an inverted one).
+func clampProbeFloor(minT, maxT time.Time) (time.Time, time.Time) {
+	if minT.IsZero() {
+		return minT, maxT
+	}
+	floor := time.Now().UTC().Add(-dedupProbeFloor)
+	if minT.Before(floor) {
+		minT = floor
+	}
+	if maxT.Before(minT) {
+		maxT = minT
+	}
 	return minT, maxT
 }
 

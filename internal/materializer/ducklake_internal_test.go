@@ -3,6 +3,7 @@ package materializer
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DIMO-Network/cloudevent"
 )
@@ -92,4 +93,40 @@ func TestRestoreNonColumnFieldsSafe_ContainsPanic(t *testing.T) {
 	// The safe wrapper must NOT panic on the same input (a fatal panic here fails the test).
 	h := malformed()
 	restoreNonColumnFieldsSafe(&h)
+}
+
+// TestClampProbeFloor pins M5: a batch containing one epoch-timestamp row must
+// not drag the dedup anti-join's probe window to 1970 (an O(entire-history)
+// partition scan on every such batch). The floor clamps tsMin; an all-ancient
+// batch yields an empty window, never an inverted one.
+func TestClampProbeFloor(t *testing.T) {
+	now := time.Now().UTC()
+	epoch := time.Unix(0, 0).UTC()
+
+	minT, maxT := clampProbeFloor(epoch, now)
+	if minT.Before(now.Add(-dedupProbeFloor - time.Minute)) {
+		t.Fatalf("tsMin not floored: %v", minT)
+	}
+	if !maxT.Equal(now) {
+		t.Fatalf("tsMax changed: %v", maxT)
+	}
+
+	// All-ancient batch: window collapses to empty (min == max at the floor).
+	minT, maxT = clampProbeFloor(epoch, epoch.Add(time.Hour))
+	if maxT.Before(minT) {
+		t.Fatalf("inverted window: [%v, %v]", minT, maxT)
+	}
+
+	// Recent batches pass through untouched.
+	recentMin, recentMax := now.Add(-time.Hour), now
+	minT, maxT = clampProbeFloor(recentMin, recentMax)
+	if !minT.Equal(recentMin) || !maxT.Equal(recentMax) {
+		t.Fatalf("recent window altered: [%v, %v]", minT, maxT)
+	}
+
+	// Empty batch sentinel (zero times) is preserved.
+	minT, maxT = clampProbeFloor(time.Time{}, time.Time{})
+	if !minT.IsZero() || !maxT.IsZero() {
+		t.Fatal("zero sentinel altered")
+	}
 }
