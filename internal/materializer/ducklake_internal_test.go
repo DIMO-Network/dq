@@ -5,7 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"database/sql"
+	"errors"
+	"fmt"
 	"github.com/DIMO-Network/cloudevent"
+	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 // setupStatements must apply the partition/sort layout on a fresh catalog but
@@ -138,5 +142,27 @@ func TestClampProbeFloor(t *testing.T) {
 	minT, maxT = clampProbeFloor(time.Time{}, time.Time{})
 	if !minT.IsZero() || !maxT.IsZero() {
 		t.Fatal("zero sentinel altered")
+	}
+}
+
+// TestRecoverPoisonedSession pins the e2e-discovered wedge classifier: only
+// the aborted-session cascade (din maintenance FATALing an in-flight inline
+// read) triggers the idle-pool recycle; ordinary errors do not.
+func TestRecoverPoisonedSession(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m := &DuckLakeMaterializer{db: db}
+	if m.recoverPoisonedSession(nil) {
+		t.Fatal("nil error must not recycle")
+	}
+	if m.recoverPoisonedSession(errors.New("some transient s3 blip")) {
+		t.Fatal("unrelated error must not recycle")
+	}
+	poisoned := fmt.Errorf("reading raw_events delta: TransactionContext Error: Failed to get table insertion file list from DuckLake: Current transaction is aborted (please ROLLBACK)")
+	if !m.recoverPoisonedSession(poisoned) {
+		t.Fatal("aborted-session cascade must recycle the idle pool")
 	}
 }

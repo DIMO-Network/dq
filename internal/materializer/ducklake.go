@@ -1060,6 +1060,48 @@ func (m *DuckLakeMaterializer) WithMaxDirtySubjects(n int) *DuckLakeMaterializer
 	return m
 }
 
+// recoverPoisonedSession detects a DuckLake session invalidated mid-query and
+// discards the pool's idle connections so the next pass runs on fresh
+// sessions. The trigger: din's catalog-wide maintenance (flush_inlined_data /
+// merge) can rewrite the ducklake_inlined_data_* tables out from under an
+// in-flight dq read; the ducklake extension throws a FATAL that leaves the
+// connection's catalog transaction permanently aborted, and the pool happily
+// re-serves that connection — every subsequent pass fails with "Current
+// transaction is aborted (please ROLLBACK)" until the 30m conn lifetime or
+// the 1h restart backstop. Proven end-to-end with both binaries sharing a
+// live catalog; in prod the collision recurs every maintenance interval.
+// SetMaxIdleConns(0) closes all idle conns (the poisoned one was just
+// returned by the failed pass); restoring the limit lets fresh sessions
+// re-open lazily. Returns true when the error matched.
+// isDatabaseInvalidated reports the unrecoverable in-process failure mode:
+// a ducklake-extension crash (observed: "Attempted to access index 0 within
+// vector of size 0" when din maintenance flushes inlined data under a
+// concurrent read) invalidates the ENTIRE embedded DuckDB instance — every
+// future query on every connection fails with "database has been
+// invalidated". No pool recycling can heal it; only a process restart can.
+// Proven by the two-binary e2e; classified so the runner restarts in seconds
+// instead of grinding the 1h failure window while decode is down.
+func isDatabaseInvalidated(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "database has been invalidated")
+}
+
+func (m *DuckLakeMaterializer) recoverPoisonedSession(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "transaction is aborted") &&
+		!strings.Contains(msg, "Current transaction is aborted") {
+		return false
+	}
+	max := m.db.Stats().MaxOpenConnections
+	m.db.SetMaxIdleConns(0)
+	if max > 0 {
+		m.db.SetMaxIdleConns(max)
+	}
+	return true
+}
+
 // timeRange returns the min and max ts(row) over rows (both zero when empty).
 func timeRange[T any](rows []T, ts func(T) time.Time) (minT, maxT time.Time) {
 	for i := range rows {

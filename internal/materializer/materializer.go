@@ -108,6 +108,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	lastPrune := time.Now()
 	lastRollup := time.Now()
 	failures := failureTracker{window: materializerMaxFailureWindow}
+	triedSessionRecycle := false
 	for {
 		processed, err := r.RunOnce(ctx)
 		if err != nil {
@@ -115,6 +116,14 @@ func (r *Runner) Run(ctx context.Context) error {
 				return nil
 			}
 			passErrorsTotal.Inc()
+			if isDatabaseInvalidated(err) {
+				// The embedded DuckDB instance is dead (ducklake-extension
+				// crash under din's concurrent maintenance): every future
+				// query on every connection fails. Restart NOW — a pod
+				// restart heals in seconds; waiting out the failure window
+				// would be an hour of decode outage per collision.
+				return fmt.Errorf("embedded database invalidated; restarting to recover: %w", err)
+			}
 			if failures.record(false, time.Now()) {
 				// Every pass has failed for the whole window — the decode loop is
 				// durably broken (catalog down, attach poisoned). Return so the pod
@@ -122,9 +131,27 @@ func (r *Runner) Run(ctx context.Context) error {
 				// the pod Ready, mirroring din's maintainer backstop.
 				return fmt.Errorf("materializer failing for over %s, last pass: %w", materializerMaxFailureWindow, err)
 			}
+			// A DuckLake FATAL (din's maintenance flushing inlined-data tables
+			// out from under an in-flight read) can poison catalog state: every
+			// later pass fails with "Current transaction is aborted". Two-strike
+			// recovery, calibrated by the two-binary e2e: first strike recycles
+			// the idle pool (heals a genuinely per-connection abort cheaply);
+			// if the very next pass hits the same class, the poison is
+			// instance-level (the ducklake attach itself) and NO connection can
+			// heal it — restart the process, which recovers in seconds under
+			// the pod supervisor instead of grinding the 1h failure window
+			// with decode down.
+			if r.lake != nil && r.lake.recoverPoisonedSession(err) {
+				if triedSessionRecycle {
+					return fmt.Errorf("catalog session poison survived a connection recycle (instance-level ducklake invalidation); restarting to recover: %w", err)
+				}
+				triedSessionRecycle = true
+				r.log.Warn().Err(err).Msg("poisoned catalog session detected; recycled idle connections")
+			}
 			r.log.Error().Err(err).Msg("materializer pass failed")
 		} else {
 			failures.record(true, time.Now()) // any success clears the failure streak
+			triedSessionRecycle = false       // a healthy pass proves the session pool recovered
 			if processed > 0 {
 				// Still draining. signals_latest is maintained off this path
 				// (FlushRollup), so a long catch-up doesn't block the writer; bound the
