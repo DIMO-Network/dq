@@ -249,19 +249,31 @@ func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 		// signals_latest is the per-(subject,name) latest+summary rollup (CHD-3):
 		// it makes latest/summary/availableSignals O(distinct-names) instead of a
 		// full-history GROUP BY per request. Maintained OFF the decode commit by
-		// FlushRollup, which recomputes the touched subject_buckets from the deduped
+		// FlushRollup, which recomputes the touched subjects from the deduped
 		// base table, so it is a materialized view of getAllLatestSignalsLake (no
 		// source filter) — parity is by construction. Partitioned by subject_bucket
-		// like the base.
+		// like the base. loc_ts (H9) is the (0,0)-filtered latest-location
+		// timestamp (epoch when the name has no nonzero fix) — it is what lets
+		// LOCATION latest queries (currentLocationCoordinates, the most common
+		// telemetry read) serve from the rollup instead of a full-history
+		// deduped GROUP BY.
 		stmts = append(stmts,
 			`CREATE TABLE IF NOT EXISTS lake.signals_latest (
 				subject VARCHAR, subject_bucket INTEGER, name VARCHAR,
 				"timestamp" TIMESTAMP WITH TIME ZONE,
 				value_number DOUBLE, value_string VARCHAR,
 				loc_lat DOUBLE, loc_lon DOUBLE, loc_hdop DOUBLE, loc_heading DOUBLE,
+				loc_ts TIMESTAMP WITH TIME ZONE,
 				count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
 			`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
 		)
+	} else {
+		// Migrate catalogs whose rollup predates loc_ts (H9). ADD COLUMN IF NOT
+		// EXISTS is idempotent — unlike the partition/sort ALTERs above, it is
+		// safe on every boot; pre-migration rows read as NULL (the read path
+		// coalesces) until a recompute backfills them.
+		stmts = append(stmts,
+			`ALTER TABLE lake.signals_latest ADD COLUMN IF NOT EXISTS loc_ts TIMESTAMP WITH TIME ZONE`)
 	}
 	// The remaining statements are genuinely idempotent (CREATE IF NOT EXISTS /
 	// guarded INSERT) and mint no schema change, so they run on every boot.
@@ -955,7 +967,7 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 // or appended SELECT column would silently shift every value one column over (data
 // corruption, not an error). Named columns make that drift fail loud instead.
 const signalsLatestColumns = ` (subject, subject_bucket, name, "timestamp", value_number, ` +
-	`value_string, loc_lat, loc_lon, loc_hdop, loc_heading, count, first_seen, last_seen) `
+	`value_string, loc_lat, loc_lon, loc_hdop, loc_heading, loc_ts, count, first_seen, last_seen) `
 
 func rollupSelectSQL(whereClause string) string {
 	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
@@ -967,6 +979,7 @@ func rollupSelectSQL(whereClause string) string {
 		coalesce(arg_max(loc_lon, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lon,
 		coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
 		coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading,
+		coalesce(max(timestamp) FILTER (WHERE %[1]s), make_timestamp(0)) AS loc_ts,
 		CAST(count(*) AS BIGINT) AS count,
 		min(timestamp) AS first_seen, max(timestamp) AS last_seen
 	FROM (SELECT * FROM lake.signals %[2]s

@@ -116,3 +116,50 @@ func TestDuckLake_FlushRollup_SubjectScoped(t *testing.T) {
 	assert.Equal(t, 50.0, latestSpeed(subjB))
 	assert.Equal(t, 60.0, latestSpeed(subjC))
 }
+
+// TestDuckLake_LocationLatest_ServedFromRollup pins H9: location latest
+// (currentLocationCoordinates — the most common telemetry query) is served
+// from the rollup's loc_* columns + loc_ts, not a full-history deduped scan.
+// Proven the same way as the value test: prune the base table (as retention
+// does) and assert the location latest still answers — only the rollup can.
+func TestDuckLake_LocationLatest_ServedFromRollup(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	svc := newLakeService(t, dir)
+	db := svc.DB()
+	subject := fmt.Sprintf("did:erc721:137:%s:8", vehicleNFT.Hex())
+	day := time.Now().UTC().AddDate(0, 0, -3).Truncate(24 * time.Hour)
+	fixTS := day.Add(time.Hour)
+
+	seedRawStatus(t, db, "loc-1", subject, fixTS,
+		map[string]any{"name": "currentLocationCoordinates", "timestamp": fixTS.Format(time.RFC3339Nano),
+			"value": map[string]any{"latitude": 42.33, "longitude": -83.05, "hdop": 1.5}},
+	)
+
+	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
+	require.NoError(t, err)
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
+		WithDuckLake(mat)
+	require.Equal(t, 1, drainRunner(t, ctx, runner))
+
+	// Retention prunes the base; the rollup is current state and stays.
+	_, err = db.ExecContext(ctx, "DELETE FROM lake.signals")
+	require.NoError(t, err)
+
+	q := duck.NewLakeQueries(svc)
+	got, err := q.GetLatestSignals(ctx, subject, &model.LatestSignalsArgs{
+		LocationSignalNames: map[string]struct{}{"currentLocationCoordinates": {}},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, got, "location latest answered after base prune — rollup-served")
+	var found bool
+	for _, s := range got {
+		if s.Data.Name == "currentLocationCoordinates" {
+			found = true
+			assert.InDelta(t, 42.33, s.Data.ValueLocation.Latitude, 1e-9)
+			assert.InDelta(t, -83.05, s.Data.ValueLocation.Longitude, 1e-9)
+			assert.True(t, s.Data.Timestamp.Equal(fixTS), "ts is the nonzero-fix timestamp (loc_ts), got %v want %v", s.Data.Timestamp, fixTS)
+		}
+	}
+	require.True(t, found)
+}

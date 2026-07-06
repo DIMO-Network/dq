@@ -39,13 +39,16 @@ func (q *Queries) getAllLatestSignalsRollup(ctx context.Context, subject string)
 	return q.querySignals(ctx, stmt, []any{subject, subject})
 }
 
-// getLatestSignalsRollup serves GetLatestSignals for the requested non-location
-// signal names from lake.signals_latest (SR-5): each stored row is already the
+// getLatestSignalsRollup serves GetLatestSignals for the requested signal
+// names from lake.signals_latest (SR-5): each stored row is already the
 // per-name latest value at its overall-max timestamp, matching the GROUP BY in
-// getLatestSignalsLake by construction. The caller guarantees no source filter
-// and no location names. IncludeLastSeen adds the virtual lastSeen row.
+// getLatestSignalsLake by construction. Location names serve from the same
+// row's loc_* columns with loc_ts — the (0,0)-filtered latest-fix timestamp
+// (H9) — so currentLocationCoordinates no longer full-scans history. The
+// caller guarantees no source filter. IncludeLastSeen adds the virtual
+// lastSeen row.
 func (q *Queries) getLatestSignalsRollup(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error) {
-	if len(latestArgs.SignalNames) == 0 && !latestArgs.IncludeLastSeen {
+	if len(latestArgs.SignalNames) == 0 && len(latestArgs.LocationSignalNames) == 0 && !latestArgs.IncludeLastSeen {
 		return nil, nil
 	}
 	bucket := subjectBucketPredicate("", subject)
@@ -58,6 +61,21 @@ func (q *Queries) getLatestSignalsRollup(ctx context.Context, subject string, la
 				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
 			 FROM lake.signals_latest WHERE subject = ? AND %s AND name IN (%s)`,
 			bucket, placeholders(len(names))))
+		args = append(args, subject)
+		for _, n := range names {
+			args = append(args, n)
+		}
+	}
+	if len(latestArgs.LocationSignalNames) > 0 {
+		names := mapKeys(latestArgs.LocationSignalNames)
+		// coalesce(loc_ts, epoch) covers rows written before the loc_ts
+		// migration; a full recompute backfills them.
+		stmts = append(stmts, fmt.Sprintf(
+			`SELECT name, coalesce(loc_ts, %s) AS ts,
+				0.0 AS value_number, '' AS value_string,
+				loc_lat, loc_lon, loc_hdop, loc_heading
+			 FROM lake.signals_latest WHERE subject = ? AND %s AND name IN (%s)`,
+			epochLiteral, bucket, placeholders(len(names))))
 		args = append(args, subject)
 		for _, n := range names {
 			args = append(args, n)

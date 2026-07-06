@@ -17,12 +17,11 @@ import (
 //   - IncludeLastSeen adds the virtual lastSeen row (max timestamp over all
 //     signals, per (subject, source) under model.LastSeenField)
 func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs) ([]*vss.Signal, error) {
-	// The rollup serves named latest in O(distinct-names), but it stores
-	// only the per-name latest value + its overall-max timestamp — not the
-	// separate nonzero-location timestamp the location-name path needs — so
-	// location names and source-filtered queries fall back to the full
-	// deduped scan (SR-5).
-	if noSourceFilter(latestArgs.Filter) && len(latestArgs.LocationSignalNames) == 0 {
+	// The rollup serves named latest — including location names, whose
+	// (0,0)-filtered latest-fix timestamp is stored as loc_ts (H9) — in
+	// O(distinct-names). Only source-filtered queries fall back to the full
+	// deduped scan (SR-5): the rollup folds sources by construction.
+	if noSourceFilter(latestArgs.Filter) {
 		observeLakePath(true)
 		return q.getLatestSignalsRollup(ctx, subject, latestArgs)
 	}
