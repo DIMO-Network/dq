@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
@@ -323,8 +324,24 @@ func (l *LakeEventService) resolvePayload(ctx context.Context, ev cloudevent.Sto
 }
 
 // indexBlobConcurrency bounds the parallel blob resolution in
-// ListCloudEventsFromIndexes.
-const indexBlobConcurrency = 25
+// ListCloudEventsFromIndexes. Sized with maxListPayloadBytes in mind: worst-
+// case resident memory for one call is roughly the budget plus this many
+// max-size (50MiB) objects still in flight — keep the sum well inside the
+// pod's non-DuckDB headroom (~2GiB at prod sizing), because two concurrent
+// blob-heavy RPCs share it (H11).
+const indexBlobConcurrency = 8
+
+// maxListPayloadBytes caps the TOTAL payload bytes one
+// ListCloudEventsFromIndexes call may resolve and hold before marshalling.
+// Without it a 1000-index blob request could materialize up to 50GiB;
+// MaxSendMsgSize would reject the response only AFTER the allocation work —
+// an OOM vector, not a guard (H11).
+const maxListPayloadBytes = 256 << 20
+
+// ErrPayloadBudgetExceeded means one list call tried to resolve more than
+// maxListPayloadBytes of payloads; callers should narrow the index batch.
+// The gRPC layer maps it to ResourceExhausted.
+var ErrPayloadBudgetExceeded = fmt.Errorf("total payload size exceeds the %d MiB per-call budget: request fewer indexes per call", maxListPayloadBytes>>20)
 
 // ListCloudEventsFromIndexes fetches the payload for each index entry, in input
 // order. It groups the requested ids by subject and issues one query per
@@ -380,13 +397,25 @@ func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, index
 	}
 
 	out := make([]cloudevent.RawEvent, len(indexes))
+	var payloadBytes atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(indexBlobConcurrency)
 	for i := range evs {
 		g.Go(func() error {
+			// Budget check BEFORE fetching: once the resolved total is over
+			// the cap, stop launching S3 GETs — the errgroup ctx cancels the
+			// rest. (In-flight fetches can overshoot by at most
+			// indexBlobConcurrency × maxObjectSize, which the constants keep
+			// inside the pod headroom.)
+			if payloadBytes.Load() > maxListPayloadBytes {
+				return ErrPayloadBudgetExceeded
+			}
 			raw, err := l.resolvePayload(gctx, evs[i])
 			if err != nil {
 				return err
+			}
+			if payloadBytes.Add(int64(len(raw.Data))) > maxListPayloadBytes {
+				return ErrPayloadBudgetExceeded
 			}
 			out[i] = raw
 			return nil

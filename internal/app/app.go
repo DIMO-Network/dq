@@ -51,6 +51,10 @@ type App struct {
 	// token's own subject + verify cross-subject device links, the same way the
 	// GraphQL resolver does. Shared with the resolver.
 	identityClient identity.Client
+	// globalLimiter is the process-wide in-flight cap; the gRPC server shares
+	// it with the HTTP chain so both transports draw from ONE admission budget
+	// in front of the one DuckDB pool (H11).
+	globalLimiter *limits.GlobalLimiter
 }
 
 // New creates a new application.
@@ -130,6 +134,7 @@ func New(settings config.Settings) (*App, error) {
 	}
 
 	concLimiter := limits.NewConcurrencyLimiter(settings.MaxConcurrentPerSubject)
+	globalLimiter := limits.NewGlobalLimiter(settings.MaxConcurrentRequests)
 	// subjectKey limits by the authenticated JWT subject (the developer/caller). It is
 	// applied just inside CheckJWT, which has populated the claims by that point.
 	subjectKey := func(r *http.Request) string {
@@ -142,11 +147,15 @@ func New(settings config.Settings) (*App, error) {
 	authChain := func(inner http.Handler) http.Handler {
 		return PanicRecoveryMiddleware(
 			LoggerMiddleware(
-				limiter.AddRequestTimeout(
-					jwtMiddleware.CheckJWT(
-						concLimiter.Middleware(subjectKey)(
-							authLoggerMiddleware(
-								auth.AddClaimHandler(inner),
+				// Global admission first (H11): shed load BEFORE spending JWT
+				// validation and before a request can queue on the DuckDB pool.
+				globalLimiter.Middleware(
+					limiter.AddRequestTimeout(
+						jwtMiddleware.CheckJWT(
+							concLimiter.Middleware(subjectKey)(
+								authLoggerMiddleware(
+									auth.AddClaimHandler(inner),
+								),
 							),
 						),
 					),
@@ -178,6 +187,7 @@ func New(settings config.Settings) (*App, error) {
 		readyCheck:     readyCheck,
 		eventService:   eventService,
 		identityClient: identityClient,
+		globalLimiter:  globalLimiter,
 		cleanup:        cleanup,
 	}, nil
 }
@@ -204,6 +214,11 @@ func CreateGRPCServer(logger *zerolog.Logger, application *App, settings config.
 	interceptors := []grpc.UnaryServerInterceptor{
 		metrics.GRPCMetricsAndLogMiddleware(logger),
 		recovery.UnaryServerInterceptor(recovery.WithRecoveryHandler(grpcPanic.GRPCPanicRecoveryHandler)),
+		// Process-wide admission (shared with the HTTP chain): the fetch port
+		// had no concurrency bound at all, so blob-heavy RPC bursts queued
+		// unboundedly on the DuckDB pool + Go heap (H11). After metrics so
+		// rejections are observable, before auth so shed requests stay cheap.
+		application.globalLimiter.UnaryInterceptor(),
 		// Bound a fetch RPC that arrives with no client deadline: DuckDB cancels
 		// via context, so without a deadline a pathological query runs unbounded on
 		// one of the few pooled connections and can starve the replica.

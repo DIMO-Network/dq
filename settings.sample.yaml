@@ -8,6 +8,8 @@ ENABLE_PPROF: false
 MAX_REQUEST_DURATION: 30s
 # Per-JWT-subject in-flight request cap; 0 disables it (opt-in — see settings.go).
 MAX_CONCURRENT_REQUESTS_PER_SUBJECT: 0
+# Process-wide in-flight cap (HTTP+gRPC), the pool admission control (H11). 0 disables.
+MAX_CONCURRENT_REQUESTS: 0
 
 # DuckLake is the only query backend. CATALOG_DSN + DATA_PATH are REQUIRED
 # (boot fails fast if the DSN is empty): a Postgres connection string in prod, or

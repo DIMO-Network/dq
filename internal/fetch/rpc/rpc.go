@@ -10,6 +10,7 @@ import (
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/fetch"
 	"github.com/DIMO-Network/dq/internal/identity"
+	"github.com/DIMO-Network/dq/internal/service/duck"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -148,6 +149,9 @@ func (s *Server) ListCloudEvents(ctx context.Context, req *grpc.ListCloudEventsR
 	}
 	data, err := fetch.ListCloudEventsFromIndexes(ctx, s.eventService, metaList)
 	if err != nil {
+		if errors.Is(err, duck.ErrPayloadBudgetExceeded) {
+			return nil, status.Errorf(codes.ResourceExhausted, "%v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "failed to get objects: %v", err)
 	}
 

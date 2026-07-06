@@ -18,7 +18,13 @@ type Settings struct {
 	// subject so one caller can't pin the whole DuckDB pool and starve co-tenants on
 	// a replica. 0 (default) disables it — opt-in, since the right ceiling depends on
 	// the pool size + real query mix. A rejected request gets 429.
-	MaxConcurrentPerSubject   int    `yaml:"MAX_CONCURRENT_REQUESTS_PER_SUBJECT"`
+	MaxConcurrentPerSubject int `yaml:"MAX_CONCURRENT_REQUESTS_PER_SUBJECT"`
+	// MaxConcurrentRequests bounds TOTAL in-flight requests per process (HTTP +
+	// gRPC), the admission control in front of the small DuckDB pool: excess
+	// requests are shed fast (429 / RESOURCE_EXHAUSTED) instead of queueing
+	// unboundedly behind slow queries (H11). Size to a small multiple of
+	// DUCKDB_MAX_CONNS. 0 (default) disables it.
+	MaxConcurrentRequests     int    `yaml:"MAX_CONCURRENT_REQUESTS"`
 	TokenExchangeJWTKeySetURL string `yaml:"TOKEN_EXCHANGE_JWK_KEY_SET_URL"`
 	TokenExchangeIssuer       string `yaml:"TOKEN_EXCHANGE_ISSUER_URL"`
 	// FetchGRPCRequireJWT makes a valid DIMO JWT mandatory on the fetch gRPC port.

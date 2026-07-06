@@ -10,6 +10,14 @@ env:
   # pod, threads = CPU limit.
   DUCKDB_MEMORY_LIMIT: 6GiB
   DUCKDB_THREADS: 4
+  # Admission control (H11) — without these, six pathological queries wedge a
+  # replica for MAX_REQUEST_DURATION while database/sql queues everything
+  # behind them unboundedly. Global cap ≈ 2-3x DUCKDB_MAX_CONNS (6): enough to
+  # overlap I/O waits, small enough that overflow sheds fast (429 /
+  # RESOURCE_EXHAUSTED) and the HPA absorbs sustained load with replicas.
+  MAX_CONCURRENT_REQUESTS: '16'
+  MAX_CONCURRENT_REQUESTS_PER_SUBJECT: '8'
+  MAX_REQUEST_DURATION: 60s
   # Query fleet never writes the lake — only the single-writer materializer
   # does — so attach the DuckLake catalog read-only. This keeps the 2-10
   # autoscaled query replicas off the primary catalog as writers and lets them
@@ -62,15 +70,19 @@ resources:
     cpu: 1
     memory: 2Gi
 duckdbTempSizeLimit: 20Gi
-# HPA on CPU and memory for the query fleet (MATERIALIZER_ENABLED=false). The
+# HPA on CPU ONLY for the query fleet (MATERIALIZER_ENABLED=false). The
 # materializer runs as a separate replicaCount=1, autoscaling-off release
 # (enforced by the deployment guard).
+# NO memory target (H10): autoscaling/v2 Utilization is measured against
+# REQUESTS (2Gi), and DuckDB deliberately holds up to DUCKDB_MEMORY_LIMIT
+# (6GiB ≈ 300% of the request) of cache that never shrinks — a memory target
+# votes max-replicas forever once the cache warms, pinning the fleet at
+# maxReplicas with no scale-in. Cache-heavy DB pods must not HPA on memory.
 autoscaling:
   enabled: true
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
-  targetMemoryUtilizationPercentage: 75
 nodeSelector: {}
 tolerations: []
 affinity: {}
