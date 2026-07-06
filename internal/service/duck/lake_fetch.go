@@ -48,6 +48,18 @@ const maxLakeQueryLimit = 1000
 const RawEventColumns = `subject, "time", type, id, source, producer, ` +
 	`data_content_type, data_version, extras, data, data_base64, data_index_key, voids_id`
 
+// rawEventIndexColumns is the INDEX projection: header + locator with the
+// payload columns NULLed out (same shape, so scanStoredEvent works
+// unchanged). Index lookups (ListIndexesAdvanced / latestCloudEvent /
+// cloudEvents) only need headers — selecting data/data_base64 there dragged
+// every candidate row's payload through the dedup WINDOW + sort (the window
+// blocks Top-N pushdown), ~200MB of S3 reads for one latestCloudEvent on a
+// chatty vehicle (H8). NULL literals let projection pushdown skip the payload
+// column chunks entirely; payloads are fetched afterwards by id via
+// GetCloudEventFromIndex / ListCloudEventsFromIndexes.
+const rawEventIndexColumns = `subject, "time", type, id, source, producer, ` +
+	`data_content_type, data_version, extras, NULL AS data, NULL AS data_base64, data_index_key, voids_id`
+
 // voidingClause builds the tombstone-exclusion predicate for raw_events: drop
 // tombstones (voids_id set) and any event a same-subject tombstone voids. ref is
 // the row alias/qualifier ("e" in a search, the table name in an aggregate).
@@ -96,6 +108,13 @@ var _ eventrepo.EventService = (*LakeEventService)(nil)
 // DESC (newest-first) by default, ASC
 // (oldest-first) when filter.TimestampAsc is true.
 func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, limit int) ([]cloudevent.StoredEvent, error) {
+	return l.queryLakeRawCols(ctx, filter, limit, RawEventColumns)
+}
+
+// queryLakeRawCols is queryLakeRaw with an explicit projection: index lookups
+// pass rawEventIndexColumns so payload column chunks are never read (H8);
+// payload fetches (by-id point lookups) pass RawEventColumns.
+func (l *LakeEventService) queryLakeRawCols(ctx context.Context, filter RawFilter, limit int, cols string) ([]cloudevent.StoredEvent, error) {
 	// Apply the default lookback only when nothing else narrows the scan: not a
 	// point lookup by id (GetCloudEventFromIndex), and not a subject-scoped
 	// fetch. A subject prunes via raw_events' (subject, time) sort + zone maps to
@@ -136,7 +155,7 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 			"PARTITION BY e.subject, date_trunc('second', e.time), e.type, e.source, e.id "+
 			"ORDER BY e.time) = 1 "+
 			"ORDER BY e.time %s LIMIT %d",
-		RawEventColumns, lakeRawEvents, where, voiding, order, limit)
+		cols, lakeRawEvents, where, voiding, order, limit)
 
 	rows, err := l.svc.DB().QueryContext(ctx, q, args...)
 	if err != nil {
@@ -171,7 +190,7 @@ func (l *LakeEventService) ListIndexesAdvanced(ctx context.Context, limit int, o
 	if err != nil {
 		return nil, err
 	}
-	evs, err := l.queryLakeRaw(ctx, f, limit)
+	evs, err := l.queryLakeRawCols(ctx, f, limit, rawEventIndexColumns)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +214,7 @@ func (l *LakeEventService) GetLatestIndexAdvanced(ctx context.Context, opts *grp
 	}
 	f.TimestampAsc = false // always newest-first for "get latest"
 
-	evs, err := l.queryLakeRaw(ctx, f, 1)
+	evs, err := l.queryLakeRawCols(ctx, f, 1, rawEventIndexColumns)
 	if err != nil {
 		return cloudevent.CloudEvent[eventrepo.ObjectInfo]{}, err
 	}
