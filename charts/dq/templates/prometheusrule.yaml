@@ -20,7 +20,13 @@ spec:
               decodes them ({{ "{{ $labels.type }}" }}). Queries serve stale
               data; din's snapshot expiry is also held back by this consumer floor.
         - alert: DQMaterializerStalled
-          expr: rate(dq_materializer_batches_total[30m]) == 0 and max(dq_materializer_lag_seconds) > 0
+          # Label algebra matters here (H1): bare `and` intersects on ALL labels,
+          # and rate() over a differently-labeled counter never matches an
+          # aggregated max() — the original expression could not fire. Both sides
+          # are aggregated to the empty label set and joined `and on()`. The
+          # `or vector(0)` keeps the left side alive when the counter has gone
+          # stale/absent-but-scraped (a pod that stopped committing entirely).
+          expr: (sum(rate(dq_materializer_batches_total[30m])) or vector(0)) == 0 and on() max(dq_materializer_lag_seconds) > 0
           for: 30m
           labels:
             severity: critical
@@ -59,9 +65,14 @@ spec:
               ({{ "{{ $value }}" }} resets; span in
               dq_materializer_last_cursor_reset_gap_snapshots). Backfill the
               skipped range, then raise retention or decode throughput.
-        # End-to-end decode backlog as a single number (CHD-14): how many
-        # DuckLake snapshots the decoder is behind the committed head. Pair with
-        # din's head-age metric for the full pipeline lag.
+        # Decode-position spread as a single number (CHD-14). NOT an exact
+        # backlog: head is the catalog-global max snapshot id, which includes
+        # this decoder's own signals/events/rollup snapshots and din's
+        # maintenance snapshots, so the value stays non-zero when fully caught
+        # up — use it for trend/growth, and dq_materializer_lag_seconds for the
+        # decode-lag SLO. Since materializer metrics are registered only in the
+        # materializer process (H2), this record is empty (not a misleading 0)
+        # while the materializer is down.
         - record: dq:pipeline_snapshot_backlog
           expr: max(dq_materializer_head_snapshot_id) - max(dq_materializer_cursor_snapshot_id)
         # Background-loop failures were only logged, never alerted (SR-14).
@@ -138,6 +149,21 @@ spec:
           annotations:
             summary: signals_latest rollup refresh is slow
             description: >-
-              The per-batch rollup recompute exceeds 10s, growing with per-vehicle
-              history. It runs inside the commit transaction, so it caps decode
-              throughput — consider the incremental-merge follow-up (SR-1).
+              The rollup flush exceeds 10s, growing with per-vehicle history.
+              It runs off the decode commit but ON the decode-loop goroutine,
+              so slow flushes still steal decode time between passes — consider
+              the incremental-merge follow-up (SR-1).
+        # The rollup flush self-heals on the next pass, but a SUSTAINED failure
+        # means latest/summary reads go stale for customers while decode stays
+        # green — the counter's help text says to alert on it (M23).
+        - alert: DQMaterializerRollupFlushErrors
+          expr: increase(dq_materializer_rollup_flush_errors_total[1h]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: signals_latest rollup flush is failing
+            description: >-
+              FlushRollup errored repeatedly; the signals_latest rollup (and the
+              latest/summary reads it serves) is going stale while decode keeps
+              succeeding. Investigate the rollup write path.

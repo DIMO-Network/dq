@@ -98,6 +98,7 @@ const defaultMaxSnapshotSpan = 16
 // returns a materializer over db (which must have the shared catalog attached
 // as schema "lake", with din's raw_events present).
 func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger) (*DuckLakeMaterializer, error) {
+	registerMetrics()
 	m := &DuckLakeMaterializer{
 		db:              db,
 		log:             log.With().Str("component", "ducklake-materializer").Logger(),

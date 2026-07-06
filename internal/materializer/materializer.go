@@ -80,6 +80,7 @@ type Runner struct {
 // New creates a Runner. Zero-valued config fields get defaults. Wire the
 // DuckLake catalog with WithDuckLake before running.
 func New(cfg Config, log zerolog.Logger) *Runner {
+	registerMetrics()
 	return &Runner{
 		cfg: cfg.withDefaults(),
 		log: log.With().Str("component", "materializer").Logger(),
