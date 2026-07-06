@@ -26,17 +26,27 @@ func NewLakeQueries(svc *Service) *Queries {
 	return &Queries{svc: svc}
 }
 
-// lakeEventsDeduped is the canonical DuckLake decoded-event source: lake.events
-// with at-rest duplicate rows collapsed to one. The materializer's INSERT
+// LakeEventsDeduped is the canonical DuckLake decoded-event source for one
+// subject: lake.events pruned to the subject's hash-bucket partition and with
+// at-rest duplicate rows collapsed to one. The materializer's INSERT
 // anti-join keys on (subject_bucket, cloud_event_id, name, timestamp), so two
 // distinct cloud_event_ids that decode to the same logical event both survive —
 // reading the bare table over-counts events, so duplicates are collapsed
 // on (subject, timestamp, name, source). Dedup on
 // that same key here (lowest cloud_event_id wins, deterministically) restores
-// correct counts (SR review #3; the events analogue of lakeSignalsDeduped / CHD-2).
-// subject/timestamp remain partition/sort keys, so predicates still prune.
-const lakeEventsDeduped = `(SELECT * FROM lake.events ` +
-	`QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, timestamp, name, source ORDER BY cloud_event_id) = 1)`
+// correct counts (SR review #3; the events analogue of LakeSignalsDeduped / CHD-2).
+//
+// The subject_bucket predicate lives INSIDE the subquery for the same reason
+// as LakeSignalsDeduped (B1, see lake_latest.go): DuckDB only pushes filters
+// on the window's PARTITION BY columns below the WINDOW operator, and
+// subject_bucket is not one — outside, it never reaches the scan and pruning
+// dies. subject_bucket is a pure function of subject (a dedup key column), so
+// it is constant per dedup partition and cannot change which row wins.
+// Exported so tests/ducklake_partition_test.go can EXPLAIN-pin the pushdown.
+func LakeEventsDeduped(subject string) string {
+	return `(SELECT * FROM lake.events WHERE ` + subjectBucketPredicate("", subject) + ` ` +
+		`QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, timestamp, name, source ORDER BY cloud_event_id) = 1)`
+}
 
 // tsMicroLiteral formats a time.Time as a DuckDB TIMESTAMP literal with
 // microsecond precision. Timestamps are inlined instead of bound, so sub-second

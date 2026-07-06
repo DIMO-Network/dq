@@ -19,13 +19,13 @@ import (
 // tuples differ deliberately by what makes a row "the same reading" in each table:
 //
 //   1. signals READ dedup  — (subject, name, timestamp) ORDER BY cloud_event_id
-//        `signalDedupQualify` below; embedded by lakeSignalsDeduped and the segment
+//        `signalDedupQualify` below; embedded by LakeSignalsDeduped and the segment
 //        signal-source queries (segments_source.go). One value per signal per instant.
 //   2. signals WRITE anti-join — (subject_bucket, cloud_event_id, name, timestamp)
 //        materializer INSERT (ducklake.go): keyed on cloud_event_id so a re-decoded
 //        batch is idempotent; subject_bucket prunes the partition.
 //   3. events READ dedup   — (subject, timestamp, name, source)
-//        lakeEventsDeduped (queries.go): events include `source` because the SAME
+//        LakeEventsDeduped (queries.go): events include `source` because the SAME
 //        event from two sources is two distinct events, unlike signals.
 //   4. signals_latest rollup recompute — the signal key again
 //        (ducklake.go) so the rollup matches the on-read deduped scan exactly.
@@ -36,22 +36,34 @@ import (
 
 // signalDedupQualify collapses duplicate lake.signals rows to one per
 // (subject,name,timestamp), keeping the lowest cloud_event_id (read dedup key #1
-// above). lakeSignalsDeduped wraps it as an aggregation source; the segment
+// above). LakeSignalsDeduped wraps it as an aggregation source; the segment
 // signal-source queries (segments_source.go) embed it against the bare table.
 const signalDedupQualify = `QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, name, timestamp ORDER BY cloud_event_id) = 1`
 
-// lakeSignalsDeduped is the canonical DuckLake decoded-signal source:
-// lake.signals with at-rest duplicate (subject,name,timestamp) rows collapsed
-// to one row (lowest cloud_event_id). At-least-once ingest (device retry, sink
-// redelivery, dq cross-batch) can store the same reading more than once with a
-// different cloud_event_id; reading the bare table over-counts
+// LakeSignalsDeduped is the canonical DuckLake decoded-signal source for one
+// subject: lake.signals pruned to the subject's hash-bucket partition and with
+// at-rest duplicate (subject,name,timestamp) rows collapsed to one row (lowest
+// cloud_event_id). At-least-once ingest (device retry, sink redelivery, dq
+// cross-batch) can store the same reading more than once with a different
+// cloud_event_id; reading the bare table over-counts
 // avg/count/sum/median/latest/summary (CHD-2 / R1-C1). After collapsing, every
 // (subject,name,timestamp) is unique, so arg_max(value, timestamp) for latest
 // has no tie-break ambiguity either (R1-C2). Matches the segments path
-// (segments_source.go), collapsing duplicate rows. The PARTITION BY
-// columns are partition/sort keys (CHD-1), so subject/timestamp predicates
-// still prune below the window.
-const lakeSignalsDeduped = `(SELECT * FROM lake.signals ` + signalDedupQualify + `)`
+// (segments_source.go), collapsing duplicate rows.
+//
+// The subject_bucket predicate MUST live here, INSIDE the subquery at the same
+// SELECT level as the QUALIFY (B1): DuckDB pushes only filters on the window's
+// PARTITION BY columns below a WINDOW operator. subject and timestamp are
+// PARTITION BY columns, so outer predicates on them still prune — but
+// subject_bucket is not, so an outer bucket filter parks in a FILTER above the
+// window and partition pruning silently dies (every query scans all
+// NumLatestBuckets buckets). Inside the subquery it reaches the scan. It is
+// safe inside: subject_bucket is a pure function of subject, so it is constant
+// within every dedup partition and cannot change which row wins. Exported so
+// tests/ducklake_partition_test.go can EXPLAIN-pin the pushdown.
+func LakeSignalsDeduped(subject string) string {
+	return `(SELECT * FROM lake.signals WHERE ` + subjectBucketPredicate("", subject) + ` ` + signalDedupQualify + `)`
+}
 
 // lakeNonZeroLoc is the on-the-fly (0,0)-exclusion computed over the base
 // location columns of lake.signals.
@@ -65,9 +77,9 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 		return nil, nil
 	}
 	srcCond, srcArgs := signalSourceCond("source", latestArgs.Filter)
-	srcSQL := " AND " + subjectBucketPredicate("", subject) // partition pruning (CHD-1)
+	srcSQL := "" // bucket pruning lives inside LakeSignalsDeduped (B1)
 	if srcCond != "" {
-		srcSQL += " AND " + srcCond
+		srcSQL = " AND " + srcCond
 	}
 
 	var stmts []string
@@ -80,7 +92,7 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 				coalesce(arg_max(value_string, timestamp), '') AS value_string,
 				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
 			FROM %s WHERE subject = ? AND name IN (%s)%s GROUP BY name`,
-			lakeSignalsDeduped, placeholders(len(names)), srcSQL))
+			LakeSignalsDeduped(subject), placeholders(len(names)), srcSQL))
 		args = append(args, subject)
 		for _, n := range names {
 			args = append(args, n)
@@ -98,7 +110,7 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 				coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
 				coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading
 			FROM %[3]s WHERE subject = ? AND name IN (%[4]s)%[5]s GROUP BY name`,
-			lakeNonZeroLoc, epochLiteral, lakeSignalsDeduped, placeholders(len(names)), srcSQL))
+			lakeNonZeroLoc, epochLiteral, LakeSignalsDeduped(subject), placeholders(len(names)), srcSQL))
 		args = append(args, subject)
 		for _, n := range names {
 			args = append(args, n)
@@ -116,9 +128,9 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 // getAllLatestSignalsLake is getLatestSignalsLake for every stored name.
 func (q *Queries) getAllLatestSignalsLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error) {
 	srcCond, srcArgs := signalSourceCond("source", filter)
-	srcSQL := " AND " + subjectBucketPredicate("", subject) // partition pruning (CHD-1)
+	srcSQL := "" // bucket pruning lives inside LakeSignalsDeduped (B1)
 	if srcCond != "" {
-		srcSQL += " AND " + srcCond
+		srcSQL = " AND " + srcCond
 	}
 	mainStmt := fmt.Sprintf(
 		`SELECT name, max(timestamp) AS ts,
@@ -129,7 +141,7 @@ func (q *Queries) getAllLatestSignalsLake(ctx context.Context, subject string, f
 			coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
 			coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading
 		FROM %[2]s WHERE subject = ?%[3]s GROUP BY name`,
-		lakeNonZeroLoc, lakeSignalsDeduped, srcSQL)
+		lakeNonZeroLoc, LakeSignalsDeduped(subject), srcSQL)
 	args := append([]any{subject}, srcArgs...)
 
 	lastSeenStmt, lastSeenArgs := lakeLastSeenQuery(subject, srcSQL, srcArgs)
@@ -147,18 +159,18 @@ func lakeLastSeenQuery(subject, srcSQL string, srcArgs []any) (string, []any) {
 			0.0 AS value_number, '' AS value_string,
 			0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
 		FROM %[3]s WHERE subject = ?%[4]s`,
-		sqlString(model.LastSeenField), epochLiteral, lakeSignalsDeduped, srcSQL)
+		sqlString(model.LastSeenField), epochLiteral, LakeSignalsDeduped(subject), srcSQL)
 	return stmt, append([]any{subject}, srcArgs...)
 }
 
 // getAvailableSignalsLake lists distinct signal names from lake.signals.
 func (q *Queries) getAvailableSignalsLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
 	srcCond, srcArgs := signalSourceCond("source", filter)
-	srcSQL := " AND " + subjectBucketPredicate("", subject) // partition pruning (CHD-1)
+	srcSQL := "" // bucket pruning lives inside LakeSignalsDeduped (B1)
 	if srcCond != "" {
-		srcSQL += " AND " + srcCond
+		srcSQL = " AND " + srcCond
 	}
-	stmt := fmt.Sprintf("SELECT DISTINCT name FROM %s WHERE subject = ?%s ORDER BY name", lakeSignalsDeduped, srcSQL)
+	stmt := fmt.Sprintf("SELECT DISTINCT name FROM %s WHERE subject = ?%s ORDER BY name", LakeSignalsDeduped(subject), srcSQL)
 	args := append([]any{subject}, srcArgs...)
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
@@ -180,14 +192,14 @@ func (q *Queries) getAvailableSignalsLake(ctx context.Context, subject string, f
 // from lake.signals.
 func (q *Queries) getSignalSummariesLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
 	srcCond, srcArgs := signalSourceCond("source", filter)
-	srcSQL := " AND " + subjectBucketPredicate("", subject) // partition pruning (CHD-1)
+	srcSQL := "" // bucket pruning lives inside LakeSignalsDeduped (B1)
 	if srcCond != "" {
-		srcSQL += " AND " + srcCond
+		srcSQL = " AND " + srcCond
 	}
 	stmt := fmt.Sprintf(
 		`SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp), max(timestamp)
 		FROM %s WHERE subject = ?%s GROUP BY name ORDER BY name`,
-		lakeSignalsDeduped, srcSQL)
+		LakeSignalsDeduped(subject), srcSQL)
 	args := append([]any{subject}, srcArgs...)
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
 	if err != nil {

@@ -18,8 +18,8 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 	events := []*vss.Event{}
 
 	conds := []string{
+		// subject_bucket pruning lives inside LakeEventsDeduped (B1).
 		"subject = ?",
-		subjectBucketPredicate("", subject), // partition pruning (CHD-1): subject_bucket is the leading partition key
 		"timestamp >= " + tsMicroLiteral(from),
 		"timestamp < " + tsMicroLiteral(to),
 	}
@@ -32,7 +32,7 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 	// limit/cursor, so a silent cap would lose data. The real
 	// blow-up risk — a fleet-wide scan — is removed by the subject_bucket prune
 	// above; a single vehicle's events over the window stay bounded by its activity.
-	stmt := "SELECT name, source, timestamp, duration_ns, metadata, CAST(to_json(tags) AS VARCHAR) FROM " + lakeEventsDeduped +
+	stmt := "SELECT name, source, timestamp, duration_ns, metadata, CAST(to_json(tags) AS VARCHAR) FROM " + LakeEventsDeduped(subject) +
 		" WHERE " + strings.Join(conds, " AND ") + " ORDER BY timestamp DESC"
 
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
@@ -66,8 +66,8 @@ func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to t
 	var result []*qtypes.EventCount
 
 	conds := []string{
+		// subject_bucket pruning lives inside LakeEventsDeduped (B1).
 		"subject = ?",
-		subjectBucketPredicate("", subject), // partition pruning (CHD-1)
 		"timestamp >= " + tsMicroLiteral(from),
 		"timestamp < " + tsMicroLiteral(to),
 	}
@@ -78,7 +78,7 @@ func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to t
 			args = append(args, n)
 		}
 	}
-	stmt := "SELECT name, CAST(count(*) AS BIGINT) AS count FROM " + lakeEventsDeduped +
+	stmt := "SELECT name, CAST(count(*) AS BIGINT) AS count FROM " + LakeEventsDeduped(subject) +
 		" WHERE " + strings.Join(conds, " AND ") + " GROUP BY name ORDER BY name"
 
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
@@ -119,7 +119,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 
 	var result []*qtypes.EventCountForRange
 
-	conds := []string{"subject = ?", subjectBucketPredicate("", subject)} // partition pruning (CHD-1)
+	conds := []string{"subject = ?"} // subject_bucket pruning lives inside LakeEventsDeduped (B1)
 	args := []any{subject}
 	if len(eventNames) > 0 {
 		conds = append(conds, "name IN ("+placeholders(len(eventNames))+")")
@@ -127,7 +127,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 			args = append(args, n)
 		}
 	}
-	inner := "SELECT " + segmentIndexCaseSQL("timestamp", ranges) + " AS seg_idx, name FROM " + lakeEventsDeduped +
+	inner := "SELECT " + segmentIndexCaseSQL("timestamp", ranges) + " AS seg_idx, name FROM " + LakeEventsDeduped(subject) +
 		" WHERE " + strings.Join(conds, " AND ")
 	stmt := "SELECT CAST(seg_idx AS BIGINT), name, CAST(count(*) AS BIGINT) AS count FROM (" + inner + ")" +
 		" WHERE seg_idx >= 0 GROUP BY seg_idx, name ORDER BY seg_idx, name"
@@ -157,9 +157,9 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
 	var result []*qtypes.EventSummary
 
-	stmt := "SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM " + lakeEventsDeduped +
-		" WHERE subject = ? AND " + subjectBucketPredicate("", subject) + // partition pruning (CHD-1): all-time scan must still prune to one bucket
-		" GROUP BY name ORDER BY name"
+	stmt := "SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM " + LakeEventsDeduped(subject) +
+		// All-time scan still prunes to one bucket: subject_bucket lives inside LakeEventsDeduped (B1).
+		" WHERE subject = ? GROUP BY name ORDER BY name"
 
 	rows, err := q.svc.db.QueryContext(ctx, stmt, subject)
 	if err != nil {

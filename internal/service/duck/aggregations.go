@@ -47,10 +47,10 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 	signals := []*qtypes.AggSignal{}
 
 	conds := []string{
+		// subject_bucket pruning lives inside LakeSignalsDeduped (B1).
 		"s.subject = ?",
 		"s.timestamp >= " + tsMicroLiteral(aggArgs.FromTS),
 		"s.timestamp < " + tsMicroLiteral(aggArgs.ToTS),
-		subjectBucketPredicate("s.", subject), // partition pruning (CHD-1)
 	}
 	args := []any{subject}
 	if srcCond, srcArgs := signalSourceCond("s.source", aggArgs.Filter); srcCond != "" {
@@ -62,7 +62,7 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 	args = append(args, perSignalArgs...)
 
 	inner := "SELECT " + signalSrcColumns +
-		" FROM " + lakeSignalsDeduped + " AS s JOIN " + aggValuesTable(aggArgs.FloatArgs, aggArgs.StringArgs, aggArgs.LocationArgs) +
+		" FROM " + LakeSignalsDeduped(subject) + " AS s JOIN " + aggValuesTable(aggArgs.FloatArgs, aggArgs.StringArgs, aggArgs.LocationArgs) +
 		" ON s.name = agg_table.name WHERE " + strings.Join(conds, " AND ")
 
 	originUs := aggArgs.FromTS.UnixMicro()
@@ -124,11 +124,11 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 
 	result := []*qtypes.AggSignalForRange{}
 
-	bucketSQL := " AND " + subjectBucketPredicate("s.", subject) // partition pruning (CHD-1)
+	// subject_bucket pruning lives inside LakeSignalsDeduped (B1).
 	inner := "SELECT " + segmentIndexCaseSQL("s.timestamp", ranges) + " AS seg_idx, " + signalSrcColumns +
-		" FROM " + lakeSignalsDeduped + " AS s JOIN " + aggValuesTable(floatArgs, nil, locationArgs) +
+		" FROM " + LakeSignalsDeduped(subject) + " AS s JOIN " + aggValuesTable(floatArgs, nil, locationArgs) +
 		" ON s.name = agg_table.name" +
-		" WHERE s.subject = ?" + bucketSQL +
+		" WHERE s.subject = ?" +
 		" AND s.timestamp >= " + tsMicroLiteral(globalFrom) +
 		" AND s.timestamp < " + tsMicroLiteral(globalTo)
 
