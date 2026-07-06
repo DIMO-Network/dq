@@ -23,7 +23,7 @@ env:
   BLOB_BUCKET: dimo-blob-storage-prod
   # At-rest encryption (see values.yaml); must match din's prod settings. The
   # materializer release attaches ENCRYPTED; the read-only query fleet doesn't.
-  LAKE_ENCRYPTION_ENABLED: 'true'
+  LAKE_ENCRYPTION_ENABLED: 'false'
   # Prod auth + identity-api + registry (chain 137), mirroring din's prod values.
   TOKEN_EXCHANGE_JWK_KEY_SET_URL: https://auth.dimo.zone/keys
   TOKEN_EXCHANGE_ISSUER_URL: https://auth.dimo.zone

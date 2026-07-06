@@ -64,7 +64,7 @@ env:
   # BLOB_ENCRYPTION_KEY (base64 of 32 bytes, AES-256) decrypts the blob payloads
   # din sealed: it is a SECRET supplied via the dq-secret (not here) and MUST
   # equal din's BLOB_ENCRYPTION_KEY or blob reads fail.
-  LAKE_ENCRYPTION_ENABLED: 'true'
+  LAKE_ENCRYPTION_ENABLED: 'false'
   # JWT auth (token-exchange) + identity-api for the cross-subject link check.
   TOKEN_EXCHANGE_JWK_KEY_SET_URL: https://auth.dev.dimo.zone/keys
   TOKEN_EXCHANGE_ISSUER_URL: https://auth.dev.dimo.zone
