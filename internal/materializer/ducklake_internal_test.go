@@ -153,7 +153,7 @@ func TestRecoverPoisonedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 	m := &DuckLakeMaterializer{db: db}
 	if m.recoverPoisonedSession(nil) {
 		t.Fatal("nil error must not recycle")
