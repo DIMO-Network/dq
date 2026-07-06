@@ -35,6 +35,28 @@ func TestDuckLake_LocTSMigration_ExistingCatalog(t *testing.T) {
 	_, err = db.ExecContext(ctx, `ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`)
 	require.NoError(t, err)
 
+	// A DORMANT vehicle: base history + a pre-migration rollup row exist, and
+	// no new event ever dirties it again. Post-migration its rollup loc_ts is
+	// NULL — served as the 1970 epoch — unless the upgrade backfills it.
+	dormant := fmt.Sprintf("did:erc721:137:%s:77", vehicleNFT.Hex())
+	dormantTS := time.Now().UTC().Add(-30 * 24 * time.Hour).Truncate(time.Second)
+	seedRawStatus(t, db, "dormant-1", dormant, dormantTS,
+		map[string]any{"name": "currentLocationCoordinates", "timestamp": dormantTS.Format(time.RFC3339Nano),
+			"value": map[string]any{"latitude": 40.7, "longitude": -74.0}},
+	)
+	{
+		// Decode the dormant vehicle's history into lake.signals with a
+		// pre-H9 materializer shape: drain, then strip loc_ts back off the
+		// rollup to reproduce the old on-disk state exactly.
+		mat0, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
+		require.NoError(t, err)
+		r0 := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
+			WithDuckLake(mat0)
+		require.Equal(t, 1, drainRunner(t, ctx, r0))
+		_, err = db.ExecContext(ctx, `ALTER TABLE lake.signals_latest DROP COLUMN loc_ts`)
+		require.NoError(t, err)
+	}
+
 	// New-binary boot: ensureSchema migrates the existing table.
 	_, err = materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err, "boot against a pre-loc_ts catalog must migrate, not crash")
@@ -65,4 +87,14 @@ func TestDuckLake_LocTSMigration_ExistingCatalog(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx,
 		"SELECT loc_ts FROM lake.signals_latest WHERE subject = ? AND name = 'currentLocationCoordinates'", subject).Scan(&locTS))
 	assert.True(t, locTS.Equal(ts), "migrated rollup serves the nonzero-fix timestamp, got %v want %v", locTS, ts)
+
+	// The DORMANT vehicle was never dirtied after the upgrade, yet its loc_ts
+	// must be backfilled by the migration's one-time full rebuild — otherwise
+	// its latest-location timestamp reads 1970 forever (adversarial review
+	// finding #2).
+	var dormantLoc time.Time
+	require.NoError(t, db.QueryRowContext(ctx,
+		"SELECT loc_ts FROM lake.signals_latest WHERE subject = ? AND name = 'currentLocationCoordinates'", dormant).Scan(&dormantLoc))
+	assert.True(t, dormantLoc.Equal(dormantTS),
+		"dormant vehicle's loc_ts backfilled by the migration rebuild, got %v want %v", dormantLoc, dormantTS)
 }

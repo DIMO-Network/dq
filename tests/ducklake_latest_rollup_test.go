@@ -163,3 +163,40 @@ func TestDuckLake_LocationLatest_ServedFromRollup(t *testing.T) {
 	}
 	require.True(t, found)
 }
+
+// TestDuckLake_DirtySetOverflow_EscalatesToFullRebuild pins the fleet-wide
+// catch-up bound: when more distinct subjects dirty the rollup than the cap
+// allows (initial backfill defers the flush until fully drained), the dirty
+// set must not grow unbounded — FlushRollup escalates to the bucket-chunked
+// full rebuild and the rollup still comes out complete and correct.
+func TestDuckLake_DirtySetOverflow_EscalatesToFullRebuild(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	svc := newLakeService(t, dir)
+	db := svc.DB()
+
+	day := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour)
+	subjects := make([]string, 5)
+	for i := range subjects {
+		subjects[i] = fmt.Sprintf("did:erc721:137:%s:%d", vehicleNFT.Hex(), 100+i)
+		seedRawStatus(t, db, fmt.Sprintf("ov-%d", i), subjects[i], day.Add(time.Hour),
+			speedAt(day.Add(time.Hour), float64(10*(i+1))))
+	}
+
+	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
+	require.NoError(t, err)
+	mat.WithMaxDirtySubjects(2) // force the overflow path with a tiny cap
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
+		WithDuckLake(mat)
+	require.Equal(t, 5, drainRunner(t, ctx, runner))
+
+	// Every subject's rollup row exists and is correct despite the dirty set
+	// having been discarded on overflow — the full rebuild covered them.
+	for i, s := range subjects {
+		var v float64
+		require.NoError(t, db.QueryRowContext(ctx,
+			"SELECT value_number FROM lake.signals_latest WHERE subject = ? AND name = 'speed'", s).Scan(&v),
+			"subject %s missing from rollup after overflow escalation", s)
+		assert.Equal(t, float64(10*(i+1)), v)
+	}
+}

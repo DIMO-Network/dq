@@ -161,7 +161,11 @@ serviceMonitor:
 #   (Postgres read replica for the query fleet).
 # - blobEncryptionKey: flip together with din's flag once
 #   <namespace>/din/blob_encryption_key exists — part of the encryption
-#   enablement checklist alongside LAKE_ENCRYPTION_ENABLED.
+#   enablement checklist alongside LAKE_ENCRYPTION_ENABLED. CLIENT-VISIBLE at
+#   enablement: GraphQL blob events switch from presigned dataURL to inline
+#   data (a presigned GET on a sealed blob would serve DBE1 ciphertext), so
+#   consumers reading only dataURL must also request data, and very large
+#   blob batches become subject to the 256MiB per-call payload budget.
 secrets:
   catalogReadDSN: false
   blobEncryptionKey: false

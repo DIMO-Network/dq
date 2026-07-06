@@ -81,6 +81,13 @@ type DuckLakeMaterializer struct {
 	// Single-writer: mutated only on the decode-loop goroutine
 	// (commit/FlushRollup), so unsynchronized like the progress fields.
 	dirtySubjects map[string]struct{}
+	// rollupFullRebuild escalates the next FlushRollup to a full
+	// RecomputeRollup: set when the dirty set overflowed maxDirtySubjects
+	// (fleet-wide catch-up) — per-subject tracking is no cheaper than a
+	// rebuild at that point, and the map must not grow unbounded.
+	rollupFullRebuild bool
+	// maxDirtySubjects is the overflow cap (defaultMaxDirtySubjects).
+	maxDirtySubjects int
 }
 
 // WithBackfillMode toggles backfill tuning (skip the cross-batch dedup anti-join;
@@ -106,10 +113,11 @@ const defaultMaxSnapshotSpan = 16
 func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger) (*DuckLakeMaterializer, error) {
 	registerMetrics()
 	m := &DuckLakeMaterializer{
-		db:              db,
-		log:             log.With().Str("component", "ducklake-materializer").Logger(),
-		maxSnapshotSpan: defaultMaxSnapshotSpan,
-		dirtySubjects:   map[string]struct{}{},
+		db:               db,
+		log:              log.With().Str("component", "ducklake-materializer").Logger(),
+		maxSnapshotSpan:  defaultMaxSnapshotSpan,
+		dirtySubjects:    map[string]struct{}{},
+		maxDirtySubjects: defaultMaxDirtySubjects,
 	}
 	if err := m.ensureSchema(ctx); err != nil {
 		return nil, err
@@ -172,6 +180,13 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 		}
 		exists[t] = ok
 	}
+	if exists["signals_latest"] {
+		hasLocTS, err := m.columnExists(ctx, "signals_latest", "loc_ts")
+		if err != nil {
+			return err
+		}
+		exists["signals_latest.loc_ts"] = hasLocTS
+	}
 	stmts := setupStatements(exists, sigTmp, evTmp)
 	// IF NOT EXISTS still raises a commit conflict when two materializers
 	// bootstrap a fresh catalog at once (both transactions start before
@@ -193,6 +208,24 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 			return fmt.Errorf("ensuring lake schema: %w", err)
 		}
 	}
+	// H9 upgrade backfill, crash-safe: rollup rows written before the loc_ts
+	// column read as NULL, which the read path serves as the 1970 epoch —
+	// DORMANT vehicles (never dirtied again) would return epoch location
+	// timestamps forever. The NULL rows themselves are the persistent
+	// migration marker: every write path (subject flush AND full rebuild)
+	// coalesces loc_ts to at least the epoch literal, so "any NULL exists"
+	// precisely means "backfill incomplete" — surviving any crash between the
+	// ADD COLUMN and the first successful flush, unlike an in-memory flag.
+	if exists["signals_latest"] {
+		var pending bool
+		if err := m.db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM lake.signals_latest WHERE loc_ts IS NULL)`).Scan(&pending); err != nil {
+			return fmt.Errorf("checking loc_ts backfill marker: %w", err)
+		}
+		if pending {
+			m.rollupFullRebuild = true
+		}
+	}
 	return nil
 }
 
@@ -204,6 +237,17 @@ func (m *DuckLakeMaterializer) tableExists(ctx context.Context, schema, name str
 		`SELECT count(*) FROM duckdb_tables() WHERE database_name = ? AND table_name = ?`,
 		schema, name).Scan(&n); err != nil {
 		return false, fmt.Errorf("checking table %s.%s exists: %w", schema, name, err)
+	}
+	return n > 0, nil
+}
+
+// columnExists reports whether lake.<table> already has the named column.
+func (m *DuckLakeMaterializer) columnExists(ctx context.Context, table, column string) (bool, error) {
+	var n int
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM duckdb_columns() WHERE database_name = 'lake' AND table_name = ? AND column_name = ?`,
+		table, column).Scan(&n); err != nil {
+		return false, fmt.Errorf("checking column lake.%s.%s exists: %w", table, column, err)
 	}
 	return n > 0, nil
 }
@@ -267,11 +311,12 @@ func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 				count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
 			`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
 		)
-	} else {
-		// Migrate catalogs whose rollup predates loc_ts (H9). ADD COLUMN IF NOT
-		// EXISTS is idempotent — unlike the partition/sort ALTERs above, it is
-		// safe on every boot; pre-migration rows read as NULL (the read path
-		// coalesces) until a recompute backfills them.
+	} else if !exists["signals_latest.loc_ts"] {
+		// Migrate catalogs whose rollup predates loc_ts (H9). Emitted only
+		// when the column is actually missing, so a normal re-boot mints zero
+		// snapshots; ensureSchema pairs it with a one-time full-rebuild
+		// escalation that backfills existing rows (dormant vehicles would
+		// otherwise serve epoch location timestamps forever).
 		stmts = append(stmts,
 			`ALTER TABLE lake.signals_latest ADD COLUMN IF NOT EXISTS loc_ts TIMESTAMP WITH TIME ZONE`)
 	}
@@ -857,7 +902,32 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 	for i := range dec.signals {
 		m.dirtySubjects[dec.signals[i].Subject] = struct{}{}
 	}
+	// Bound the dirty set: a fleet-wide catch-up (initial backfill defers the
+	// flush until fully drained) would otherwise grow this map with every
+	// subject in the fleet — ~1GB+ at 10M vehicles, inside the pod's ~2GB
+	// non-DuckDB headroom. Past the cap, per-subject tracking is no cheaper
+	// than a full rebuild anyway, so escalate: clear the map and let the next
+	// flush run the bucket-chunked, memory-bounded RecomputeRollup.
+	if len(m.dirtySubjects) > m.maxDirtySubjects {
+		m.dirtySubjects = map[string]struct{}{}
+		m.rollupFullRebuild = true
+	}
 	return nil
+}
+
+// defaultMaxDirtySubjects caps the per-subject dirty set (~25MB of map at the
+// cap); beyond it FlushRollup escalates to a full rebuild.
+const defaultMaxDirtySubjects = 250_000
+
+// WithMaxDirtySubjects overrides the dirty-set overflow cap (tests use a tiny
+// value to exercise the full-rebuild escalation). Non-positive restores the
+// default. Returns m for chaining.
+func (m *DuckLakeMaterializer) WithMaxDirtySubjects(n int) *DuckLakeMaterializer {
+	if n <= 0 {
+		n = defaultMaxDirtySubjects
+	}
+	m.maxDirtySubjects = n
+	return m
 }
 
 // timeRange returns the min and max ts(row) over rows (both zero when empty).
@@ -1032,6 +1102,19 @@ const rollupSubjectChunk = 500
 // flushed chunks refreshed and the rest dirty for the next pass.
 // Single-writer: called only on the decode-loop goroutine.
 func (m *DuckLakeMaterializer) FlushRollup(ctx context.Context) error {
+	if m.rollupFullRebuild {
+		// The dirty set overflowed maxDirtySubjects (fleet-wide catch-up):
+		// rebuild everything, bucket-chunked and memory-bounded. Clear the
+		// flag only on success so a failed rebuild retries next flush.
+		start := time.Now()
+		defer func() { rollupRefreshSeconds.Set(time.Since(start).Seconds()) }()
+		if err := m.RecomputeRollup(ctx); err != nil {
+			return err
+		}
+		m.rollupFullRebuild = false
+		m.dirtySubjects = map[string]struct{}{} // rebuilt set covers anything accrued since the overflow
+		return nil
+	}
 	if len(m.dirtySubjects) == 0 {
 		return nil
 	}
