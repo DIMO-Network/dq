@@ -14,6 +14,7 @@ import (
 	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	zlog "github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -317,6 +318,14 @@ func (l *LakeEventService) resolvePayload(ctx context.Context, ev cloudevent.Sto
 		return raw, nil // inline payload present
 	}
 	if !strings.HasPrefix(ev.DataIndexKey, eventrepo.BlobKeyPrefix) {
+		if ev.DataIndexKey != "" {
+			// A non-empty data_index_key that is not under BlobKeyPrefix is a din
+			// BLOB_PREFIX misconfig (S6): every externalized payload would be served
+			// empty. Count + log it; still return empty rather than hard-failing the read.
+			ObserveBlobPrefixAnomaly()
+			zlog.Warn().Str("subject", ev.Subject).Str("id", ev.ID).Str("data_index_key", ev.DataIndexKey).
+				Msgf("data_index_key not under BlobKeyPrefix %q; serving empty payload (check din BLOB_PREFIX)", eventrepo.BlobKeyPrefix)
+		}
 		return raw, nil // no blob reference: genuinely empty payload
 	}
 	if l.getter == nil {

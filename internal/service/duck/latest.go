@@ -78,8 +78,10 @@ func scanSignalSummary(rows rowScanner) (*model.SignalDataSummary, error) {
 }
 
 // querySignals runs a signal-shaped query (name, ts, value_number,
-// value_string, loc_lat, loc_lon, loc_hdop, loc_heading) and scans rows into
-// vss.Signal values.
+// value_string, loc_lat, loc_lon, loc_hdop, loc_heading, loc_ts) and scans rows
+// into vss.Signal values. Every SELECT composed into stmt MUST emit these nine
+// columns in this order (epoch loc_ts on non-location rows) — the positional
+// Scan below silently mis-reads otherwise.
 func (q *Queries) querySignals(ctx context.Context, stmt string, args []any) ([]*vss.Signal, error) {
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
@@ -89,14 +91,22 @@ func (q *Queries) querySignals(ctx context.Context, stmt string, args []any) ([]
 	signals := []*vss.Signal{}
 	for rows.Next() {
 		var signal vss.Signal
-		var ts time.Time
+		var ts, locTS time.Time
 		var loc vss.Location
 		err := rows.Scan(&signal.Data.Name, &ts, &signal.Data.ValueNumber, &signal.Data.ValueString,
-			&loc.Latitude, &loc.Longitude, &loc.HDOP, &loc.Heading)
+			&loc.Latitude, &loc.Longitude, &loc.HDOP, &loc.Heading, &locTS)
 		if err != nil {
 			return nil, fmt.Errorf("failed scanning duckdb row: %w", err)
 		}
+		// A location reading (nonzero fix) carries the fix time in loc_ts (Item 2):
+		// the (0,0)-filtered latest-fix timestamp, NOT the row's unfiltered
+		// max(timestamp), which a trailing (0,0) reading would push past the last real
+		// fix. Non-location rows carry loc_ts = epoch and keep ts. This matches the
+		// GetLatestSignals location semantics, so GetAllLatestSignals agrees with it.
 		signal.Data.Timestamp = ts.UTC()
+		if loc.Latitude != 0 || loc.Longitude != 0 {
+			signal.Data.Timestamp = locTS.UTC()
+		}
 		signal.Data.ValueLocation = loc
 		signals = append(signals, &signal)
 	}

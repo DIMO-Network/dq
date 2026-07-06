@@ -222,6 +222,8 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	// that filter; other mechanisms truncate now to bound the per-segment summary fetch.
 	if mechanism != model.DetectionMechanismIdling {
 		segments = truncateToLimit(segments, limit)
+	} else {
+		segments = capIdlingCandidates(segments)
 	}
 
 	defaultReqs := defaultSegmentSignalSet(mechanism)
@@ -307,6 +309,30 @@ func segmentsStartingAfter(segments []*model.Segment, after time.Time) []*model.
 func truncateToLimit(segments []*model.Segment, limit *int) []*model.Segment {
 	if limit != nil && len(segments) > *limit {
 		return segments[:*limit]
+	}
+	return segments
+}
+
+// idlingEnrichCandidateCap bounds how many idle-run candidates the IDLING path
+// enriches before its deferred speed filter + truncation (Q3). 8 × the max page
+// size: generous enough that the surviving set matches the unbounded path unless an
+// implausible fraction of the EARLIEST idle runs are also moving.
+const idlingEnrichCandidateCap = 8 * maxSegmentLimit
+
+// capIdlingCandidates bounds the IDLING candidate list before enrichment (Q3).
+// Every detected idle run in the window is otherwise summary-fetched AND
+// location-enriched (up to 2 LocationAt point lookups each) before the deferred
+// truncation — unbounded work for a wide window. Segments arrive ordered ascending
+// by start (mergeTimeRanges) and the final truncate keeps the first *limit idle runs
+// that survive the speed filter, so capping the FIRST idlingEnrichCandidateCap (same
+// ascending order) yields the EXACT surviving set as long as at least *limit of those
+// candidates are non-moving. A page could under-return only if >(cap-1)/cap of the
+// earliest idle-RPM runs also show movement (>87.5% at 8×) — pathological; the fully
+// sound fix (batching the LocationAt gap-fills into one query) is the heavier deferred
+// option. 8× buys the soundness headroom cheaply.
+func capIdlingCandidates(segments []*model.Segment) []*model.Segment {
+	if len(segments) > idlingEnrichCandidateCap {
+		return segments[:idlingEnrichCandidateCap]
 	}
 	return segments
 }

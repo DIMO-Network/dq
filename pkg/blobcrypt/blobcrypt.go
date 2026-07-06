@@ -26,6 +26,17 @@ import (
 // magic prefixes every sealed blob. Wire constant — must match din.
 var magic = []byte("DBE1")
 
+// ErrDecrypt indicates a sealed blob failed to open: a wrong/rotated key, a
+// truncated blob, or corruption. It is DETERMINISTIC (retrying with the same key
+// fails identically), so callers classify it as a poison payload to skip rather
+// than a transient error to retry. Match it with errors.Is / IsDecryptError.
+var ErrDecrypt = errors.New("blobcrypt: decrypt failed")
+
+// IsDecryptError reports whether err is (or wraps) ErrDecrypt.
+func IsDecryptError(err error) bool {
+	return errors.Is(err, ErrDecrypt)
+}
+
 // Cipher seals and opens blob payloads with one AES-256 key.
 type Cipher struct{ aead cipher.AEAD }
 
@@ -78,12 +89,12 @@ func (c *Cipher) Open(aad string, blob []byte) ([]byte, error) {
 	rest := blob[len(magic):]
 	ns := c.aead.NonceSize()
 	if len(rest) < ns {
-		return nil, errors.New("blobcrypt: sealed blob too short")
+		return nil, fmt.Errorf("blobcrypt: sealed blob too short: %w", ErrDecrypt)
 	}
 	nonce, ct := rest[:ns], rest[ns:]
 	pt, err := c.aead.Open(nil, nonce, ct, []byte(aad))
 	if err != nil {
-		return nil, fmt.Errorf("blobcrypt: open %q: %w", aad, err)
+		return nil, fmt.Errorf("blobcrypt: open %q: %w: %w", aad, err, ErrDecrypt)
 	}
 	return pt, nil
 }

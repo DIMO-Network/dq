@@ -12,6 +12,18 @@ import (
 	smithy "github.com/aws/smithy-go"
 )
 
+// ErrObjectTooLarge is returned (wrapped) by DownloadObject when an object
+// exceeds the maximum single-object size. It is a DETERMINISTIC failure — the
+// object will not shrink on retry — so callers classify it as a poison payload
+// to skip, not a transient error to retry. Match it with errors.Is /
+// IsObjectTooLarge rather than the message text.
+var ErrObjectTooLarge = errors.New("object exceeds max size")
+
+// IsObjectTooLarge reports whether err is (or wraps) ErrObjectTooLarge.
+func IsObjectTooLarge(err error) bool {
+	return errors.Is(err, ErrObjectTooLarge)
+}
+
 // IsObjectNotFound reports whether err indicates the S3 object does not exist
 // (NoSuchKey / NotFound / 404) — a permanent condition — as opposed to a
 // transient fetch failure (timeout, throttle, 5xx). Callers use it to skip a
@@ -52,7 +64,7 @@ func downloadS3Object(ctx context.Context, client ObjectGetter, bucket, key stri
 	if resp.ContentLength != nil && *resp.ContentLength > 0 {
 		size := *resp.ContentLength
 		if size > maxSize {
-			return nil, fmt.Errorf("object %s/%s exceeds max size of %d bytes", bucket, key, maxSize)
+			return nil, fmt.Errorf("object %s/%s exceeds max size of %d bytes: %w", bucket, key, maxSize, ErrObjectTooLarge)
 		}
 		data := make([]byte, size)
 		if _, err := io.ReadFull(resp.Body, data); err != nil {

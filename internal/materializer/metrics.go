@@ -97,6 +97,17 @@ var (
 		Name: "dq_materializer_blob_missing_total",
 		Help: "raw_events rows skipped because their externalized blob payload was permanently missing (S3 404).",
 	})
+	// blobPoisonTotal counts raw_events rows skipped because their externalized
+	// payload is a DETERMINISTIC poison pill — one that would abort and retry the
+	// same delta forever, wedging the whole fleet's decode (S6/S7). reason:
+	// "oversize" (blob exceeds eventrepo max size), "decrypt" (wrong key / corrupt
+	// / truncated), or "sealed_no_key" (sealed blob but no BLOB_ENCRYPTION_KEY set).
+	// Transient S3 errors still abort the pass for retry — only deterministic
+	// failures are classified here. Alert on any increase: decoded data was dropped.
+	blobPoisonTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dq_materializer_blob_poison_total",
+		Help: "raw_events rows skipped because their externalized blob payload is a deterministic poison pill (oversize/decrypt/sealed_no_key).",
+	}, []string{"reason"})
 	// progressReportErrorsTotal counts failures writing dq's snapshot floor to
 	// meta.din_consumer_progress. Decode keeps succeeding (a separate txn) so dq's own
 	// lag/cursor gauges stay healthy — without this counter the only signal is din's
@@ -121,7 +132,7 @@ func registerMetrics() {
 			lagSeconds, batchesTotal, rowsTotal, errorsTotal,
 			pruneErrorsTotal, passErrorsTotal, rollupRefreshSeconds,
 			rollupFlushErrorsTotal, cursorResetsTotal, cursorSnapshotID,
-			headSnapshotID, cursorResetGap, blobMissingTotal,
+			headSnapshotID, cursorResetGap, blobMissingTotal, blobPoisonTotal,
 			progressReportErrorsTotal,
 		)
 	})

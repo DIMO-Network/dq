@@ -11,6 +11,13 @@
 # rejects >1; the chart default strategy Recreate prevents a rolling overlap).
 
 replicaCount: 1
+# Pin Recreate for the single writer: this overlay layers on values-prod.yaml, which
+# sets RollingUpdate for the query fleet (C3). Two materializer pods must NEVER overlap
+# during a deploy (the deployment guard rejects >1 replica), so override back to Recreate
+# and null out the inherited rollingUpdate block (Recreate + rollingUpdate is invalid).
+strategy:
+  type: Recreate
+  rollingUpdate: null
 autoscaling:
   enabled: false
 podDisruptionBudget:

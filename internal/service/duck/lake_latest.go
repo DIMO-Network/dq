@@ -61,8 +61,25 @@ const signalDedupQualify = `QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, nam
 // safe inside: subject_bucket is a pure function of subject, so it is constant
 // within every dedup partition and cannot change which row wins. Exported so
 // tests/ducklake_partition_test.go can EXPLAIN-pin the pushdown.
-func LakeSignalsDeduped(subject string) string {
-	return `(SELECT * FROM lake.signals WHERE ` + subjectBucketPredicate("", subject) + ` ` + signalDedupQualify + `)`
+//
+// srcCond is an OPTIONAL extra pre-QUALIFY predicate ("" = none), carrying a
+// single "source = ?" bind marker. A source filter MUST live here, inside the
+// dedup subquery at QUALIFY level — NOT as an outer predicate (Item 1): two
+// sources can report the same (subject,name,µs-timestamp), and dedup keeps the
+// lowest cloud_event_id. If the OTHER source's id sorts lower it wins dedup and
+// an OUTER `source = ?` then removes it — so the requested source's genuine
+// reading returns NOTHING. Filtering to the source BEFORE dedup makes the
+// requested source's row the only candidate, so it always survives. The
+// no-source path (srcCond == "") is byte-identical to before (canonical
+// one-value-per-instant policy unchanged). CAUTION at call sites: this marker is
+// in the FROM subquery, so in SQL text order it precedes every outer `?` — its
+// bind arg must be appended FIRST.
+func LakeSignalsDeduped(subject, srcCond string) string {
+	pred := subjectBucketPredicate("", subject)
+	if srcCond != "" {
+		pred += " AND " + srcCond
+	}
+	return `(SELECT * FROM lake.signals WHERE ` + pred + ` ` + signalDedupQualify + `)`
 }
 
 // lakeNonZeroLoc is the on-the-fly (0,0)-exclusion computed over the base
@@ -76,11 +93,11 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 	if len(latestArgs.SignalNames) == 0 && len(latestArgs.LocationSignalNames) == 0 && !latestArgs.IncludeLastSeen {
 		return nil, nil
 	}
+	// The source filter lives INSIDE the dedup subquery (Item 1, see
+	// LakeSignalsDeduped), so its bind arg precedes the outer args (subject, names)
+	// in every UNION arm below.
 	srcCond, srcArgs := signalSourceCond("source", latestArgs.Filter)
-	srcSQL := "" // bucket pruning lives inside LakeSignalsDeduped (B1)
-	if srcCond != "" {
-		srcSQL = " AND " + srcCond
-	}
+	dedup := LakeSignalsDeduped(subject, srcCond)
 
 	var stmts []string
 	var args []any
@@ -90,14 +107,14 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 			`SELECT name, max(timestamp) AS ts,
 				coalesce(arg_max(value_number, timestamp), 0) AS value_number,
 				coalesce(arg_max(value_string, timestamp), '') AS value_string,
-				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
-			FROM %s WHERE subject = ? AND name IN (%s)%s GROUP BY name`,
-			LakeSignalsDeduped(subject), placeholders(len(names)), srcSQL))
+				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading, %s AS loc_ts
+			FROM %s WHERE subject = ? AND name IN (%s) GROUP BY name`,
+			epochLiteral, dedup, placeholders(len(names))))
+		args = append(args, srcArgs...)
 		args = append(args, subject)
 		for _, n := range names {
 			args = append(args, n)
 		}
-		args = append(args, srcArgs...)
 	}
 	if len(latestArgs.LocationSignalNames) > 0 {
 		names := mapKeys(latestArgs.LocationSignalNames)
@@ -108,17 +125,18 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 				coalesce(arg_max(loc_lat, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lat,
 				coalesce(arg_max(loc_lon, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lon,
 				coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
-				coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading
-			FROM %[3]s WHERE subject = ? AND name IN (%[4]s)%[5]s GROUP BY name`,
-			lakeNonZeroLoc, epochLiteral, LakeSignalsDeduped(subject), placeholders(len(names)), srcSQL))
+				coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading,
+				coalesce(max(timestamp) FILTER (WHERE %[1]s), %[2]s) AS loc_ts
+			FROM %[3]s WHERE subject = ? AND name IN (%[4]s) GROUP BY name`,
+			lakeNonZeroLoc, epochLiteral, dedup, placeholders(len(names))))
+		args = append(args, srcArgs...)
 		args = append(args, subject)
 		for _, n := range names {
 			args = append(args, n)
 		}
-		args = append(args, srcArgs...)
 	}
 	if latestArgs.IncludeLastSeen {
-		stmt, a := lakeLastSeenQuery(subject, srcSQL, srcArgs)
+		stmt, a := lakeLastSeenQuery(subject, srcCond, srcArgs)
 		stmts = append(stmts, stmt)
 		args = append(args, a...)
 	}
@@ -127,11 +145,14 @@ func (q *Queries) getLatestSignalsLake(ctx context.Context, subject string, late
 
 // getAllLatestSignalsLake is getLatestSignalsLake for every stored name.
 func (q *Queries) getAllLatestSignalsLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error) {
+	// The source filter lives INSIDE the dedup subquery (Item 1), so its bind arg
+	// precedes the outer subject arg in both UNION arms.
 	srcCond, srcArgs := signalSourceCond("source", filter)
-	srcSQL := "" // bucket pruning lives inside LakeSignalsDeduped (B1)
-	if srcCond != "" {
-		srcSQL = " AND " + srcCond
-	}
+	dedup := LakeSignalsDeduped(subject, srcCond)
+	// loc_ts (Item 2) carries the (0,0)-filtered latest-fix time so the snapshot
+	// consumer stamps the location VALUE with the fix time, not the unfiltered
+	// max(timestamp) — a trailing (0,0) reading would otherwise report the last
+	// real fix at a later instant, disagreeing with GetLatestSignals.
 	mainStmt := fmt.Sprintf(
 		`SELECT name, max(timestamp) AS ts,
 			coalesce(arg_max(value_number, timestamp), 0) AS value_number,
@@ -139,12 +160,15 @@ func (q *Queries) getAllLatestSignalsLake(ctx context.Context, subject string, f
 			coalesce(arg_max(loc_lat, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lat,
 			coalesce(arg_max(loc_lon, timestamp) FILTER (WHERE %[1]s), 0) AS loc_lon,
 			coalesce(arg_max(loc_hdop, timestamp) FILTER (WHERE %[1]s), 0) AS loc_hdop,
-			coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading
-		FROM %[2]s WHERE subject = ?%[3]s GROUP BY name`,
-		lakeNonZeroLoc, LakeSignalsDeduped(subject), srcSQL)
-	args := append([]any{subject}, srcArgs...)
+			coalesce(arg_max(loc_heading, timestamp) FILTER (WHERE %[1]s), 0) AS loc_heading,
+			coalesce(max(timestamp) FILTER (WHERE %[1]s), %[3]s) AS loc_ts
+		FROM %[2]s WHERE subject = ? GROUP BY name`,
+		lakeNonZeroLoc, dedup, epochLiteral)
+	var args []any
+	args = append(args, srcArgs...)
+	args = append(args, subject)
 
-	lastSeenStmt, lastSeenArgs := lakeLastSeenQuery(subject, srcSQL, srcArgs)
+	lastSeenStmt, lastSeenArgs := lakeLastSeenQuery(subject, srcCond, srcArgs)
 	stmt := mainStmt + " UNION ALL " + lastSeenStmt + " ORDER BY name"
 	args = append(args, lastSeenArgs...)
 	return q.querySignals(ctx, stmt, args)
@@ -152,26 +176,31 @@ func (q *Queries) getAllLatestSignalsLake(ctx context.Context, subject string, f
 
 // lakeLastSeenQuery computes the virtual lastSeen row (max timestamp over all
 // of the subject's signals) directly, since lake.signals stores no
-// precomputed lastSeen rows.
-func lakeLastSeenQuery(subject, srcSQL string, srcArgs []any) (string, []any) {
+// precomputed lastSeen rows. srcCond is folded into the dedup subquery (Item 1),
+// so its bind arg precedes the subject arg. loc_ts is epoch (the lastSeen row
+// carries no location value).
+func lakeLastSeenQuery(subject, srcCond string, srcArgs []any) (string, []any) {
 	stmt := fmt.Sprintf(
 		`SELECT %[1]s AS name, coalesce(max(timestamp), %[2]s) AS ts,
 			0.0 AS value_number, '' AS value_string,
-			0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
-		FROM %[3]s WHERE subject = ?%[4]s`,
-		sqlString(model.LastSeenField), epochLiteral, LakeSignalsDeduped(subject), srcSQL)
-	return stmt, append([]any{subject}, srcArgs...)
+			0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading, %[2]s AS loc_ts
+		FROM %[3]s WHERE subject = ?`,
+		sqlString(model.LastSeenField), epochLiteral, LakeSignalsDeduped(subject, srcCond))
+	args := make([]any, 0, len(srcArgs)+1)
+	args = append(args, srcArgs...)
+	args = append(args, subject)
+	return stmt, args
 }
 
 // getAvailableSignalsLake lists distinct signal names from lake.signals.
 func (q *Queries) getAvailableSignalsLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
+	// Source filter folded into the dedup subquery (Item 1): its bind arg precedes
+	// the outer subject arg.
 	srcCond, srcArgs := signalSourceCond("source", filter)
-	srcSQL := "" // bucket pruning lives inside LakeSignalsDeduped (B1)
-	if srcCond != "" {
-		srcSQL = " AND " + srcCond
-	}
-	stmt := fmt.Sprintf("SELECT DISTINCT name FROM %s WHERE subject = ?%s ORDER BY name", LakeSignalsDeduped(subject), srcSQL)
-	args := append([]any{subject}, srcArgs...)
+	stmt := fmt.Sprintf("SELECT DISTINCT name FROM %s WHERE subject = ? ORDER BY name", LakeSignalsDeduped(subject, srcCond))
+	args := make([]any, 0, len(srcArgs)+1)
+	args = append(args, srcArgs...)
+	args = append(args, subject)
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying lake available signals: %w", err)
@@ -191,16 +220,16 @@ func (q *Queries) getAvailableSignalsLake(ctx context.Context, subject string, f
 // getSignalSummariesLake counts per-name signals and first/last seen directly
 // from lake.signals.
 func (q *Queries) getSignalSummariesLake(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
+	// Source filter folded into the dedup subquery (Item 1): its bind arg precedes
+	// the outer subject arg.
 	srcCond, srcArgs := signalSourceCond("source", filter)
-	srcSQL := "" // bucket pruning lives inside LakeSignalsDeduped (B1)
-	if srcCond != "" {
-		srcSQL = " AND " + srcCond
-	}
 	stmt := fmt.Sprintf(
 		`SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp), max(timestamp)
-		FROM %s WHERE subject = ?%s GROUP BY name ORDER BY name`,
-		LakeSignalsDeduped(subject), srcSQL)
-	args := append([]any{subject}, srcArgs...)
+		FROM %s WHERE subject = ? GROUP BY name ORDER BY name`,
+		LakeSignalsDeduped(subject, srcCond))
+	args := make([]any, 0, len(srcArgs)+1)
+	args = append(args, srcArgs...)
+	args = append(args, subject)
 	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying lake signal summaries: %w", err)

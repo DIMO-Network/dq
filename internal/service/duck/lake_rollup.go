@@ -26,15 +26,19 @@ func noSourceFilter(f *model.SignalFilter) bool {
 // (max last_seen across names), matching getAllLatestSignalsLake.
 func (q *Queries) getAllLatestSignalsRollup(ctx context.Context, subject string) ([]*vss.Signal, error) {
 	bucket := subjectBucketPredicate("", subject)
+	// loc_ts (Item 2) carries the stored (0,0)-filtered fix time so querySignals
+	// stamps the location value with the fix time, not the unfiltered timestamp.
+	// coalesce covers rows written before the loc_ts migration (epoch until a full
+	// recompute backfills them).
 	mainStmt := fmt.Sprintf(
-		`SELECT name, timestamp AS ts, value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading
-		 FROM lake.signals_latest WHERE subject = ? AND %s`, bucket)
+		`SELECT name, timestamp AS ts, value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading, coalesce(loc_ts, %s) AS loc_ts
+		 FROM lake.signals_latest WHERE subject = ? AND %s`, epochLiteral, bucket)
 	lastSeenStmt := fmt.Sprintf(
 		`SELECT %s AS name, coalesce(max(last_seen), %s) AS ts,
 			0.0 AS value_number, '' AS value_string,
-			0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
+			0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading, %s AS loc_ts
 		 FROM lake.signals_latest WHERE subject = ? AND %s`,
-		sqlString(model.LastSeenField), epochLiteral, bucket)
+		sqlString(model.LastSeenField), epochLiteral, epochLiteral, bucket)
 	stmt := mainStmt + " UNION ALL " + lastSeenStmt + " ORDER BY name"
 	return q.querySignals(ctx, stmt, []any{subject, subject})
 }
@@ -58,9 +62,9 @@ func (q *Queries) getLatestSignalsRollup(ctx context.Context, subject string, la
 		names := mapKeys(latestArgs.SignalNames)
 		stmts = append(stmts, fmt.Sprintf(
 			`SELECT name, timestamp AS ts, value_number, value_string,
-				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
+				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading, %s AS loc_ts
 			 FROM lake.signals_latest WHERE subject = ? AND %s AND name IN (%s)`,
-			bucket, placeholders(len(names))))
+			epochLiteral, bucket, placeholders(len(names))))
 		args = append(args, subject)
 		for _, n := range names {
 			args = append(args, n)
@@ -69,12 +73,13 @@ func (q *Queries) getLatestSignalsRollup(ctx context.Context, subject string, la
 	if len(latestArgs.LocationSignalNames) > 0 {
 		names := mapKeys(latestArgs.LocationSignalNames)
 		// coalesce(loc_ts, epoch) covers rows written before the loc_ts
-		// migration; a full recompute backfills them.
+		// migration; a full recompute backfills them. loc_ts is emitted both as ts
+		// (kept for compatibility) and as the loc_ts column querySignals reads.
 		stmts = append(stmts, fmt.Sprintf(
-			`SELECT name, coalesce(loc_ts, %s) AS ts,
+			`SELECT name, coalesce(loc_ts, %[1]s) AS ts,
 				0.0 AS value_number, '' AS value_string,
-				loc_lat, loc_lon, loc_hdop, loc_heading
-			 FROM lake.signals_latest WHERE subject = ? AND %s AND name IN (%s)`,
+				loc_lat, loc_lon, loc_hdop, loc_heading, coalesce(loc_ts, %[1]s) AS loc_ts
+			 FROM lake.signals_latest WHERE subject = ? AND %[2]s AND name IN (%[3]s)`,
 			epochLiteral, bucket, placeholders(len(names))))
 		args = append(args, subject)
 		for _, n := range names {
@@ -85,9 +90,9 @@ func (q *Queries) getLatestSignalsRollup(ctx context.Context, subject string, la
 		stmts = append(stmts, fmt.Sprintf(
 			`SELECT %s AS name, coalesce(max(last_seen), %s) AS ts,
 				0.0 AS value_number, '' AS value_string,
-				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading
+				0.0 AS loc_lat, 0.0 AS loc_lon, 0.0 AS loc_hdop, 0.0 AS loc_heading, %s AS loc_ts
 			 FROM lake.signals_latest WHERE subject = ? AND %s`,
-			sqlString(model.LastSeenField), epochLiteral, bucket))
+			sqlString(model.LastSeenField), epochLiteral, epochLiteral, bucket))
 		args = append(args, subject)
 	}
 	return q.querySignals(ctx, strings.Join(stmts, " UNION ALL ")+" ORDER BY name", args)

@@ -63,6 +63,10 @@ type DuckLakeMaterializer struct {
 	// they would otherwise be a data race.
 	lastProgressReport   time.Time
 	lastReportedSnapshot int64
+	// lastRawMissingLog throttles the "lake.raw_events not present yet" info log so
+	// a dq that booted before din doesn't log every poll (S8). Single-writer, so
+	// unsynchronized like the progress fields.
+	lastRawMissingLog time.Time
 
 	// backfillMode tunes the writer for a large one-time catch-up: it skips the
 	// cross-batch dedup anti-join on insert (a clean historical load carries no
@@ -102,9 +106,15 @@ func (m *DuckLakeMaterializer) WithBackfillMode(on bool) *DuckLakeMaterializer {
 // raw_events snapshot id this decoder has processed.
 const snapshotCursorPartition = "lake.raw_events#snapshot"
 
-// defaultMaxSnapshotSpan caps snapshots processed per pass. din bundles flush at
-// up to 128 MiB, so this bounds the per-pass working set; the Run loop re-polls
-// immediately while a batch was processed, so a backlog still drains continuously.
+// defaultMaxSnapshotSpan caps how many snapshots one RunOnce pass drains. It
+// bounds the pass by snapshot COUNT, not by bytes: the real worst-case working set
+// is up to span × the per-bundle inline payload size — din flushes bundles at up to
+// 128 MiB, so on the order of ~2 GiB of inline payload at span=16 — PLUS the resident
+// bytes of every blob resolved for the pass, which is currently UNBOUNDED (resolveBlobs
+// holds all fetched payloads in memory at once). So this is a COARSE memory guard, not
+// a tight one; a byte-budget bound over the combined inline+blob working set is the real
+// fix (H6, deferred). The Run loop re-polls immediately while a batch was processed, so
+// a backlog still drains continuously.
 const defaultMaxSnapshotSpan = 16
 
 // NewDuckLakeMaterializer ensures the decoded tables + cursor row exist and
@@ -361,6 +371,19 @@ func (m *DuckLakeMaterializer) resetCursor(ctx context.Context, from, to int64) 
 // transaction and returns the number of raw events consumed. Zero means the
 // decoder is caught up.
 func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (int, error) {
+	// dq can boot before din has created lake.raw_events against a fresh catalog.
+	// Without this guard, readDelta's ducklake_table_changes(…, 'raw_events', …)
+	// errors every pass, the hourly failure backstop trips, and the pod crash-loops
+	// until din appears (S8). Treat a missing source table as caught-up (0, nil) and
+	// info-log it throttled, so dq simply waits instead of restarting.
+	exists, err := m.tableExists(ctx, "lake", "raw_events")
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		m.logRawEventsMissing()
+		return 0, nil
+	}
 	cur, err := m.cursor(ctx)
 	if err != nil {
 		return 0, err
@@ -391,6 +414,20 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 		}
 		cur = newCur
 	}
+}
+
+// rawEventsMissingLogInterval throttles the pre-din boot log (S8).
+const rawEventsMissingLogInterval = 5 * time.Minute
+
+// logRawEventsMissing info-logs that lake.raw_events isn't present yet, at most
+// once per rawEventsMissingLogInterval, so a dq that came up before din doesn't
+// spam a line every poll.
+func (m *DuckLakeMaterializer) logRawEventsMissing() {
+	if !m.lastRawMissingLog.IsZero() && time.Since(m.lastRawMissingLog) < rawEventsMissingLogInterval {
+		return
+	}
+	m.lastRawMissingLog = time.Now()
+	m.log.Info().Msg("lake.raw_events not present yet (din has not created it against this catalog); waiting, treating as caught up")
 }
 
 // processChunk drains one memory-bounded snapshot-span chunk of the (cur, head]
@@ -510,7 +547,12 @@ func (m *DuckLakeMaterializer) maybeRecoverExpired(ctx context.Context, cur int6
 	// The reset path skips the normal commit's progress report; do it here so
 	// din's expiry floor reflects the post-gap position instead of staying stale.
 	m.reportProgressNow(ctx, skipTo)
-	return 0, true, nil
+	// Return processed=1 (pseudo-processed) so RunOnce reports >0 and Run's drain
+	// loop re-polls immediately (M5) instead of sleeping a full PollInterval before
+	// draining the — possibly huge — still-retained backlog past the skipped gap.
+	// This is NOT a committed batch: batchesTotal is incremented only on the commit
+	// path (processChunk), never here, so throughput metrics stay honest.
+	return 1, true, nil
 }
 
 // oldestSnapshot returns the smallest retained snapshot id (0 when the catalog
@@ -627,11 +669,30 @@ func (m *DuckLakeMaterializer) cursor(ctx context.Context) (int64, error) {
 	var raw sql.NullString
 	err := m.db.QueryRowContext(ctx,
 		"SELECT cursor FROM lake.ingest_progress WHERE partition = ?", snapshotCursorPartition).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) || !raw.Valid {
+	if errors.Is(err, sql.ErrNoRows) {
+		// The seeded cursor row is gone (catalog restore/truncate). Left missing, every
+		// CAS advance matches 0 rows → errSnapshotMoved → RunOnce returns (0,nil) and dq
+		// looks caught-up FOREVER while decode silently halts (M6). Self-heal: re-seed
+		// the row (the bootstrap INSERT is idempotent — NOT EXISTS no-ops if a peer beat
+		// us) and resume from 0. Re-decoding from 0 is safe — the insert anti-join and
+		// the read-path QUALIFY dedup make it idempotent. Loud + counted so a recurring
+		// disappearance is alertable, not silent.
+		passErrorsTotal.Inc()
+		m.log.Error().Str("partition", snapshotCursorPartition).
+			Msg("ingest_progress cursor row missing; re-seeding and resuming decode from snapshot 0")
+		if _, serr := m.db.ExecContext(ctx, fmt.Sprintf(
+			"INSERT INTO lake.ingest_progress (partition, cursor) "+
+				"SELECT %s, '0' WHERE NOT EXISTS (SELECT 1 FROM lake.ingest_progress WHERE partition = %s)",
+			sqlLit(snapshotCursorPartition), sqlLit(snapshotCursorPartition))); serr != nil {
+			return 0, fmt.Errorf("re-seeding missing ingest_progress cursor: %w", serr)
+		}
 		return 0, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("reading snapshot cursor: %w", err)
+	}
+	if !raw.Valid {
+		return 0, nil
 	}
 	var n int64
 	if _, err := fmt.Sscan(raw.String, &n); err != nil {
@@ -687,15 +748,31 @@ func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([
 const blobFetchConcurrency = 16
 
 // resolveBlobs fetches the externalized payloads for the rows that need them,
-// concurrently and bounded, then drops any row whose blob is permanently missing
-// (S3 404) — a transient fetch error still aborts the pass for retry, and a
-// missing object store surfaces loudly (not a NotFound). Rows with inline
-// payloads or no blob reference are untouched.
+// concurrently and bounded, then drops any row whose blob is a PERMANENT failure:
+// a 404 (blobMissingTotal), or a deterministic poison pill — oversize, undecryptable,
+// or sealed with no key (blobPoisonTotal). Only those are skipped; a TRANSIENT
+// fetch error (timeout/throttle/5xx) still aborts the pass so the SAME delta is
+// retried, and a missing object store surfaces loudly (not a NotFound). Rows with
+// inline payloads or no blob reference are untouched. A data_index_key that is set
+// but not under BlobKeyPrefix is a prefix misconfig: counted, logged, decoded empty.
 func (m *DuckLakeMaterializer) resolveBlobs(ctx context.Context, events []cloudevent.RawEvent, blobKeys []string) ([]cloudevent.RawEvent, error) {
 	var fetch []int
 	for i := range events {
-		if len(events[i].Data) == 0 && events[i].DataBase64 == "" && strings.HasPrefix(blobKeys[i], eventrepo.BlobKeyPrefix) {
+		if len(events[i].Data) != 0 || events[i].DataBase64 != "" {
+			continue // inline payload present
+		}
+		switch {
+		case blobKeys[i] == "":
+			// genuinely no payload
+		case strings.HasPrefix(blobKeys[i], eventrepo.BlobKeyPrefix):
 			fetch = append(fetch, i)
+		default:
+			// data_index_key set but not under BlobKeyPrefix: a din BLOB_PREFIX
+			// misconfig (S6) that would silently empty every externalized payload.
+			// Count + log; still decode as empty (don't hard-fail the whole pass).
+			duck.ObserveBlobPrefixAnomaly()
+			m.log.Warn().Str("id", events[i].ID).Str("data_index_key", blobKeys[i]).
+				Msgf("data_index_key not under BlobKeyPrefix %q; decoding empty payload (check din BLOB_PREFIX)", eventrepo.BlobKeyPrefix)
 		}
 	}
 	if len(fetch) == 0 {
@@ -707,16 +784,34 @@ func (m *DuckLakeMaterializer) resolveBlobs(ctx context.Context, events []cloude
 	missing := make([]bool, len(events))
 	for _, idx := range fetch {
 		g.Go(func() error {
-			if err := m.resolveBlob(gctx, &events[idx], blobKeys[idx]); err != nil {
-				if eventrepo.IsObjectNotFound(err) {
-					blobMissingTotal.Inc()
-					m.log.Error().Err(err).Str("id", events[idx].ID).Str("blob", blobKeys[idx]).
-						Msg("raw_events blob payload permanently missing; skipping row")
-					missing[idx] = true
-					return nil
-				}
-				return err
+			err := m.resolveBlob(gctx, &events[idx], blobKeys[idx])
+			if err == nil {
+				return nil
 			}
+			// Permanent conditions are contained (skip the row) so one poison payload
+			// can't abort and re-abort the identical delta forever, halting decode
+			// fleet-wide. Everything else is transient → abort the pass for retry.
+			switch {
+			case eventrepo.IsObjectNotFound(err):
+				blobMissingTotal.Inc()
+				m.log.Error().Err(err).Str("id", events[idx].ID).Str("blob", blobKeys[idx]).
+					Msg("raw_events blob payload permanently missing; skipping row")
+			case eventrepo.IsObjectTooLarge(err):
+				blobPoisonTotal.WithLabelValues("oversize").Inc()
+				m.log.Error().Err(err).Str("id", events[idx].ID).Str("blob", blobKeys[idx]).
+					Msg("raw_events blob payload exceeds max object size; skipping poison row")
+			case errors.Is(err, errSealedNoKey):
+				blobPoisonTotal.WithLabelValues("sealed_no_key").Inc()
+				m.log.Error().Err(err).Str("id", events[idx].ID).Str("blob", blobKeys[idx]).
+					Msg("raw_events blob payload is sealed but BLOB_ENCRYPTION_KEY is not configured; skipping poison row (set BLOB_ENCRYPTION_KEY)")
+			case blobcrypt.IsDecryptError(err):
+				blobPoisonTotal.WithLabelValues("decrypt").Inc()
+				m.log.Error().Err(err).Str("id", events[idx].ID).Str("blob", blobKeys[idx]).
+					Msg("raw_events blob payload failed to decrypt (wrong BLOB_ENCRYPTION_KEY or corruption); skipping poison row")
+			default:
+				return err // transient: abort the pass and retry the same delta
+			}
+			missing[idx] = true
 			return nil
 		})
 	}
@@ -759,10 +854,21 @@ func (m *DuckLakeMaterializer) resolveBlob(ctx context.Context, ev *cloudevent.R
 		if data, err = m.blobCipher.Open(dataIndexKey, data); err != nil {
 			return fmt.Errorf("decrypting blob payload %s: %w", dataIndexKey, err)
 		}
+	} else if blobcrypt.IsSealed(data) {
+		// Sealed ciphertext with no cipher configured (S7): without this the raw
+		// ciphertext flows into decode as the payload and yields undecodable rows
+		// counted as generic decode errors — the root cause (a missing
+		// BLOB_ENCRYPTION_KEY) invisible. Classify as deterministic poison instead.
+		return fmt.Errorf("raw_events row %s blob payload %s is sealed but BLOB_ENCRYPTION_KEY is not configured: %w", ev.ID, dataIndexKey, errSealedNoKey)
 	}
 	ev.Data = data
 	return nil
 }
+
+// errSealedNoKey marks a downloaded blob that carries the blobcrypt seal but has
+// no BLOB_ENCRYPTION_KEY to open it — a deterministic misconfiguration classified
+// as poison (S7), never a transient fetch failure.
+var errSealedNoKey = errors.New("sealed blob payload but no BLOB_ENCRYPTION_KEY configured")
 
 // restoreNonColumnFieldsSafe wraps cloudevent.RestoreNonColumnFields, which rebuilds
 // Tags (and other non-column fields) from the extras map via unchecked type
@@ -894,7 +1000,19 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		if isCommitConflict(err) {
 			return errSnapshotMoved
 		}
-		return fmt.Errorf("commit: %w", err)
+		// Ambiguous commit (M2): a non-conflict commit error can be a LOST ACK — the
+		// transaction may have durably landed even though the client saw an error. The
+		// cursor advance rides in this SAME txn, so if the durable cursor now equals our
+		// target `to`, the commit landed: the base rows AND the cursor moved atomically.
+		// Retrying would skip this span (the cursor already advanced) and leave these
+		// subjects' rollup stale forever for dormant vehicles — so treat a landed commit
+		// exactly as success (fall through to mark dirtySubjects). Only a genuinely
+		// failed commit propagates the error.
+		if landed, cerr := m.commitLanded(ctx, to); cerr != nil || !landed {
+			return fmt.Errorf("commit: %w", err)
+		}
+		m.log.Warn().Err(err).Int64("to", to).
+			Msg("commit returned an error but the cursor advanced to the target; treating as committed (lost ack)")
 	}
 	// The base rows are durable. Mark the subjects this batch wrote so the
 	// decoupled FlushRollup recomputes only their rollup rows (B2). Done after
@@ -913,6 +1031,18 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		m.rollupFullRebuild = true
 	}
 	return nil
+}
+
+// commitLanded reports whether the durable snapshot cursor has reached `to`. It
+// disambiguates a lost-ack commit error (M2): the insert+cursor-advance are one
+// transaction, so a cursor at `to` proves that transaction actually committed even
+// though the client saw a commit error.
+func (m *DuckLakeMaterializer) commitLanded(ctx context.Context, to int64) (bool, error) {
+	cur, err := m.cursor(ctx)
+	if err != nil {
+		return false, err
+	}
+	return cur == to, nil
 }
 
 // defaultMaxDirtySubjects caps the per-subject dirty set (~25MB of map at the

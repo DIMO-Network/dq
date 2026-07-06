@@ -99,3 +99,20 @@ var fetchMalformedRowTotal = promauto.NewCounter(prometheus.CounterOpts{
 	Name: "dq_fetch_malformed_row_total",
 	Help: "raw_events rows whose non-column fields could not be restored (malformed extras); the row is kept without them.",
 })
+
+// blobPrefixAnomalyTotal counts rows whose data_index_key is non-empty but NOT
+// under eventrepo.BlobKeyPrefix — a din BLOB_PREFIX misconfig that would silently
+// empty every externalized payload (S6). Incremented on BOTH the fetch read path
+// (resolvePayload, below) and the materializer scan path (via
+// ObserveBlobPrefixAnomaly). It lives here — not in internal/materializer —
+// because the duck package's promauto metrics register in EVERY dq process (the
+// materializer imports duck), so a second registration of the same name in the
+// materializer package would panic on the shared default registry.
+var blobPrefixAnomalyTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "dq_blob_prefix_anomaly_total",
+	Help: "raw_events rows with a data_index_key not under BlobKeyPrefix; the externalized payload is served/decoded empty (likely a din BLOB_PREFIX misconfig).",
+})
+
+// ObserveBlobPrefixAnomaly increments the blob-prefix-drift counter. Exported so
+// the materializer scan path shares this single registration (see the var doc).
+func ObserveBlobPrefixAnomaly() { blobPrefixAnomalyTotal.Inc() }

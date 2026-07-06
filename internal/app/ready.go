@@ -24,7 +24,13 @@ const readyCacheTTL = 3 * time.Second
 // traffic to siblings, they saturate, and the failure cascades across the fleet. Only a
 // SUSTAINED failure (no success within the window) reports NotReady; a cold pod that has
 // never been ready gets no grace (correctly NotReady until first success).
-const readyGraceWindow = 20 * time.Second
+//
+// 60s, not 20s (C9): the catalog is a SHARED dependency, so a >window blip flips the
+// WHOLE query fleet NotReady simultaneously — Kubernetes then de-endpoints every pod at
+// once, turning a brief blip into a total outage. 60s rides out any transient catalog
+// hiccup (Postgres failover, S3 slow-start, connection recycle) while still bounding how
+// long a pod serves stale reads well under any real outage's response time.
+const readyGraceWindow = 60 * time.Second
 
 // loadTolerantReadiness wraps check so a burst of probes reuses one result within ttl,
 // and a transient failure after a recent success stays Ready for graceWindow — breaking

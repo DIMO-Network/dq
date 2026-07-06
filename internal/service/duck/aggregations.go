@@ -52,17 +52,21 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 		"s.timestamp >= " + tsMicroLiteral(aggArgs.FromTS),
 		"s.timestamp < " + tsMicroLiteral(aggArgs.ToTS),
 	}
-	args := []any{subject}
-	if srcCond, srcArgs := signalSourceCond("s.source", aggArgs.Filter); srcCond != "" {
-		conds = append(conds, srcCond)
-		args = append(args, srcArgs...)
-	}
+	// The source filter lives INSIDE the dedup subquery (Item 1): a two-source
+	// collision on (subject,name,timestamp) must not let the other source win dedup
+	// and then vanish behind an outer filter. The predicate is over the bare
+	// `source` column (the subquery is over lake.signals, no `s.` alias), and its
+	// bind arg precedes the outer args because the FROM subquery precedes the WHERE.
+	srcCond, srcArgs := signalSourceCond("source", aggArgs.Filter)
+	var args []any
+	args = append(args, srcArgs...)
+	args = append(args, subject)
 	perSignal, perSignalArgs := perSignalFilterSQL(aggArgs)
 	conds = append(conds, perSignal)
 	args = append(args, perSignalArgs...)
 
 	inner := "SELECT " + signalSrcColumns +
-		" FROM " + LakeSignalsDeduped(subject) + " AS s JOIN " + aggValuesTable(aggArgs.FloatArgs, aggArgs.StringArgs, aggArgs.LocationArgs) +
+		" FROM " + LakeSignalsDeduped(subject, srcCond) + " AS s JOIN " + aggValuesTable(aggArgs.FloatArgs, aggArgs.StringArgs, aggArgs.LocationArgs) +
 		" ON s.name = agg_table.name WHERE " + strings.Join(conds, " AND ")
 
 	originUs := aggArgs.FromTS.UnixMicro()
@@ -124,9 +128,10 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 
 	result := []*qtypes.AggSignalForRange{}
 
-	// subject_bucket pruning lives inside LakeSignalsDeduped (B1).
+	// subject_bucket pruning lives inside LakeSignalsDeduped (B1). No source filter
+	// on this path (Item 1: pass "" so the canonical dedup is unchanged).
 	inner := "SELECT " + segmentIndexCaseSQL("s.timestamp", ranges) + " AS seg_idx, " + signalSrcColumns +
-		" FROM " + LakeSignalsDeduped(subject) + " AS s JOIN " + aggValuesTable(floatArgs, nil, locationArgs) +
+		" FROM " + LakeSignalsDeduped(subject, "") + " AS s JOIN " + aggValuesTable(floatArgs, nil, locationArgs) +
 		" ON s.name = agg_table.name" +
 		" WHERE s.subject = ?" +
 		" AND s.timestamp >= " + tsMicroLiteral(globalFrom) +

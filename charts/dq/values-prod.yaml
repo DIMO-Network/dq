@@ -1,4 +1,14 @@
 replicaCount: 2
+# The query fleet writes nothing (read-only catalog attach), so it must roll
+# WITHOUT terminating every pod first (C3): the base chart defaults to Recreate for
+# the single-writer materializer, which would otherwise take the ENTIRE query fleet
+# down on every deploy. maxUnavailable:0 keeps full capacity during the roll; the
+# materializer overlay (values-materializer.yaml) pins strategy back to Recreate.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
 image:
   repository: dimozone/dq
   pullPolicy: IfNotPresent

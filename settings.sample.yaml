@@ -54,9 +54,10 @@ FETCH_GRPC_REQUIRE_JWT: false
 TOKEN_EXCHANGE_JWK_KEY_SET_URL: http://127.0.0.1:3050/keys
 TOKEN_EXCHANGE_ISSUER_URL: xpp
 
-CLOUDEVENT_BUCKET: ""
-EPHEMERAL_BUCKET: ""
-PARQUET_BUCKET: ""
+# Bucket holding din's externalized (>inline-threshold) cloudevent blob payloads,
+# required for externalized-payload reads (the fetch path downloads/presigns blobs
+# from here; the parquet lake lives separately at DUCKLAKE_DATA_PATH).
+BLOB_BUCKET: ""
 S3_AWS_REGION: ""
 S3_AWS_ACCESS_KEY_ID: ""
 S3_AWS_SECRET_ACCESS_KEY: ""

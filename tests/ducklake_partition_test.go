@@ -148,7 +148,7 @@ func TestDuckLake_DedupedSourcesPushBucketToScan(t *testing.T) {
 	// bucket predicate must be consumed at/below the scan (pruning), never
 	// parked in a FILTER above the dedup window.
 	plan := explainPlan(t, ctx, db,
-		"SELECT name, max(timestamp) FROM "+duck.LakeSignalsDeduped(subject)+" WHERE subject = ? GROUP BY name", subject)
+		"SELECT name, max(timestamp) FROM "+duck.LakeSignalsDeduped(subject, "")+" WHERE subject = ? GROUP BY name", subject)
 	assert.NotContains(t, aboveScan(t, plan), "subject_bucket",
 		"signals dedup source: subject_bucket stuck above the scan (B1 regression):\n%s", plan)
 

@@ -59,6 +59,15 @@ type EventRow struct {
 
 // writeSignalParquet encodes signal rows sorted by (subject, name,
 // timestamp) with zstd compression and a bloom filter on subject.
+//
+// The explicit slices.SortFunc is the ONE thing that actually orders the rows:
+// pq.NewGenericWriter's SortingColumns config is metadata-only — parquet-go
+// documents that a GenericWriter "always writes rows in the order they were seen,
+// no reordering is performed" (only SortingWriter[T] reorders). The old
+// SortingWriterConfig therefore did NO sorting; it was a misleading no-op on the
+// hot path, dropped here (M7). The lake's declared sort order is DuckLake's
+// `ALTER TABLE … SET SORTED BY`, applied when these rows are read back and
+// INSERTed — the temp parquet's own metadata never reaches the lake.
 func writeSignalParquet(rows []SignalRow) ([]byte, error) {
 	slices.SortFunc(rows, func(a, b SignalRow) int {
 		return cmp.Or(
@@ -69,15 +78,14 @@ func writeSignalParquet(rows []SignalRow) ([]byte, error) {
 	})
 	return writeParquet(rows,
 		pq.Compression(&zstd.Codec{}),
-		pq.SortingWriterConfig(pq.SortingColumns(
-			pq.Ascending("subject"), pq.Ascending("name"), pq.Ascending("timestamp"),
-		)),
 		pq.BloomFilters(pq.SplitBlockFilter(subjectBloomFilterBitsPerValue, "subject")),
 	)
 }
 
 // writeEventParquet encodes event rows sorted by (subject, name,
-// timestamp) with zstd compression and a bloom filter on subject.
+// timestamp) with zstd compression and a bloom filter on subject. As in
+// writeSignalParquet, the explicit sort is the real guarantee (SortingColumns on
+// a GenericWriter is metadata-only, so it was dropped — M7).
 func writeEventParquet(rows []EventRow) ([]byte, error) {
 	slices.SortFunc(rows, func(a, b EventRow) int {
 		return cmp.Or(
@@ -88,9 +96,6 @@ func writeEventParquet(rows []EventRow) ([]byte, error) {
 	})
 	return writeParquet(rows,
 		pq.Compression(&zstd.Codec{}),
-		pq.SortingWriterConfig(pq.SortingColumns(
-			pq.Ascending("subject"), pq.Ascending("name"), pq.Ascending("timestamp"),
-		)),
 		pq.BloomFilters(pq.SplitBlockFilter(subjectBloomFilterBitsPerValue, "subject")),
 	)
 }

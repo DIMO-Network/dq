@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/DIMO-Network/model-garage/pkg/schema"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
 	"github.com/uber/h3-go/v4"
+	"github.com/vektah/gqlparser/v2/gqlerror"
 )
 
 const approximateLocationResolution = 6
@@ -308,10 +311,32 @@ func signalToLatestSignal(signal *vss.Signal) *model.LatestSignal {
 
 // handleDBError logs the error and returns a generic error message.
 func handleDBError(ctx context.Context, err error) error {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return errorhandler.NewBadRequestErrorWithMsg(ctx, err, "request exceeded or is estimated to exceed the maximum execution time")
+	// A cancelled or expired context is a SERVER-side timeout — the query outran its
+	// deadline (MAX_REQUEST_DURATION) or the caller hung up — NOT a malformed request.
+	// Mapping it to a 4xx BAD_REQUEST (as before) counted a server timeout as a CLIENT
+	// error, inflating the client-error signal and masking real saturation. Surface it
+	// as a 503-class SERVICE_UNAVAILABLE instead (Q5).
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return newServiceUnavailableError(ctx, err, "request exceeded or is estimated to exceed the maximum execution time")
 	}
 	return errorhandler.NewInternalErrorWithMsg(ctx, err, "failed to query db")
+}
+
+// newServiceUnavailableError builds a 503-class gqlerror for a server-side timeout
+// or transient unavailability. server-garage's errorhandler exposes no
+// service-unavailable constructor (only bad-request / internal / unauthorized), so
+// this mirrors its NewErrorWithMsg shape with a 503 reason + a SERVICE_UNAVAILABLE
+// code so timeouts don't count as client (4xx) errors.
+func newServiceUnavailableError(ctx context.Context, err error, message string) *gqlerror.Error {
+	return &gqlerror.Error{
+		Err:     err,
+		Message: message,
+		Path:    graphql.GetPath(ctx),
+		Extensions: map[string]interface{}{
+			"reason": http.StatusText(http.StatusServiceUnavailable),
+			"code":   "SERVICE_UNAVAILABLE",
+		},
+	}
 }
 
 // GetApproximateLoc returns the approximate location for the given latitude and longitude.

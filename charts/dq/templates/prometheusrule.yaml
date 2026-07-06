@@ -31,10 +31,13 @@ spec:
           annotations:
             summary: requests are being shed by the in-flight cap
             description: The process-wide admission cap is rejecting >1 req/s fleet-wide for 10m — sustained overload, not a burst. Scale out.
-        # Error-rate SLI over the gqlgen counter (status label: success/error).
+        # Error-rate SLI over the gqlgen counter. server-garage's tracer emits the
+        # status label as success | with_errors (any response carrying GraphQL errors) —
+        # there is no "error" value, so the old status="error" matched nothing and the
+        # alert could never fire (C1).
         - alert: DQGraphQLErrorRate
           expr: >-
-            (sum(rate(graphql_request_total{status="error"}[10m])) or vector(0))
+            (sum(rate(graphql_request_total{status="with_errors"}[10m])) or vector(0))
             / (sum(rate(graphql_request_total[10m])) > 0) > 0.05
           for: 10m
           labels:
@@ -42,6 +45,12 @@ spec:
           annotations:
             summary: GraphQL error rate above 5%
             description: More than 5% of GraphQL requests are erroring; check catalog/S3 health and recent deploys.
+{{- if (.Values.prometheusRule | default dict).materializerEnabled }}
+    # The entire dq-materializer group (its alerts AND the dq:pipeline_snapshot_backlog
+    # recording rule) is gated on materializerEnabled (C6): materializer metrics are
+    # registered only in the single-writer materializer process (H2), so rendering this
+    # group in the query release too produced DUPLICATE recording series and alerts on
+    # metrics that release never emits. Only the materializer release sets the flag.
     - name: dq-materializer
       rules:
         - alert: DQMaterializerDecodeLag
@@ -69,13 +78,13 @@ spec:
           annotations:
             summary: materializer has pending work but committed no batches in 30m
             description: the materializer cursor is not advancing — decode pipeline is stuck.
-{{- if (.Values.prometheusRule | default dict).materializerEnabled }}
         - alert: DQMaterializerDown
           # The single-writer materializer is replicaCount:1 with no PDB. When it
           # is down / Pending after a node drain / CrashLooping, its gauges go
           # ABSENT — so Stalled (rate==0 AND lag>0) and DecodeLag never fire on the
           # missing series. absent_over_time alerts on the absence itself. Rendered
-          # only in the materializer release, where the gauge is expected.
+          # only in the materializer release (the whole group is gated), where the
+          # gauge is expected.
           expr: absent_over_time(dq_materializer_cursor_snapshot_id[15m])
           for: 5m
           labels:
@@ -87,7 +96,6 @@ spec:
               materializer is not running. Decode has halted; restart it before
               lag passes LAKE_SNAPSHOT_RETENTION → cursor reset
               (DQMaterializerCursorReset) and permanent data loss.
-{{- end }}
         - alert: DQMaterializerCursorReset
           expr: increase(dq_materializer_cursor_resets_total[1h]) > 0
           for: 1m
@@ -154,6 +162,20 @@ spec:
           annotations:
             summary: materializer dropped a permanently-missing blob
             description: A decoded event's externalized payload 404'd on S3 and was skipped — permanent decoded-side data loss. Investigate the blob write path.
+        # A deterministic poison blob (oversize / undecryptable / sealed-with-no-key)
+        # was skipped so it couldn't wedge the whole delta forever — but that means
+        # decoded data was dropped. reason is in the metric label (S6/S7).
+        - alert: DQMaterializerBlobPoison
+          expr: increase(dq_materializer_blob_poison_total[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: materializer skipped a poison blob payload
+            description: >-
+              A decoded event's externalized payload was oversize, undecryptable, or
+              sealed with no BLOB_ENCRYPTION_KEY, and was skipped — permanent decoded-side
+              data loss. Check the reason label and the blob write/key config.
         # dq's snapshot floor is failing to write to meta.din_consumer_progress while
         # decode keeps succeeding, so dq's own gauges stay green — without this alert the
         # only signal is din's DinConsumerStale ~1h later, which misattributes the cause.
@@ -203,3 +225,4 @@ spec:
               FlushRollup errored repeatedly; the signals_latest rollup (and the
               latest/summary reads it serves) is going stale while decode keeps
               succeeding. Investigate the rollup write path.
+{{- end }}
