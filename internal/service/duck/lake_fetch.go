@@ -427,6 +427,15 @@ func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, index
 	return out, nil
 }
 
+// BlobsMaybeSealed reports whether a blob cipher is configured: stored blobs
+// may be DBE1-sealed, so presigned URLs would hand the customer ciphertext —
+// the resolver must serve blob payloads inline (download + decrypt) instead
+// (H16). Legacy plaintext blobs stay readable on the inline path too
+// (blobcrypt.Open passes unsealed bytes through).
+func (l *LakeEventService) BlobsMaybeSealed() bool {
+	return l.blobCipher != nil
+}
+
 // PresignBlobURL returns a short-lived presigned GET URL for the given S3 key.
 func (l *LakeEventService) PresignBlobURL(ctx context.Context, key string) (string, error) {
 	// Defense in depth: only ever presign keys under the blob prefix. Call sites

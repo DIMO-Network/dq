@@ -18,11 +18,13 @@ package duck
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
+	"github.com/DIMO-Network/dq/pkg/blobcrypt"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/DIMO-Network/dq/pkg/grpc"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -144,4 +146,22 @@ func TestLakeEventService_VoidingTombstoneBeforeEvent(t *testing.T) {
 	latest, err := lsvc.GetLatestIndexAdvanced(ctx, opts)
 	require.NoError(t, err)
 	assert.Equal(t, "ev-keep", latest.ID)
+}
+
+// TestLakeEventService_BlobsMaybeSealed pins the H16 seam: once a blob cipher
+// is configured, the GraphQL resolver must stop presigning blob keys (a
+// presigned GET would hand the customer DBE1 ciphertext) and serve payloads
+// inline instead. The resolver branches on exactly this method.
+func TestLakeEventService_BlobsMaybeSealed(t *testing.T) {
+	_, svc := newLakeEventServiceForTest(t)
+	pre := &fakePresigner{url: "https://x"}
+
+	plain := NewLakeEventService(svc, nil, pre, "blob-bucket")
+	assert.False(t, plain.BlobsMaybeSealed(), "no cipher: presigning stays correct")
+
+	cipher, err := blobcrypt.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	require.NoError(t, err)
+	require.NotNil(t, cipher)
+	sealed := plain.WithBlobCipher(cipher)
+	assert.True(t, sealed.BlobsMaybeSealed(), "cipher configured: blobs may be sealed, presigning would leak ciphertext")
 }

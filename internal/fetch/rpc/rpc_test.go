@@ -43,6 +43,7 @@ func (emptyEventService) ListCloudEventsFromIndexes(context.Context, []cloudeven
 	return nil, nil
 }
 func (emptyEventService) PresignBlobURL(context.Context, string) (string, error) { return "", nil }
+func (emptyEventService) BlobsMaybeSealed() bool                                 { return false }
 
 // TestListCloudEventsFromIndex_RejectsTraversalKey proves a client-supplied
 // index key containing a path-traversal sequence is rejected before it is

@@ -52,7 +52,11 @@ func (r *queryResolver) LatestCloudEvent(ctx context.Context, subject string, fi
 		return nil, err
 	}
 	hdr := idx.CloudEventHeader
-	if strings.HasPrefix(idx.Data.Key, eventrepo.BlobKeyPrefix) {
+	// Presign only when blobs cannot be sealed: with at-rest blob encryption
+	// on, a presigned GET hands the customer DBE1 ciphertext — serve the
+	// payload inline (download + decrypt via GetCloudEventFromIndex) instead
+	// (H16).
+	if strings.HasPrefix(idx.Data.Key, eventrepo.BlobKeyPrefix) && !r.EventService.BlobsMaybeSealed() {
 		url, err := r.EventService.PresignBlobURL(ctx, idx.Data.Key)
 		if err != nil {
 			return nil, err
@@ -90,7 +94,11 @@ func (r *queryResolver) CloudEvents(ctx context.Context, subject string, limit *
 
 	for i, idx := range list {
 		hdr := idx.CloudEventHeader
-		if strings.HasPrefix(idx.Data.Key, eventrepo.BlobKeyPrefix) {
+		// Presign only when blobs cannot be sealed — with at-rest blob
+		// encryption on, a presigned GET hands the customer DBE1 ciphertext;
+		// route the event through the inline path (download + decrypt, byte-
+		// budgeted) like any data event instead (H16).
+		if strings.HasPrefix(idx.Data.Key, eventrepo.BlobKeyPrefix) && !r.EventService.BlobsMaybeSealed() {
 			url, err := r.EventService.PresignBlobURL(ctx, idx.Data.Key)
 			if err != nil {
 				return nil, err

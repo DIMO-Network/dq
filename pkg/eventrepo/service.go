@@ -26,4 +26,10 @@ type EventService interface {
 
 	// Blob payloads served as presigned URLs.
 	PresignBlobURL(ctx context.Context, key string) (string, error)
+
+	// BlobsMaybeSealed reports whether stored blobs may be at-rest encrypted
+	// (a blob cipher is configured). When true, presigned URLs are WRONG for
+	// blob payloads — the customer would download DBE1 ciphertext (H16) — and
+	// callers must resolve the payload inline (download + decrypt) instead.
+	BlobsMaybeSealed() bool
 }
