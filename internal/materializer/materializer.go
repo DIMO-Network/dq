@@ -133,11 +133,16 @@ func (r *Runner) Run(ctx context.Context) error {
 				if !r.cfg.BackfillMode {
 					r.maybeFlushRollup(ctx, &lastRollup)
 				}
+				// Retention must keep being enforced WHILE draining (H5): a
+				// saturated decoder is exactly when volume is highest, and
+				// skipping the (interval-gated) prune here silently stopped
+				// retention for as long as the backlog persisted.
+				r.maybePrune(ctx, &lastPrune)
 				continue // drain the backlog without waiting
 			}
 			// Caught up: the decode backlog is drained, so flush the decoupled rollup
-			// for every bucket touched since the last flush. Bucket-partitioned and
-			// off the commit, so it can't OOM the writer or stall decode.
+			// for every subject touched since the last flush. Subject-scoped, chunked
+			// per bucket and off the commit, so it can't OOM the writer or stall decode.
 			r.flushRollup(ctx)
 			lastRollup = time.Now()
 		}
@@ -153,7 +158,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 }
 
-// FlushRollup recomputes signals_latest for every bucket dirtied since the last
+// FlushRollup recomputes signals_latest for every subject dirtied since the last
 // flush (the decoupled maintenance pass). Exposed so a one-shot driver (tests,
 // backfill harness) can refresh the view after draining. Safe to call when caught
 // up; a no-op when nothing is dirty.

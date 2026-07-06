@@ -85,6 +85,12 @@ type Settings struct {
 	MaterializerEnabled      bool   `yaml:"MATERIALIZER_ENABLED"`
 	MaterializerPollInterval string `yaml:"MATERIALIZER_POLL_INTERVAL"`
 	MaterializerWorkers      int    `yaml:"MATERIALIZER_WORKERS"`
+	// MaterializerRollupInterval is a Go duration bounding how often the
+	// signals_latest flush runs during a continuous drain (B2/M6). Empty
+	// defaults to the poll interval; raise it (e.g. "60s") to batch more
+	// subjects per flush and mint fewer catalog snapshots at the cost of
+	// staler latest/summary reads during a backlog.
+	MaterializerRollupInterval string `yaml:"MATERIALIZER_ROLLUP_INTERVAL"`
 	// MaterializerBackfillMode tunes the writer for a large one-time catch-up
 	// (initial historical load, long downtime): it skips the cross-batch dedup
 	// anti-join and flushes signals_latest once on catch-up instead of mid-drain.

@@ -28,6 +28,12 @@ prometheusRule:
 
 env:
   MATERIALIZER_ENABLED: 'true'
+  # Rollup flush cadence, decoupled from the 15s poll (B2/M6): each flush
+  # recomputes only the subjects dirtied since the last one, but every flush
+  # still mints catalog snapshots and small rollup files — 60s batches 4x the
+  # subjects per flush for 1/4 the snapshot churn, at the cost of latest/
+  # summary reads lagging up to a minute during a drain.
+  MATERIALIZER_ROLLUP_INTERVAL: '60s'
   # The single writer attaches the catalog read-write (backend.go also force-
   # disables read-only when MATERIALIZER_ENABLED, but set it explicitly). It uses
   # the primary catalog DSN, never a read replica.

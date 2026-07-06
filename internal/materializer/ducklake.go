@@ -69,12 +69,18 @@ type DuckLakeMaterializer struct {
 	// redeliveries, and the read path dedups regardless). Steady state leaves it
 	// false so the bounded anti-join still guards against NATS redeliveries.
 	backfillMode bool
-	// dirtyBuckets accumulates the subject_buckets whose lake.signals changed
-	// since the last FlushRollup. The rollup is maintained OFF the decode commit
-	// (a materialized view should never block the writer); FlushRollup recomputes
-	// only these partitions. Single-writer: mutated only on the decode-loop
-	// goroutine (commit/FlushRollup), so unsynchronized like the progress fields.
-	dirtyBuckets map[int]struct{}
+	// dirtySubjects accumulates the subjects whose lake.signals changed since
+	// the last FlushRollup. The rollup is maintained OFF the decode commit (a
+	// materialized view should never block the writer); FlushRollup recomputes
+	// only these subjects' rollup rows. Subjects, not buckets (B2): bucket
+	// dirtiness saturates — with ~1.5k active vehicles per flush window all
+	// 256 buckets are dirty and a bucket recompute is a full-table recompute,
+	// O(retained history) per flush on the decode goroutine. Subject-scoped
+	// recompute is O(active subjects' own histories), keeps the same
+	// self-healing exactness, and is bounded per txn by rollupSubjectChunk.
+	// Single-writer: mutated only on the decode-loop goroutine
+	// (commit/FlushRollup), so unsynchronized like the progress fields.
+	dirtySubjects map[string]struct{}
 }
 
 // WithBackfillMode toggles backfill tuning (skip the cross-batch dedup anti-join;
@@ -103,7 +109,7 @@ func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger
 		db:              db,
 		log:             log.With().Str("component", "ducklake-materializer").Logger(),
 		maxSnapshotSpan: defaultMaxSnapshotSpan,
-		dirtyBuckets:    map[int]struct{}{},
+		dirtySubjects:   map[string]struct{}{},
 	}
 	if err := m.ensureSchema(ctx); err != nil {
 		return nil, err
@@ -833,11 +839,11 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		}
 		return fmt.Errorf("commit: %w", err)
 	}
-	// The base rows are durable. Mark the buckets this batch wrote so the
-	// decoupled FlushRollup recomputes only those partitions. Done after commit
-	// so a rolled-back batch never dirties the rollup.
+	// The base rows are durable. Mark the subjects this batch wrote so the
+	// decoupled FlushRollup recomputes only their rollup rows (B2). Done after
+	// commit so a rolled-back batch never dirties the rollup.
 	for i := range dec.signals {
-		m.dirtyBuckets[int(dec.signals[i].SubjectBucket)] = struct{}{}
+		m.dirtySubjects[dec.signals[i].Subject] = struct{}{}
 	}
 	return nil
 }
@@ -916,17 +922,21 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 		total += n
 	}
 	// Drop rollup rows whose base signals were ALL pruned away. signals_latest is only
-	// recomputed for subjects in a live batch (refreshRollup), so a (subject,name) that
+	// recomputed for subjects in a live batch (FlushRollup), so a (subject,name) that
 	// stopped reporting long enough ago to be fully pruned is never cleaned up — and the
 	// no-source latest/summary/availableSignals reads off the rollup (lake_rollup.go) would
 	// keep serving a phantom "latest" + count for data that no longer exists in lake.signals.
-	// The base table is PARTITIONED BY subject_bucket, so the per-row NOT EXISTS lookup is
+	// The candidate set is bounded to sl.last_seen < cutoff (H5): a rollup row whose
+	// latest base signal is at/after the cutoff cannot have lost every base row to a
+	// timestamp-based prune, so the anti-join probes only long-dormant rows instead of
+	// hash-anti-joining the entire base table every pruneInterval. The base table is
+	// PARTITIONED BY subject_bucket, so each candidate's NOT EXISTS lookup is
 	// partition-pruned. (A surviving signal's count/first_seen can still reference pruned
 	// history until its next batch refreshes the rollup — a smaller, self-healing residual.)
 	if _, err := m.db.ExecContext(ctx,
-		`DELETE FROM lake.signals_latest sl WHERE NOT EXISTS (
+		fmt.Sprintf(`DELETE FROM lake.signals_latest sl WHERE sl.last_seen < make_timestamp(%d) AND NOT EXISTS (
 			SELECT 1 FROM lake.signals s
-			WHERE s.subject_bucket = sl.subject_bucket AND s.subject = sl.subject AND s.name = sl.name)`); err != nil {
+			WHERE s.subject_bucket = sl.subject_bucket AND s.subject = sl.subject AND s.name = sl.name)`, cutoff)); err != nil {
 		return total, fmt.Errorf("pruning orphaned rollup rows: %w", err)
 	}
 	return total, nil
@@ -964,28 +974,87 @@ func rollupSelectSQL(whereClause string) string {
 	GROUP BY subject, name`, locNonzero, whereClause)
 }
 
-// FlushRollup recomputes lake.signals_latest for every subject_bucket whose base
-// rows changed since the last flush (the decoupled, off-commit rollup
-// maintenance). A no-op when nothing is dirty. Each bucket is recomputed in its
-// own transaction so the aggregate/window is bounded to one partition's data; a
-// failure leaves already-flushed buckets refreshed and the rest dirty for the
-// next pass. Single-writer: called only on the decode-loop goroutine.
+// rollupSubjectChunk bounds one rollup-recompute transaction: the IN-list
+// length, the DELETE width, and the recompute's aggregate window are all
+// limited to this many subjects, so a huge flush (catch-up after an outage)
+// commits progress in bounded pieces instead of one giant txn.
+const rollupSubjectChunk = 500
+
+// FlushRollup recomputes lake.signals_latest for every subject whose base rows
+// changed since the last flush (the decoupled, off-commit rollup maintenance).
+// A no-op when nothing is dirty. Subject-scoped, not bucket-scoped (B2): a
+// bucket recompute is O(the bucket's entire retained history) and bucket
+// dirtiness saturates at trivial fleet activity, which made every flush a
+// full-table recompute on the decode goroutine. Recomputing only the dirty
+// subjects keeps the same self-healing exactness (each row is rebuilt from the
+// deduped base) at O(active subjects' histories). Chunked per bucket so each
+// transaction is partition-pruned and bounded; a failure leaves already-
+// flushed chunks refreshed and the rest dirty for the next pass.
+// Single-writer: called only on the decode-loop goroutine.
 func (m *DuckLakeMaterializer) FlushRollup(ctx context.Context) error {
-	if len(m.dirtyBuckets) == 0 {
+	if len(m.dirtySubjects) == 0 {
 		return nil
 	}
-	buckets := make([]int, 0, len(m.dirtyBuckets))
-	for b := range m.dirtyBuckets {
+	byBucket := map[int][]string{}
+	for s := range m.dirtySubjects {
+		b := duck.HashBucket(s)
+		byBucket[b] = append(byBucket[b], s)
+	}
+	buckets := make([]int, 0, len(byBucket))
+	for b := range byBucket {
 		buckets = append(buckets, b)
 	}
 	sort.Ints(buckets)
+
 	start := time.Now()
-	done, err := m.recomputeBuckets(ctx, buckets)
-	for _, b := range done {
-		delete(m.dirtyBuckets, b) // keep undone buckets dirty for retry
+	defer func() { rollupRefreshSeconds.Set(time.Since(start).Seconds()) }()
+	for _, b := range buckets {
+		subjects := byBucket[b]
+		sort.Strings(subjects) // deterministic chunking/ordering
+		for len(subjects) > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			chunk := subjects
+			if len(chunk) > rollupSubjectChunk {
+				chunk = chunk[:rollupSubjectChunk]
+			}
+			subjects = subjects[len(chunk):]
+			if err := m.recomputeSubjects(ctx, b, chunk); err != nil {
+				return fmt.Errorf("rollup recompute bucket %d (%d subjects): %w", b, len(chunk), err)
+			}
+			for _, s := range chunk {
+				delete(m.dirtySubjects, s) // keep unflushed subjects dirty for retry
+			}
+		}
 	}
-	rollupRefreshSeconds.Set(time.Since(start).Seconds())
-	return err
+	return nil
+}
+
+// recomputeSubjects DELETEs+recomputes the rollup rows of one bucket's given
+// subjects in a single transaction. The WHERE lives inside the recompute
+// subquery at QUALIFY level so the bucket predicate prunes partitions (B1).
+func (m *DuckLakeMaterializer) recomputeSubjects(ctx context.Context, bucket int, subjects []string) error {
+	args := make([]any, len(subjects))
+	marks := make([]string, len(subjects))
+	for i, s := range subjects {
+		args[i] = s
+		marks[i] = "?"
+	}
+	where := fmt.Sprintf("WHERE subject_bucket = %d AND subject IN (%s)", bucket, strings.Join(marks, ", "))
+
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.signals_latest "+where, args...); err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest"+signalsLatestColumns+rollupSelectSQL(where), args...); err != nil {
+		return fmt.Errorf("insert: %w", err)
+	}
+	return tx.Commit()
 }
 
 // RecomputeRollup rebuilds lake.signals_latest from scratch over the ENTIRE

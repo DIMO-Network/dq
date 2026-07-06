@@ -32,6 +32,8 @@ DUCKDB_S3_ENDPOINT: ""
 MATERIALIZER_ENABLED: false
 MATERIALIZER_POLL_INTERVAL: 15s
 MATERIALIZER_WORKERS: 0
+# Rollup flush cadence during a continuous drain; empty = poll interval (B2).
+MATERIALIZER_ROLLUP_INTERVAL: ''
 # Backfill tuning for a large one-time catch-up (initial load / long downtime):
 # skips the cross-batch dedup anti-join and flushes signals_latest once on
 # catch-up. Set for the initial backfill, then unset for steady state.
