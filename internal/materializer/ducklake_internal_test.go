@@ -34,14 +34,24 @@ func TestSetupStatements_LayoutOnlyOnFirstCreation(t *testing.T) {
 		}
 	}
 
-	// Re-boot against an existing catalog: no ALTER may be issued, and the
-	// idempotent housekeeping (ingest_progress seed, consumer-floor table) still runs.
+	// Re-boot against an existing catalog: no partition/sort re-layout may be
+	// issued (re-running SET PARTITIONED BY / SORTED BY is a crash, not a
+	// no-op), and the idempotent housekeeping (ingest_progress seed,
+	// consumer-floor table) still runs. Idempotent column migrations
+	// (ADD COLUMN IF NOT EXISTS — the H9 loc_ts backfill) are allowed: they
+	// are how existing catalogs pick up new rollup columns.
 	all := map[string]bool{"signals": true, "events": true, "signals_latest": true}
 	reboot := setupStatements(all, sigTmp, evTmp)
 	for _, s := range reboot {
-		if strings.Contains(s, "ALTER TABLE") {
-			t.Fatalf("re-boot must issue no schema-changing ALTER; got: %s", s)
+		if strings.Contains(s, "SET PARTITIONED BY") || strings.Contains(s, "SET SORTED BY") {
+			t.Fatalf("re-boot must issue no partition/sort re-layout; got: %s", s)
 		}
+		if strings.Contains(s, "ALTER TABLE") && !strings.Contains(s, "ADD COLUMN IF NOT EXISTS") {
+			t.Fatalf("re-boot ALTERs must be idempotent ADD COLUMN IF NOT EXISTS migrations; got: %s", s)
+		}
+	}
+	if !strings.Contains(strings.Join(reboot, "\n"), "ADD COLUMN IF NOT EXISTS loc_ts") {
+		t.Fatal("re-boot must migrate pre-loc_ts rollups (H9)")
 	}
 	joined := strings.Join(reboot, "\n")
 	for _, want := range []string{
