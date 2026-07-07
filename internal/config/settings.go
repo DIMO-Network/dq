@@ -78,8 +78,17 @@ type Settings struct {
 	// read-only reader role. Empty reads the primary DuckLakeCatalogDSN.
 	DuckLakeCatalogReadDSN string `yaml:"DUCKLAKE_CATALOG_READ_DSN"`
 	// DuckDB parse-on-read query engine (maps into duck.Config).
-	DuckDBMemoryLimit   string `yaml:"DUCKDB_MEMORY_LIMIT"`
-	DuckDBThreads       int    `yaml:"DUCKDB_THREADS"`
+	DuckDBMemoryLimit string `yaml:"DUCKDB_MEMORY_LIMIT"`
+	// DuckDBQueryMemoryLimit, when set, overrides DuckDBMemoryLimit for the QUERY
+	// DuckDB instance ONLY ON A MATERIALIZER POD (MATERIALIZER_ENABLED). The
+	// materializer release serves no query traffic (no ingress; the query fleet is a
+	// separate release), so its always-constructed query backend is idle — but it
+	// still honors DUCKDB_MEMORY_LIMIT, so two 6GiB DuckDB instances can co-reside on
+	// an 8Gi pod and OOM (finding #7). Lowering just the idle query instance makes the
+	// two limits sum under the pod limit while the decode instance keeps its full
+	// budget. Ignored on a query pod (MATERIALIZER_ENABLED=false).
+	DuckDBQueryMemoryLimit string `yaml:"DUCKDB_QUERY_MEMORY_LIMIT"`
+	DuckDBThreads          int    `yaml:"DUCKDB_THREADS"`
 	DuckDBExtensionDir  string `yaml:"DUCKDB_EXTENSION_DIR"`
 	DuckDBTempDirectory string `yaml:"DUCKDB_TEMP_DIRECTORY"`
 	DuckDBMaxConns      int    `yaml:"DUCKDB_MAX_CONNS"`

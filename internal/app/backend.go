@@ -61,6 +61,23 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 	}
 }
 
+// queryDuckConfig is the DuckDB config for the QUERY backend. It is
+// duckConfigFromSettings with one materializer-pod adjustment: on a materializer
+// release (MATERIALIZER_ENABLED) the query backend is always built but serves no
+// traffic (no ingress; the query fleet is a separate release), yet still honors
+// DUCKDB_MEMORY_LIMIT — so two same-limit DuckDB instances can co-reside on one pod
+// and OOM (finding #7). When DUCKDB_QUERY_MEMORY_LIMIT is set on such a pod, cap this
+// idle query instance with it so it plus the decode instance sum under the pod limit;
+// the decode instance (startDuckLakeMaterializer) keeps the full DUCKDB_MEMORY_LIMIT.
+// On a query pod the override is inert, so the query fleet is unchanged.
+func queryDuckConfig(settings *config.Settings) duck.Config {
+	cfg := duckConfigFromSettings(settings)
+	if settings.MaterializerEnabled && settings.DuckDBQueryMemoryLimit != "" {
+		cfg.DuckDBMemoryLimit = settings.DuckDBQueryMemoryLimit
+	}
+	return cfg
+}
+
 // isLocalBucket reports whether the parquet bucket points at the local
 // filesystem (file:// URL or absolute path) instead of S3, mirroring how
 // duck.Service interprets its Bucket setting.
@@ -79,7 +96,7 @@ func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (reposito
 	if settings.DuckLakeCatalogDSN == "" {
 		return nil, nil, nil, fmt.Errorf("DUCKLAKE_CATALOG_DSN is empty: the DuckLake catalog is required for the query backend")
 	}
-	duckSvc, err := duck.NewService(duckConfigFromSettings(settings))
+	duckSvc, err := duck.NewService(queryDuckConfig(settings))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("couldn't create DuckDB service: %w", err)
 	}
