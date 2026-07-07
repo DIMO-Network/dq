@@ -90,7 +90,19 @@ type DuckLakeMaterializer struct {
 	// (fleet-wide catch-up) — per-subject tracking is no cheaper than a
 	// rebuild at that point, and the map must not grow unbounded.
 	rollupFullRebuild bool
-	// maxDirtySubjects is the overflow cap (defaultMaxDirtySubjects).
+	// dirtyEventSubjects is the events_latest analogue of dirtySubjects (finding
+	// #5a): subjects whose lake.events rows changed since the last FlushEventRollup.
+	// The events rollup is maintained OFF the decode commit exactly like
+	// signals_latest, mirroring the same subject-scoped, chunked, self-healing
+	// recompute. Single-writer, so unsynchronized like dirtySubjects.
+	dirtyEventSubjects map[string]struct{}
+	// eventRollupFullRebuild escalates the next FlushEventRollup to a full
+	// RecomputeEventRollup — set on overflow (like rollupFullRebuild) and, once at
+	// first-create, to backfill events_latest from a pre-existing lake.events base
+	// (the migration case: an existing catalog getting the rollup for the first time).
+	eventRollupFullRebuild bool
+	// maxDirtySubjects is the overflow cap (defaultMaxDirtySubjects). Shared by both
+	// dirty sets.
 	maxDirtySubjects int
 }
 
@@ -123,11 +135,12 @@ const defaultMaxSnapshotSpan = 16
 func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger) (*DuckLakeMaterializer, error) {
 	registerMetrics()
 	m := &DuckLakeMaterializer{
-		db:               db,
-		log:              log.With().Str("component", "ducklake-materializer").Logger(),
-		maxSnapshotSpan:  defaultMaxSnapshotSpan,
-		dirtySubjects:    map[string]struct{}{},
-		maxDirtySubjects: defaultMaxDirtySubjects,
+		db:                 db,
+		log:                log.With().Str("component", "ducklake-materializer").Logger(),
+		maxSnapshotSpan:    defaultMaxSnapshotSpan,
+		dirtySubjects:      map[string]struct{}{},
+		dirtyEventSubjects: map[string]struct{}{},
+		maxDirtySubjects:   defaultMaxDirtySubjects,
 	}
 	if err := m.ensureSchema(ctx); err != nil {
 		return nil, err
@@ -183,7 +196,7 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 	// ever created by this block, so "exists" implies "already partitioned/sorted"
 	// (see setupStatements for why re-ALTERing is a crash, not a no-op).
 	exists := map[string]bool{}
-	for _, t := range []string{"signals", "events", "signals_latest"} {
+	for _, t := range []string{"signals", "events", "signals_latest", "events_latest"} {
 		ok, err := m.tableExists(ctx, "lake", t)
 		if err != nil {
 			return err
@@ -235,6 +248,16 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 		if pending {
 			m.rollupFullRebuild = true
 		}
+	}
+	// events_latest first-create over a PRE-EXISTING lake.events base is a migration
+	// (finding #5a): an existing catalog getting the events rollup for the first time
+	// must backfill every already-decoded subject, or dormant vehicles (no new events)
+	// would read an empty summary. Escalate the first FlushEventRollup to a full
+	// rebuild. A brand-new catalog creates events + events_latest in the same pass
+	// (exists["events"] is false), so this does NOT fire there — no 256-bucket
+	// snapshot churn on a fresh boot; the per-batch dirty tracking fills it instead.
+	if !exists["events_latest"] && exists["events"] {
+		m.eventRollupFullRebuild = true
 	}
 	return nil
 }
@@ -329,6 +352,25 @@ func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 		// otherwise serve epoch location timestamps forever).
 		stmts = append(stmts,
 			`ALTER TABLE lake.signals_latest ADD COLUMN IF NOT EXISTS loc_ts TIMESTAMP WITH TIME ZONE`)
+	}
+	if !exists["events_latest"] {
+		// events_latest is the per-(subject,name) event summary rollup (finding #5a):
+		// it makes GetEventSummaries/dataSummary O(distinct-names) instead of an
+		// all-history GROUP BY over lake.events per request — the events analogue of
+		// signals_latest. Maintained OFF the decode commit by FlushEventRollup, which
+		// recomputes touched subjects from the (subject,timestamp,name,source)-deduped
+		// base (LakeEventsDeduped's key), so it is a materialized view of
+		// GetEventSummaries — parity by construction. Partitioned by subject_bucket
+		// like the base. Same first-creation ALTER gating as the other decoded tables
+		// (see the doc above): the ALTER is emitted only on create, so a reboot mints
+		// zero schema changes.
+		stmts = append(stmts,
+			`CREATE TABLE IF NOT EXISTS lake.events_latest (
+				subject VARCHAR, subject_bucket INTEGER, name VARCHAR,
+				count BIGINT,
+				first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
+			`ALTER TABLE lake.events_latest SET PARTITIONED BY (subject_bucket)`,
+		)
 	}
 	// The remaining statements are genuinely idempotent (CREATE IF NOT EXISTS /
 	// guarded INSERT) and mint no schema change, so they run on every boot.
@@ -1030,6 +1072,17 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		m.dirtySubjects = map[string]struct{}{}
 		m.rollupFullRebuild = true
 	}
+	// Same dirty-tracking for the events_latest rollup (finding #5a): a batch can
+	// write events for subjects with no signals (and vice versa), so track them
+	// independently. Post-commit like the signals set, so a rolled-back batch never
+	// dirties the rollup.
+	for i := range dec.events {
+		m.dirtyEventSubjects[dec.events[i].Subject] = struct{}{}
+	}
+	if len(m.dirtyEventSubjects) > m.maxDirtySubjects {
+		m.dirtyEventSubjects = map[string]struct{}{}
+		m.eventRollupFullRebuild = true
+	}
 	return nil
 }
 
@@ -1220,6 +1273,15 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 			WHERE s.subject_bucket = sl.subject_bucket AND s.subject = sl.subject AND s.name = sl.name)`, cutoff)); err != nil {
 		return total, fmt.Errorf("pruning orphaned rollup rows: %w", err)
 	}
+	// Same orphan cleanup for the events rollup (finding #5a): drop events_latest rows
+	// whose base events were all pruned away, bounded to last_seen < cutoff so the
+	// anti-join probes only long-dormant rows and each NOT EXISTS is partition-pruned.
+	if _, err := m.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM lake.events_latest el WHERE el.last_seen < make_timestamp(%d) AND NOT EXISTS (
+			SELECT 1 FROM lake.events e
+			WHERE e.subject_bucket = el.subject_bucket AND e.subject = el.subject AND e.name = el.name)`, cutoff)); err != nil {
+		return total, fmt.Errorf("pruning orphaned event rollup rows: %w", err)
+	}
 	return total, nil
 }
 
@@ -1238,6 +1300,32 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 const signalsLatestColumns = ` (subject, subject_bucket, name, "timestamp", value_number, ` +
 	`value_string, loc_lat, loc_lon, loc_hdop, loc_heading, loc_ts, count, first_seen, last_seen) `
 
+// TODO(load-review #5b): rollupSelectSQL still recomputes each dirty subject's rollup
+// over its ENTIRE retained history every flush (the WHERE carries only subject_bucket +
+// subject IN, no timestamp floor), so the cost grows with LAKE_DECODED_RETENTION × active
+// fleet, independent of how few rows the batch added. A naive `timestamp >= floor` is NOT
+// safe: `count`, `first_seen` (and `last_seen`) are full-history aggregates — a floor
+// undercounts `count` and moves `first_seen` forward. Folding only the batch's new maxima
+// is also not exactly-correct for `count`: the write anti-join keys on cloud_event_id, so a
+// different-cloud_event_id duplicate of an existing (subject,name,timestamp) IS stored and
+// only the read-path QUALIFY dedup collapses it — an incremental `count += len(batch)` would
+// double-count exactly those, breaking the "each rollup row is exactly the deduped-base
+// aggregate" invariant the rollup tests assert (tests/ducklake_latest_rollup_test.go,
+// ducklake_dedup_test.go). Deferred rather than shipped unproven.
+//
+// Safe design for a follow-up: split the rollup's RECENCY columns from its CUMULATIVE
+// columns. (a) Maintain (timestamp, value_*, loc_*, loc_ts, last_seen) by folding the
+// batch's per-(subject,name) max against the existing rollup row — recency-only, so
+// arg_max over {existing latest row, batch rows} equals arg_max over full history because
+// the existing row already holds the prior max (no base scan, exact). (b) Keep (count,
+// first_seen) exact with a bounded scan, not a full one: store a per-(subject,name)
+// "counted-through" high-watermark = the max timestamp already folded into count; each
+// flush counts only DEDUPED base rows in (watermark, now] (a recent-partition scan bounded
+// like the write anti-join's dedupProbeFloor) and advances the watermark; first_seen
+// min-folds the batch min. Retention's existing orphan-prune already handles deletes. This
+// keeps count/first_seen exact while making the steady-state flush O(batch), not O(history).
+// It needs its own exactness tests (incremental == full-recompute under redelivery) before
+// it can replace the recompute below.
 func rollupSelectSQL(whereClause string) string {
 	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
 	return fmt.Sprintf(`SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
@@ -1400,6 +1488,137 @@ func (m *DuckLakeMaterializer) recomputeOneBucket(ctx context.Context, where str
 		return fmt.Errorf("delete: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest"+signalsLatestColumns+rollupSelectSQL(where)); err != nil {
+		return fmt.Errorf("insert: %w", err)
+	}
+	return tx.Commit()
+}
+
+// eventsLatestColumns names lake.events_latest's columns in CREATE order so the
+// rollup INSERTs bind by name, not position (see signalsLatestColumns for why a
+// positional bind would silently corrupt on a reordered SELECT).
+const eventsLatestColumns = ` (subject, subject_bucket, name, count, first_seen, last_seen) `
+
+// eventRollupSelectSQL builds the per-(subject,name) event summary SELECT over the
+// deduped base table, restricted by whereClause ("" for the whole table). It mirrors
+// GetEventSummaries exactly: the same (subject,timestamp,name,source) dedup as
+// LakeEventsDeduped (events include source — the events read dedup key #3), then
+// count/min/max GROUP BY name. So events_latest is a materialized view of
+// GetEventSummaries — parity by construction (finding #5a).
+func eventRollupSelectSQL(whereClause string) string {
+	return fmt.Sprintf(`SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
+		CAST(count(*) AS BIGINT) AS count,
+		min(timestamp) AS first_seen, max(timestamp) AS last_seen
+	FROM (SELECT * FROM lake.events %[1]s
+	      QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, timestamp, name, source ORDER BY cloud_event_id) = 1)
+	GROUP BY subject, name`, whereClause)
+}
+
+// FlushEventRollup is the events_latest analogue of FlushRollup (finding #5a):
+// recompute lake.events_latest for every subject whose lake.events rows changed
+// since the last flush, subject-scoped and bucket-chunked off the decode commit. A
+// no-op when nothing is dirty. On overflow / first-create it escalates to a full
+// RecomputeEventRollup. Single-writer: called only on the decode-loop goroutine.
+func (m *DuckLakeMaterializer) FlushEventRollup(ctx context.Context) error {
+	if m.eventRollupFullRebuild {
+		start := time.Now()
+		defer func() { eventRollupRefreshSeconds.Set(time.Since(start).Seconds()) }()
+		if err := m.RecomputeEventRollup(ctx); err != nil {
+			return err
+		}
+		m.eventRollupFullRebuild = false
+		m.dirtyEventSubjects = map[string]struct{}{} // the rebuild covers anything accrued since
+		return nil
+	}
+	if len(m.dirtyEventSubjects) == 0 {
+		return nil
+	}
+	byBucket := map[int][]string{}
+	for s := range m.dirtyEventSubjects {
+		b := duck.HashBucket(s)
+		byBucket[b] = append(byBucket[b], s)
+	}
+	buckets := make([]int, 0, len(byBucket))
+	for b := range byBucket {
+		buckets = append(buckets, b)
+	}
+	sort.Ints(buckets)
+
+	start := time.Now()
+	defer func() { eventRollupRefreshSeconds.Set(time.Since(start).Seconds()) }()
+	for _, b := range buckets {
+		subjects := byBucket[b]
+		sort.Strings(subjects) // deterministic chunking/ordering
+		for len(subjects) > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			chunk := subjects
+			if len(chunk) > rollupSubjectChunk {
+				chunk = chunk[:rollupSubjectChunk]
+			}
+			subjects = subjects[len(chunk):]
+			if err := m.recomputeEventSubjects(ctx, b, chunk); err != nil {
+				return fmt.Errorf("event rollup recompute bucket %d (%d subjects): %w", b, len(chunk), err)
+			}
+			for _, s := range chunk {
+				delete(m.dirtyEventSubjects, s) // keep unflushed subjects dirty for retry
+			}
+		}
+	}
+	return nil
+}
+
+// recomputeEventSubjects DELETEs+recomputes the events_latest rows of one bucket's
+// given subjects in a single transaction (the events analogue of recomputeSubjects).
+func (m *DuckLakeMaterializer) recomputeEventSubjects(ctx context.Context, bucket int, subjects []string) error {
+	args := make([]any, len(subjects))
+	marks := make([]string, len(subjects))
+	for i, s := range subjects {
+		args[i] = s
+		marks[i] = "?"
+	}
+	where := fmt.Sprintf("WHERE subject_bucket = %d AND subject IN (%s)", bucket, strings.Join(marks, ", "))
+
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.events_latest "+where, args...); err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.events_latest"+eventsLatestColumns+eventRollupSelectSQL(where), args...); err != nil {
+		return fmt.Errorf("insert: %w", err)
+	}
+	return tx.Commit()
+}
+
+// RecomputeEventRollup rebuilds lake.events_latest from the ENTIRE lake.events base,
+// bucket-partitioned (one txn each) so it stays memory-bounded over deep history.
+// The events analogue of RecomputeRollup — the disaster-recovery / first-create
+// backfill path (LAKE_REBUILD_ROLLUP_ON_BOOT, and the events_latest migration).
+func (m *DuckLakeMaterializer) RecomputeEventRollup(ctx context.Context) error {
+	for b := 0; b < duck.NumLatestBuckets; b++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := m.recomputeOneEventBucket(ctx, fmt.Sprintf("WHERE subject_bucket = %d", b)); err != nil {
+			return fmt.Errorf("event rollup recompute bucket %d: %w", b, err)
+		}
+	}
+	return nil
+}
+
+func (m *DuckLakeMaterializer) recomputeOneEventBucket(ctx context.Context, where string) error {
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM lake.events_latest "+where); err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.events_latest"+eventsLatestColumns+eventRollupSelectSQL(where)); err != nil {
 		return fmt.Errorf("insert: %w", err)
 	}
 	return tx.Commit()

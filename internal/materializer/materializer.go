@@ -193,21 +193,32 @@ func (r *Runner) FlushRollup(ctx context.Context) error {
 	return r.lake.FlushRollup(ctx)
 }
 
-// flushRollup runs the decoupled rollup maintenance, logging (not propagating) a
-// failure: the base tables are already durable and the rollup self-heals on the
-// next flush, so a transient failure must not wedge the decode loop.
+// FlushEventRollup recomputes events_latest for every subject dirtied since the last
+// flush (finding #5a) — the events analogue of FlushRollup, exposed for the same
+// one-shot drivers. Safe when caught up; a no-op when nothing is dirty.
+func (r *Runner) FlushEventRollup(ctx context.Context) error {
+	return r.lake.FlushEventRollup(ctx)
+}
+
+// flushRollup runs the decoupled rollup maintenance (both the signals_latest and
+// events_latest rollups), logging (not propagating) a failure: the base tables are
+// already durable and each rollup self-heals on the next flush, so a transient
+// failure must not wedge the decode loop. The two rollups are independent — a
+// failure of one does not skip the other.
 func (r *Runner) flushRollup(ctx context.Context) {
-	if err := r.lake.FlushRollup(ctx); err != nil {
-		if ctx.Err() != nil {
-			return
-		}
+	if err := r.lake.FlushRollup(ctx); err != nil && ctx.Err() == nil {
 		rollupFlushErrorsTotal.Inc()
 		r.log.Error().Err(err).Msg("signals_latest flush failed; latest/summary may be stale until the next flush")
 	}
+	if err := r.lake.FlushEventRollup(ctx); err != nil && ctx.Err() == nil {
+		eventRollupFlushErrorsTotal.Inc()
+		r.log.Error().Err(err).Msg("events_latest flush failed; event summaries may be stale until the next flush")
+	}
 }
 
-// maybeFlushRollup runs flushRollup at most once per RollupInterval, to bound how
-// stale the latest/summary view gets during a long continuous drain.
+// maybeFlushRollup runs flushRollup (signals + events rollups) at most once per
+// RollupInterval, to bound how stale the latest/summary views get during a long
+// continuous drain.
 func (r *Runner) maybeFlushRollup(ctx context.Context, last *time.Time) {
 	if time.Since(*last) < r.cfg.RollupInterval {
 		return

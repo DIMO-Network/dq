@@ -68,6 +68,16 @@ var (
 		Name: "dq_materializer_rollup_flush_errors_total",
 		Help: "signals_latest flush passes that failed; a sustained increase means the latest/summary view is stale.",
 	})
+	// eventRollupRefreshSeconds / eventRollupFlushErrorsTotal mirror the signals
+	// rollup gauges for the events_latest rollup (finding #5a).
+	eventRollupRefreshSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "dq_materializer_event_rollup_refresh_seconds",
+		Help: "Wall-clock of the most recent events_latest rollup flush (subject-scoped recompute of dirty subjects).",
+	})
+	eventRollupFlushErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "dq_materializer_event_rollup_flush_errors_total",
+		Help: "events_latest flush passes that failed; a sustained increase means the event-summary view is stale.",
+	})
 	cursorResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "dq_materializer_cursor_resets_total",
 		Help: "DuckLake snapshot cursor resets after the consumer lagged past LAKE_SNAPSHOT_RETENTION (expired change feed). Each reset skips an un-decoded gap — alert on any increase.",
@@ -131,7 +141,8 @@ func registerMetrics() {
 		prometheus.MustRegister(
 			lagSeconds, batchesTotal, rowsTotal, errorsTotal,
 			pruneErrorsTotal, passErrorsTotal, rollupRefreshSeconds,
-			rollupFlushErrorsTotal, cursorResetsTotal, cursorSnapshotID,
+			rollupFlushErrorsTotal, eventRollupRefreshSeconds, eventRollupFlushErrorsTotal,
+			cursorResetsTotal, cursorSnapshotID,
 			headSnapshotID, cursorResetGap, blobMissingTotal, blobPoisonTotal,
 			progressReportErrorsTotal,
 		)

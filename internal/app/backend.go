@@ -246,13 +246,20 @@ func runMaterializerLoop(runner *materializer.Runner, mat *materializer.DuckLake
 	go func() {
 		defer close(done)
 		if rebuildRollup {
-			logger.Info().Msg("LAKE_REBUILD_ROLLUP_ON_BOOT set: rebuilding signals_latest from full base (may take a while on deep history)")
+			logger.Info().Msg("LAKE_REBUILD_ROLLUP_ON_BOOT set: rebuilding signals_latest + events_latest from full base (may take a while on deep history)")
 			if err := mat.RecomputeRollup(ctx); err != nil {
 				// Non-fatal: log and proceed — crashing here would CrashLoop the
 				// pod; the per-batch recompute still heals active vehicles.
 				logger.Error().Err(err).Msg("signals_latest rebuild failed; continuing with the normal loop")
 			} else {
 				logger.Info().Msg("signals_latest rebuild complete")
+			}
+			// Rebuild the events rollup too (finding #5a); independent of the signals
+			// rebuild so one failing doesn't skip the other.
+			if err := mat.RecomputeEventRollup(ctx); err != nil {
+				logger.Error().Err(err).Msg("events_latest rebuild failed; continuing with the normal loop")
+			} else {
+				logger.Info().Msg("events_latest rebuild complete")
 			}
 		}
 		if err := runner.Run(ctx); err != nil {
