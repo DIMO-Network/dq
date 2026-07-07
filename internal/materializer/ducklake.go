@@ -127,6 +127,34 @@ const snapshotCursorPartition = "lake.raw_events#snapshot"
 // a tight one; a byte-budget bound over the combined inline+blob working set is the real
 // fix (H6, deferred). The Run loop re-polls immediately while a batch was processed, so
 // a backlog still drains continuously.
+//
+// TODO(load-review #1c): bound the pass by a BYTE budget over the resident inline+blob
+// working set, paginating WITHIN a single oversized snapshot so no snapshot is atomic.
+// The multi-snapshot case is already count-bounded here; the residual OOM is ONE
+// snapshot with a large blob fan-out (span can't drop below 1), whose readDelta slice +
+// resolveBlobs payloads are unbounded. This was NOT implemented because it changes the
+// commit's atomicity model, and the exactly-once protocol is chaos-test-proven (60+
+// SIGKILL iterations) — a change here must be re-proven the same way, not just unit-
+// tested. Design for the human implementer:
+//   - Page a single snapshot's rows by a stable ROW-KEY window (order by
+//     (subject, timestamp, cloud_event_id); carry a >last-key cursor), reading and
+//     decoding one byte-bounded window at a time instead of the whole delta.
+//   - Write each window with the EXISTING idempotent antiJoinInsert (keyed on
+//     cloud_event_id) in its own txn that DOES NOT advance the ingest_progress cursor.
+//     Intermediate windows are safe to re-do: a crash mid-snapshot re-reads from the
+//     window start and the anti-join collapses the already-written rows.
+//   - Advance the cursor to `to` only in the FINAL window's txn, coupled with that
+//     window's insert exactly as commit() does today — so "cursor advanced ⟺ every
+//     window durable" still holds and commitLanded's lost-ack disambiguation is
+//     unchanged. Do NOT split the cursor advance from ALL inserts (that breaks the
+//     lost-ack invariant); only the LAST insert stays coupled to it.
+//   - Note the interaction with maybeRecoverExpired: if din expires the snapshot after
+//     some windows are written but before the final cursor advance, restart takes the
+//     expiry-skip path leaving a partial write — same class as today's cursor-expiry
+//     gap, now recoverable via BackfillTimeRange (finding #1a).
+// Until then, size LAKE_SNAPSHOT_RETENTION and pod memory so a single snapshot's
+// working set fits, and rely on the crashloop being visible (pass errors) rather than
+// silent.
 const defaultMaxSnapshotSpan = 16
 
 // NewDuckLakeMaterializer ensures the decoded tables + cursor row exist and
@@ -759,14 +787,22 @@ func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([
 	q := fmt.Sprintf(
 		"SELECT %s FROM ducklake_table_changes('lake', 'main', 'raw_events', %d, %d) WHERE change_type = 'insert'",
 		duck.RawEventColumns, from+1, to)
-	rows, err := m.db.QueryContext(ctx, q)
+	// Don't classify a query error here — RunOnce decides expired-vs-transient on retention.
+	return m.scanAndResolveRaw(ctx, q, "reading raw_events delta")
+}
+
+// scanAndResolveRaw runs a raw_events SELECT (projected with duck.RawEventColumns so
+// scanRawEvent's positional scan matches), reconstructs each RawEvent + its blob key
+// with no network in the scan loop, then resolves externalized payloads concurrently
+// (serial S3 GETs would block the writer on N round-trips). Shared by the change-feed
+// delta read (readDelta) and the base-table backfill read (readRawByTime, finding #1a).
+func (m *DuckLakeMaterializer) scanAndResolveRaw(ctx context.Context, query, errCtx string) ([]cloudevent.RawEvent, error) {
+	rows, err := m.db.QueryContext(ctx, query)
 	if err != nil {
-		// Don't classify here — RunOnce decides expired-vs-transient on retention.
-		return nil, fmt.Errorf("reading raw_events delta: %w", err)
+		return nil, fmt.Errorf("%s: %w", errCtx, err)
 	}
 	defer rows.Close() //nolint:errcheck
 
-	// Phase 1: scan every row + its blob key (no network in this loop).
 	var out []cloudevent.RawEvent
 	var blobKeys []string
 	for rows.Next() {
@@ -780,10 +816,110 @@ func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Phase 2: resolve externalized payloads concurrently — serial S3 GETs here
-	// would block the single writer on N round-trips (blob-heavy batches are also
-	// the largest to decode, so the latency stacks).
 	return m.resolveBlobs(ctx, out, blobKeys)
+}
+
+// readRawByTime reads raw_events in [from, to) DIRECTLY from the base table — NOT the
+// snapshot change feed, whose history may have expired past LAKE_SNAPSHOT_RETENTION.
+// The rows themselves survive (din's row retention is separate), so a backfill can
+// re-read a range the decode loop skipped on cursor expiry (finding #1a). Half-open
+// [from, to) mirrors the query layer's [from, to) event window.
+func (m *DuckLakeMaterializer) readRawByTime(ctx context.Context, from, to time.Time) ([]cloudevent.RawEvent, error) {
+	q := fmt.Sprintf(`SELECT %s FROM lake.raw_events WHERE "time" >= %s AND "time" < %s`,
+		duck.RawEventColumns, sqlTimestampLit(from), sqlTimestampLit(to))
+	return m.scanAndResolveRaw(ctx, q, "reading raw_events by time")
+}
+
+// BackfillTimeRange re-decodes raw_events in [from, to) into lake.signals/events,
+// idempotently, WITHOUT touching the ingest_progress cursor — the out-of-band repair
+// for a range the main decode loop permanently skipped on cursor expiry (finding #1a,
+// the counterpart to cursorResetsTotal, which only records that a skip happened). It
+// reuses the exact decode + idempotent-insert path, so re-running is a no-op: the
+// cloud_event_id anti-join (backfillWrite) collapses rows already at rest, and the
+// read-path QUALIFY dedup is the final guard on every query. Marks the touched
+// subjects dirty so the next FlushRollup / FlushEventRollup refreshes their rollups.
+// Returns the number of raw events decoded. Safe to run while the single-writer
+// materializer is offline OR alongside it (both go through the same idempotent insert).
+func (m *DuckLakeMaterializer) BackfillTimeRange(ctx context.Context, dec eventDecoder, from, to time.Time) (int, error) {
+	if !from.Before(to) {
+		return 0, fmt.Errorf("backfill range is empty or inverted: from %s must be before to %s", from, to)
+	}
+	events, err := m.readRawByTime(ctx, from, to)
+	if err != nil {
+		return 0, err
+	}
+	if len(events) == 0 {
+		return 0, nil
+	}
+	decoded := dec.decodeEvents(ctx, events)
+	if err := m.backfillWrite(ctx, decoded); err != nil {
+		return 0, err
+	}
+	return len(events), nil
+}
+
+// backfillWrite inserts a decoded batch into lake.signals/events in one transaction,
+// idempotently, and WITHOUT the cursor CAS (backfill is out-of-band, so it must never
+// move the main decode cursor). It mirrors commit's insert blocks but, unlike the
+// steady-state path, uses the UNCLAMPED [min,max] timestamp window for the dedup
+// anti-join probe (minMaxTime, not the now-30d clampProbeFloor): a backfill re-decodes
+// arbitrarily old data and MUST find the existing rows at their true timestamps to stay
+// idempotent — a probe floored to 30d would miss old duplicates and double-insert on a
+// re-run. The wider probe is the correct trade-off for a rare repair op. The dedup
+// anti-join is always kept (never skipDedup) for the same reason.
+func (m *DuckLakeMaterializer) backfillWrite(ctx context.Context, dec *decodedBatch) error {
+	var cleanup []string
+	defer func() {
+		for _, f := range cleanup {
+			_ = os.Remove(f)
+		}
+	}()
+
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring conn: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if len(dec.signals) > 0 {
+		tmp, err := writeTempParquet(m.tempDir, writeSignalParquet, dec.signals)
+		if err != nil {
+			return err
+		}
+		cleanup = append(cleanup, tmp)
+		tsMin, tsMax := minMaxTime(dec.signals, func(r SignalRow) time.Time { return r.Timestamp })
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp, tsMin, tsMax, false)); err != nil {
+			return fmt.Errorf("insert signals: %w", err)
+		}
+	}
+	if len(dec.events) > 0 {
+		tmp, err := writeTempParquet(m.tempDir, writeEventParquet, dec.events)
+		if err != nil {
+			return err
+		}
+		cleanup = append(cleanup, tmp)
+		tsMin, tsMax := minMaxTime(dec.events, func(r EventRow) time.Time { return r.Timestamp })
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp, tsMin, tsMax, false)); err != nil {
+			return fmt.Errorf("insert events: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit backfill: %w", err)
+	}
+	// Refresh the rollups for the backfilled subjects on the next flush.
+	for i := range dec.signals {
+		m.dirtySubjects[dec.signals[i].Subject] = struct{}{}
+	}
+	for i := range dec.events {
+		m.dirtyEventSubjects[dec.events[i].Subject] = struct{}{}
+	}
+	return nil
 }
 
 // blobFetchConcurrency bounds the parallel blob downloads in resolveBlobs.
@@ -1155,8 +1291,11 @@ func (m *DuckLakeMaterializer) recoverPoisonedSession(err error) bool {
 	return true
 }
 
-// timeRange returns the min and max ts(row) over rows (both zero when empty).
-func timeRange[T any](rows []T, ts func(T) time.Time) (minT, maxT time.Time) {
+// minMaxTime returns the min and max ts(row) over rows (both zero when empty), with
+// NO probe-floor clamp. The backfill path uses this directly so its dedup anti-join
+// probes the data's TRUE timestamp window and stays idempotent on arbitrarily old data
+// (finding #1a) — the steady-state timeRange clamp would miss old duplicates.
+func minMaxTime[T any](rows []T, ts func(T) time.Time) (minT, maxT time.Time) {
 	for i := range rows {
 		t := ts(rows[i])
 		if i == 0 || t.Before(minT) {
@@ -1166,7 +1305,14 @@ func timeRange[T any](rows []T, ts func(T) time.Time) (minT, maxT time.Time) {
 			maxT = t
 		}
 	}
-	return clampProbeFloor(minT, maxT)
+	return minT, maxT
+}
+
+// timeRange is minMaxTime with the steady-state dedup probe floor (clampProbeFloor):
+// a single epoch/ancient row must not drag the anti-join probe to a full-history scan
+// on every batch (M5). Used by the hot commit path; backfill uses minMaxTime instead.
+func timeRange[T any](rows []T, ts func(T) time.Time) (minT, maxT time.Time) {
+	return clampProbeFloor(minMaxTime(rows, ts))
 }
 
 // dedupProbeFloor bounds how far back the insert anti-join's probe window may

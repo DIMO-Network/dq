@@ -161,68 +161,10 @@ func startMaterializer(settings *config.Settings, logger zerolog.Logger) (func()
 // owns its own DuckDB service (catalog attached) for the lifetime of the
 // loop; the query backend opens a separate one.
 func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Duration, logger zerolog.Logger) (func(), error) {
-	// Sharding is not honored on the DuckLake path — readDelta reads the whole
-	// raw_events delta and the single global ingest_progress cursor makes exactly
-	// one logical processor (extra replicas just lose the cursor CAS and roll
-	// back). Refuse the config rather than silently ignore it: run the
-	// materializer as a single replicaCount=1 release (SR review #8).
-	if settings.MaterializerShardCount > 1 {
-		return nil, fmt.Errorf(
-			"MATERIALIZER_SHARD_COUNT=%d is not supported on the DuckLake path: the global ingest_progress cursor allows only one materializer; run a single replicaCount=1 release",
-			settings.MaterializerShardCount)
-	}
-	cfg := duckConfigFromSettings(settings)
-	// duckConfigFromSettings already sets DuckLakeEnabled. The materializer reads the
-	// DuckLake delta (ducklake_table_changes); spatial's RTreeIndexScanOptimizer
-	// crashes the planner on that read, so never load it here.
-	cfg.LoadSpatial = false
-	cfg.MetricsPoolLabel = "materializer" // separate dq_db_pool_* series from the query pool (H4)
-	duckSvc, err := duck.NewService(cfg)
+	duckSvc, mat, runner, err := buildDuckLakeMaterializer(settings, pollInterval, logger)
 	if err != nil {
-		return nil, fmt.Errorf("creating DuckLake service: %w", err)
+		return nil, err
 	}
-	mat, err := materializer.NewDuckLakeMaterializer(context.Background(), duckSvc.DB(), logger)
-	if err != nil {
-		_ = duckSvc.Close()
-		return nil, fmt.Errorf("creating DuckLake materializer: %w", err)
-	}
-	// Resolve externalized blob payloads from the same bucket the fetch path
-	// presigns/downloads (settings.BlobBucket): din writes payloads larger
-	// than the inline threshold to a blob and leaves only the key on the row.
-	blobCipher, err := blobcrypt.NewCipher(settings.BlobEncryptionKey)
-	if err != nil {
-		_ = duckSvc.Close()
-		return nil, fmt.Errorf("blob cipher: %w", err)
-	}
-	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.BlobBucket).
-		WithBlobCipher(blobCipher).
-		WithTempDir(settings.DuckDBTempDirectory) // stage batch parquet on the sized spill volume, not the root fs
-
-	var decodedRetention time.Duration
-	if settings.LakeDecodedRetention != "" {
-		decodedRetention, err = time.ParseDuration(settings.LakeDecodedRetention)
-		if err != nil {
-			_ = duckSvc.Close()
-			return nil, fmt.Errorf("invalid LAKE_DECODED_RETENTION %q: %w", settings.LakeDecodedRetention, err)
-		}
-	}
-	var rollupInterval time.Duration
-	if settings.MaterializerRollupInterval != "" {
-		rollupInterval, err = time.ParseDuration(settings.MaterializerRollupInterval)
-		if err != nil {
-			_ = duckSvc.Close()
-			return nil, fmt.Errorf("invalid MATERIALIZER_ROLLUP_INTERVAL %q: %w", settings.MaterializerRollupInterval, err)
-		}
-	}
-	runner := materializer.New(materializer.Config{
-		PollInterval:      pollInterval,
-		RollupInterval:    rollupInterval,
-		ChainID:           settings.DIMORegistryChainID,
-		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
-		Workers:           settings.MaterializerWorkers,
-		DecodedRetention:  decodedRetention,
-		BackfillMode:      settings.MaterializerBackfillMode,
-	}, logger).WithDuckLake(mat)
 
 	// rebuildRollup is the opt-in disaster-recovery rebuild (LAKE_REBUILD_ROLLUP_ON_BOOT):
 	// the per-batch recompute only touches a batch's subjects, so a dropped/truncated
@@ -236,6 +178,116 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 		stop()
 		_ = duckSvc.Close()
 	}, nil
+}
+
+// buildDuckLakeMaterializer constructs the materializer's DuckDB service, the
+// DuckLakeMaterializer (blob store + cipher + temp dir), and the Runner (the decode
+// surface) — the shared setup behind both the live decode loop (startDuckLakeMaterializer)
+// and the one-shot re-decode tool (RunBackfill, finding #1a). On error it closes the
+// service so the caller has nothing to clean up; on success the caller owns duckSvc.
+func buildDuckLakeMaterializer(settings *config.Settings, pollInterval time.Duration, logger zerolog.Logger) (*duck.Service, *materializer.DuckLakeMaterializer, *materializer.Runner, error) {
+	// Sharding is not honored on the DuckLake path — readDelta reads the whole
+	// raw_events delta and the single global ingest_progress cursor makes exactly
+	// one logical processor (extra replicas just lose the cursor CAS and roll
+	// back). Refuse the config rather than silently ignore it: run the
+	// materializer as a single replicaCount=1 release (SR review #8).
+	if settings.MaterializerShardCount > 1 {
+		return nil, nil, nil, fmt.Errorf(
+			"MATERIALIZER_SHARD_COUNT=%d is not supported on the DuckLake path: the global ingest_progress cursor allows only one materializer; run a single replicaCount=1 release",
+			settings.MaterializerShardCount)
+	}
+	cfg := duckConfigFromSettings(settings)
+	// duckConfigFromSettings already sets DuckLakeEnabled. The materializer reads the
+	// DuckLake delta (ducklake_table_changes); spatial's RTreeIndexScanOptimizer
+	// crashes the planner on that read, so never load it here.
+	cfg.LoadSpatial = false
+	cfg.MetricsPoolLabel = "materializer" // separate dq_db_pool_* series from the query pool (H4)
+	duckSvc, err := duck.NewService(cfg)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("creating DuckLake service: %w", err)
+	}
+	mat, err := materializer.NewDuckLakeMaterializer(context.Background(), duckSvc.DB(), logger)
+	if err != nil {
+		_ = duckSvc.Close()
+		return nil, nil, nil, fmt.Errorf("creating DuckLake materializer: %w", err)
+	}
+	// Resolve externalized blob payloads from the same bucket the fetch path
+	// presigns/downloads (settings.BlobBucket): din writes payloads larger
+	// than the inline threshold to a blob and leaves only the key on the row.
+	blobCipher, err := blobcrypt.NewCipher(settings.BlobEncryptionKey)
+	if err != nil {
+		_ = duckSvc.Close()
+		return nil, nil, nil, fmt.Errorf("blob cipher: %w", err)
+	}
+	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.BlobBucket).
+		WithBlobCipher(blobCipher).
+		WithTempDir(settings.DuckDBTempDirectory) // stage batch parquet on the sized spill volume, not the root fs
+
+	var decodedRetention time.Duration
+	if settings.LakeDecodedRetention != "" {
+		decodedRetention, err = time.ParseDuration(settings.LakeDecodedRetention)
+		if err != nil {
+			_ = duckSvc.Close()
+			return nil, nil, nil, fmt.Errorf("invalid LAKE_DECODED_RETENTION %q: %w", settings.LakeDecodedRetention, err)
+		}
+	}
+	var rollupInterval time.Duration
+	if settings.MaterializerRollupInterval != "" {
+		rollupInterval, err = time.ParseDuration(settings.MaterializerRollupInterval)
+		if err != nil {
+			_ = duckSvc.Close()
+			return nil, nil, nil, fmt.Errorf("invalid MATERIALIZER_ROLLUP_INTERVAL %q: %w", settings.MaterializerRollupInterval, err)
+		}
+	}
+	runner := materializer.New(materializer.Config{
+		PollInterval:      pollInterval,
+		RollupInterval:    rollupInterval,
+		ChainID:           settings.DIMORegistryChainID,
+		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
+		Workers:           settings.MaterializerWorkers,
+		DecodedRetention:  decodedRetention,
+		BackfillMode:      settings.MaterializerBackfillMode,
+	}, logger).WithDuckLake(mat)
+	return duckSvc, mat, runner, nil
+}
+
+// RunBackfill re-decodes raw_events in [from, to) into the decoded lake tables and
+// exits — the operator-run repair for a range the decode loop permanently skipped on
+// cursor expiry (finding #1a; alerted by DQMaterializerCursorReset). It is idempotent
+// (the same cloud_event_id anti-join), so it is safe to re-run and safe to run while
+// the live materializer is up. It registers the vendor decode modules, decodes the
+// range, then flushes both rollups so latest/summary reflect the backfilled rows.
+func RunBackfill(settings config.Settings, from, to time.Time, logger zerolog.Logger) error {
+	if settings.DuckLakeCatalogDSN == "" {
+		return fmt.Errorf("DUCKLAKE_CATALOG_DSN is empty: the DuckLake catalog is required for backfill")
+	}
+	materializer.RegisterVendorModules(materializer.VendorConfig{
+		ChainID:               settings.DIMORegistryChainID,
+		VehicleNFTAddress:     common.HexToAddress(settings.VehicleNFTAddress),
+		AftermarketNFTAddress: common.HexToAddress(settings.AftermarketNFTAddress),
+		SyntheticNFTAddress:   common.HexToAddress(settings.SyntheticNFTAddress),
+	})
+	duckSvc, mat, runner, err := buildDuckLakeMaterializer(&settings, 0, logger)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = duckSvc.Close() }()
+
+	ctx := context.Background()
+	logger.Info().Time("from", from).Time("to", to).Msg("backfill: re-decoding raw_events range")
+	n, err := mat.BackfillTimeRange(ctx, runner, from, to)
+	if err != nil {
+		return fmt.Errorf("backfill decode: %w", err)
+	}
+	// Refresh the rollups for the subjects the backfill touched (dirtied above).
+	if ferr := runner.FlushRollup(ctx); ferr != nil {
+		logger.Error().Err(ferr).Msg("backfill: signals_latest flush failed; rerun with LAKE_REBUILD_ROLLUP_ON_BOOT if latest/summary looks stale")
+	}
+	if ferr := runner.FlushEventRollup(ctx); ferr != nil {
+		logger.Error().Err(ferr).Msg("backfill: events_latest flush failed; rerun with LAKE_REBUILD_ROLLUP_ON_BOOT if event summaries look stale")
+	}
+	logger.Info().Int("raw_events", n).Msg("backfill complete")
+	return nil
 }
 
 // runMaterializerLoop runs runner.Run in a goroutine and returns a stop

@@ -104,11 +104,14 @@ spec:
           annotations:
             summary: DuckLake materializer skipped an un-decoded snapshot range
             description: >-
-              The decode cursor lagged past LAKE_SNAPSHOT_RETENTION and was reset
-              to head, permanently skipping un-decoded raw events
-              ({{ "{{ $value }}" }} resets; span in
-              dq_materializer_last_cursor_reset_gap_snapshots). Backfill the
-              skipped range, then raise retention or decode throughput.
+              The decode cursor lagged past LAKE_SNAPSHOT_RETENTION; the unretained
+              prefix was skipped WITHOUT decoding, so those raw events never reached
+              lake.signals/events ({{ "{{ $value }}" }} resets; skipped span in
+              dq_materializer_last_cursor_reset_gap_snapshots). RECOVER the gap with
+              the backfill tool — run the dq image with
+              `-backfill-from <RFC3339> -backfill-to <RFC3339>` covering the skipped
+              window (idempotent; safe while the materializer is up) — then raise
+              LAKE_SNAPSHOT_RETENTION or decode throughput so it can't recur.
         # Decode-position spread as a single number (CHD-14). NOT an exact
         # backlog: head is the catalog-global max snapshot id, which includes
         # this decoder's own signals/events/rollup snapshots and din's
