@@ -153,10 +153,11 @@ func (r *Runner) Run(ctx context.Context) error {
 			failures.record(true, time.Now()) // any success clears the failure streak
 			triedSessionRecycle = false       // a healthy pass proves the session pool recovered
 			if processed > 0 {
-				// Still draining. signals_latest is maintained off this path
-				// (FlushRollup), so a long catch-up doesn't block the writer; bound the
-				// view's staleness with a periodic flush (steady state only — backfill
-				// defers to the single catch-up flush so the drain runs flat-out).
+				// Still draining. signals_latest is maintained INCREMENTALLY at commit
+				// (#5b), so FlushRollup here only recomputes the events_latest rollup and
+				// any backfill-dirtied signal subjects — cheap in steady state. Interval-
+				// gated so a long catch-up doesn't stall the drain (backfill defers to the
+				// single catch-up flush so the drain runs flat-out).
 				if !r.cfg.BackfillMode {
 					r.maybeFlushRollup(ctx, &lastRollup)
 				}

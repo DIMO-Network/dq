@@ -1448,8 +1448,24 @@ func (m *DuckLakeMaterializer) insertDecodedSteady(ctx context.Context, tx *sql.
 		}
 		cleanup = append(cleanup, tmp)
 		tsMin, tsMax := timeRange(dec.signals, func(r SignalRow) time.Time { return r.Timestamp })
+		// #5b: steady-state lake.signals_latest is maintained INCREMENTALLY here
+		// (O(batch), not an O(history) recompute per flush). The count delta must be
+		// captured BEFORE the base insert — afterwards the batch rows are in the base and
+		// the NOT-EXISTS probe finds them, yielding delta 0 (that is exactly what makes a
+		// replayed window idempotent). Backfill (bulk/arbitrarily-old) skips the fold and
+		// defers to the end-of-catch-up recompute (markDirtyFromBatch marks it dirty).
+		if !m.backfillMode {
+			if err := m.captureRollupDelta(ctx, tx, tmp, tsMin, tsMax); err != nil {
+				return cleanup, err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp, tsMin, tsMax, m.backfillMode)); err != nil {
 			return cleanup, fmt.Errorf("insert signals: %w", err)
+		}
+		if !m.backfillMode {
+			if err := m.foldSignalsRollup(ctx, tx, tmp); err != nil {
+				return cleanup, err
+			}
 		}
 	}
 	if len(dec.events) > 0 {
@@ -1467,16 +1483,21 @@ func (m *DuckLakeMaterializer) insertDecodedSteady(ctx context.Context, tx *sql.
 }
 
 // markDirtyFromBatch records the subjects dec wrote so the decoupled rollups refresh
-// only their rows, escalating to a full rebuild if either dirty set overflows its cap
-// (a fleet-wide catch-up would otherwise grow the maps unbounded — see the field docs).
+// only their rows, escalating to a full rebuild if a dirty set overflows its cap (a
+// fleet-wide catch-up would otherwise grow the maps unbounded — see the field docs).
+// signals_latest is now maintained incrementally at commit time (#5b), so signals are
+// dirtied ONLY under backfillMode (the deferred bulk catch-up recomputes them at the
+// end); events_latest still uses the decoupled recompute, so events are always dirtied.
 // Single-writer: mutated only on the decode-loop goroutine.
 func (m *DuckLakeMaterializer) markDirtyFromBatch(dec *decodedBatch) {
-	for i := range dec.signals {
-		m.dirtySubjects[dec.signals[i].Subject] = struct{}{}
-	}
-	if len(m.dirtySubjects) > m.maxDirtySubjects {
-		m.dirtySubjects = map[string]struct{}{}
-		m.rollupFullRebuild = true
+	if m.backfillMode {
+		for i := range dec.signals {
+			m.dirtySubjects[dec.signals[i].Subject] = struct{}{}
+		}
+		if len(m.dirtySubjects) > m.maxDirtySubjects {
+			m.dirtySubjects = map[string]struct{}{}
+			m.rollupFullRebuild = true
+		}
 	}
 	for i := range dec.events {
 		m.dirtyEventSubjects[dec.events[i].Subject] = struct{}{}
@@ -1485,6 +1506,99 @@ func (m *DuckLakeMaterializer) markDirtyFromBatch(dec *decodedBatch) {
 		m.dirtyEventSubjects = map[string]struct{}{}
 		m.eventRollupFullRebuild = true
 	}
+}
+
+// captureRollupDelta stages, into the per-connection temp table _rollup_delta, the number
+// of NEWLY-DISTINCT (subject, name, timestamp) tuples this batch adds — i.e. the exact
+// increment to lake.signals_latest.count (#5b). It must run BEFORE the base insert: it
+// probes lake.signals for tuples that DON'T already exist within the anti-join's dedup
+// window [tsMin, tsMax], so a redelivery or a same-(subject,name,timestamp) collision
+// (which the count must not double) contributes 0, and a replayed window (rows already at
+// rest) yields 0 — the idempotency the crash-recovery path relies on.
+func (m *DuckLakeMaterializer) captureRollupDelta(ctx context.Context, tx *sql.Tx, sigParquet string, tsMin, tsMax time.Time) error {
+	q := fmt.Sprintf(`CREATE OR REPLACE TEMPORARY TABLE _rollup_delta AS
+SELECT b.subject, b.name, CAST(count(*) AS BIGINT) AS delta
+FROM (SELECT DISTINCT subject, name, subject_bucket, "timestamp" FROM read_parquet(%[1]s)) b
+WHERE NOT EXISTS (
+  SELECT 1 FROM lake.signals s
+  WHERE s.subject_bucket = b.subject_bucket AND s.subject = b.subject AND s.name = b.name
+    AND s."timestamp" = b."timestamp" AND s."timestamp" >= %[2]s AND s."timestamp" <= %[3]s
+)
+GROUP BY b.subject, b.name`, sqlLit(sigParquet), sqlTimestampLit(tsMin), sqlTimestampLit(tsMax))
+	if _, err := tx.ExecContext(ctx, q); err != nil {
+		return fmt.Errorf("capture rollup count delta: %w", err)
+	}
+	return nil
+}
+
+// foldSignalsRollup folds this batch into lake.signals_latest incrementally, EXACTLY as a
+// full recompute would (proven by the differential test), but O(batch) instead of
+// O(history) (#5b). It runs AFTER the base insert, inside the same transaction:
+//   - RECENCY (timestamp, value_*, loc_*, loc_ts) is recomputed from the base but BOUNDED
+//     to "timestamp >= the row's prior latest" — the new latest is either in this batch
+//     (newer) or unchanged (the prior row still qualifies), so the bound is exact yet
+//     prunes every day-partition older than the prior latest. This makes recency
+//     SELF-HEALING (recomputed from the base each batch), matching the recompute's deduped
+//     arg_max via ORDER BY timestamp DESC, cloud_event_id ASC.
+//   - COUNT is prev.count + the captured NOT-EXISTS delta; FIRST_SEEN is min(prev, batch).
+//     These carry forward (idempotent on replay), and self-heal via the boot rebuild
+//     (RecomputeRollup / LAKE_REBUILD_ROLLUP_ON_BOOT) if a rollup row is ever lost.
+// A (subject,name) with no prior rollup row folds against zero — correct in steady state
+// (a newly-seen signal has no prior base); a mass-loss (dropped rollup) is the boot
+// rebuild's job, exactly as before.
+func (m *DuckLakeMaterializer) foldSignalsRollup(ctx context.Context, tx *sql.Tx, sigParquet string) error {
+	build := fmt.Sprintf(`CREATE OR REPLACE TEMPORARY TABLE _rollup_new AS
+WITH affected AS (
+  SELECT subject, name, any_value(subject_bucket) AS subject_bucket, min("timestamp") AS batch_min
+  FROM read_parquet(%[1]s) GROUP BY subject, name
+),
+prev AS (
+  SELECT l.subject, l.name, l."timestamp" AS prev_ts, l.loc_ts AS prev_loc_ts, l.count AS prev_count, l.first_seen AS prev_first
+  FROM lake.signals_latest l
+  WHERE EXISTS (SELECT 1 FROM affected a WHERE a.subject = l.subject AND a.name = l.name)
+),
+recency AS (
+  SELECT s.subject, s.name, s."timestamp" AS ts, s.value_number, s.value_string
+  FROM lake.signals s
+  JOIN affected a ON s.subject = a.subject AND s.name = a.name AND s.subject_bucket = a.subject_bucket
+  LEFT JOIN prev p ON p.subject = s.subject AND p.name = s.name
+  WHERE s."timestamp" >= coalesce(p.prev_ts, make_timestamp(0))
+  QUALIFY row_number() OVER (PARTITION BY s.subject, s.name ORDER BY s."timestamp" DESC, s.cloud_event_id ASC) = 1
+),
+locrec AS (
+  SELECT s.subject, s.name, s."timestamp" AS loc_ts, s.loc_lat, s.loc_lon, s.loc_hdop, s.loc_heading
+  FROM lake.signals s
+  JOIN affected a ON s.subject = a.subject AND s.name = a.name AND s.subject_bucket = a.subject_bucket
+  LEFT JOIN prev p ON p.subject = s.subject AND p.name = s.name
+  WHERE (s.loc_lat != 0 OR s.loc_lon != 0) AND s."timestamp" >= coalesce(p.prev_loc_ts, make_timestamp(0))
+  QUALIFY row_number() OVER (PARTITION BY s.subject, s.name ORDER BY s."timestamp" DESC, s.cloud_event_id ASC) = 1
+)
+SELECT a.subject, a.subject_bucket, a.name,
+  r.ts AS "timestamp", r.value_number, r.value_string,
+  coalesce(lr.loc_lat, 0) AS loc_lat, coalesce(lr.loc_lon, 0) AS loc_lon,
+  coalesce(lr.loc_hdop, 0) AS loc_hdop, coalesce(lr.loc_heading, 0) AS loc_heading,
+  coalesce(lr.loc_ts, make_timestamp(0)) AS loc_ts,
+  coalesce(p.prev_count, 0) + coalesce(d.delta, 0) AS count,
+  LEAST(coalesce(p.prev_first, a.batch_min), a.batch_min) AS first_seen,
+  r.ts AS last_seen
+FROM affected a
+JOIN recency r ON r.subject = a.subject AND r.name = a.name
+LEFT JOIN locrec lr ON lr.subject = a.subject AND lr.name = a.name
+LEFT JOIN prev p ON p.subject = a.subject AND p.name = a.name
+LEFT JOIN _rollup_delta d ON d.subject = a.subject AND d.name = a.name`, sqlLit(sigParquet))
+	if _, err := tx.ExecContext(ctx, build); err != nil {
+		return fmt.Errorf("build incremental rollup rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM lake.signals_latest WHERE EXISTS (SELECT 1 FROM _rollup_new n WHERE n.subject = lake.signals_latest.subject AND n.name = lake.signals_latest.name)`); err != nil {
+		return fmt.Errorf("delete superseded rollup rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO lake.signals_latest (subject, subject_bucket, name, "timestamp", value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading, loc_ts, count, first_seen, last_seen)
+		 SELECT subject, subject_bucket, name, "timestamp", value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading, loc_ts, count, first_seen, last_seen FROM _rollup_new`); err != nil {
+		return fmt.Errorf("insert incremental rollup rows: %w", err)
+	}
+	return nil
 }
 
 // writeWindow writes an INTERMEDIATE pagination window (finding #1c): the decoded rows
@@ -1754,32 +1868,25 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 const signalsLatestColumns = ` (subject, subject_bucket, name, "timestamp", value_number, ` +
 	`value_string, loc_lat, loc_lon, loc_hdop, loc_heading, loc_ts, count, first_seen, last_seen) `
 
-// TODO(load-review #5b): rollupSelectSQL still recomputes each dirty subject's rollup
-// over its ENTIRE retained history every flush (the WHERE carries only subject_bucket +
-// subject IN, no timestamp floor), so the cost grows with LAKE_DECODED_RETENTION × active
-// fleet, independent of how few rows the batch added. A naive `timestamp >= floor` is NOT
-// safe: `count`, `first_seen` (and `last_seen`) are full-history aggregates — a floor
-// undercounts `count` and moves `first_seen` forward. Folding only the batch's new maxima
-// is also not exactly-correct for `count`: the write anti-join keys on cloud_event_id, so a
-// different-cloud_event_id duplicate of an existing (subject,name,timestamp) IS stored and
-// only the read-path QUALIFY dedup collapses it — an incremental `count += len(batch)` would
-// double-count exactly those, breaking the "each rollup row is exactly the deduped-base
-// aggregate" invariant the rollup tests assert (tests/ducklake_latest_rollup_test.go,
-// ducklake_dedup_test.go). Deferred rather than shipped unproven.
+// rollupSelectSQL is the FULL-history recompute of a set of rollup rows. Steady-state
+// maintenance no longer uses it — lake.signals_latest is folded INCREMENTALLY at commit
+// time (foldSignalsRollup, #5b), O(batch) not O(history). This recompute is retained for
+// the paths that genuinely need a from-scratch rebuild: the disaster-recovery / boot
+// rebuild (RecomputeRollup / LAKE_REBUILD_ROLLUP_ON_BOOT) and the deferred bulk-backfill
+// catch-up (FlushRollup over backfill-dirtied subjects). Kept byte-identical to the fold's
+// result — the differential test (tests/ducklake_incremental_rollup_test.go) asserts the
+// incremental path equals this recompute across redelivery, same-timestamp collision,
+// out-of-order arrival, multi-window spans, and crash-replay.
 //
-// Safe design for a follow-up: split the rollup's RECENCY columns from its CUMULATIVE
-// columns. (a) Maintain (timestamp, value_*, loc_*, loc_ts, last_seen) by folding the
-// batch's per-(subject,name) max against the existing rollup row — recency-only, so
-// arg_max over {existing latest row, batch rows} equals arg_max over full history because
-// the existing row already holds the prior max (no base scan, exact). (b) Keep (count,
-// first_seen) exact with a bounded scan, not a full one: store a per-(subject,name)
-// "counted-through" high-watermark = the max timestamp already folded into count; each
-// flush counts only DEDUPED base rows in (watermark, now] (a recent-partition scan bounded
-// like the write anti-join's dedupProbeFloor) and advances the watermark; first_seen
-// min-folds the batch min. Retention's existing orphan-prune already handles deletes. This
-// keeps count/first_seen exact while making the steady-state flush O(batch), not O(history).
-// It needs its own exactness tests (incremental == full-recompute under redelivery) before
-// it can replace the recompute below.
+// Why the fold is exact where a naive `timestamp >= floor` recompute would not be:
+// RECENCY (timestamp/value_*/loc_*/loc_ts) IS recomputed each batch, but bounded to
+// `timestamp >= the row's prior latest` — the new latest is either in the batch or the
+// prior row still qualifies, so the bound prunes old day-partitions without dropping the
+// answer (self-healing + exact). COUNT and FIRST_SEEN are the full-history aggregates a
+// floor would corrupt, so they are NOT floored: count carries forward as prev.count + a
+// NOT-EXISTS delta over DISTINCT (subject,name,timestamp) — collisions and redeliveries
+// contribute 0, and a replayed window contributes 0 (idempotent) — and first_seen min-folds
+// the batch min. Both self-heal via this recompute on boot if a rollup row is ever lost.
 func rollupSelectSQL(whereClause string) string {
 	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
 	return fmt.Sprintf(`SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
