@@ -116,3 +116,84 @@ func TestDuckLakePostgres_ConcurrentMaterializers(t *testing.T) {
 		GROUP BY cloud_event_id, name, timestamp HAVING count(*) > 1)`).Scan(&dupes))
 	assert.Zero(t, dupes, "no duplicate decoded rows")
 }
+
+// TestDuckLakePostgres_ConcurrentPaginatedFatSnapshot proves finding #1c under a real
+// catalog: a SINGLE oversized snapshot (many rows, span can't be count-split) is drained
+// by two independent materializers using tiny per-window bounds, so most rows flow
+// through intermediate (non-cursor-advancing) windows while both writers race the final
+// cursor CAS. Exactly-once must still hold — the intermediate-window idempotency + the
+// cursor-coupled final commit are the #1c invariant, exercised across connections that a
+// single-process file catalog cannot reproduce.
+func TestDuckLakePostgres_ConcurrentPaginatedFatSnapshot(t *testing.T) {
+	dsn := pgCatalogDSN(t)
+	ctx := context.Background()
+	dataPath := os.Getenv("PG_DATA_PATH")
+	if dataPath == "" {
+		dataPath = t.TempDir()
+	}
+	subject := fmt.Sprintf("did:erc721:137:%s:56", vehicleNFT.Hex())
+	base := time.Now().UTC().AddDate(0, 0, -2).Truncate(time.Hour)
+
+	seed := newPGLakeService(t, dsn, dataPath)
+	db := seed.DB()
+	for _, q := range []string{
+		"DROP TABLE IF EXISTS lake.signals", "DROP TABLE IF EXISTS lake.events",
+		"DROP TABLE IF EXISTS lake.signals_latest", "DROP TABLE IF EXISTS lake.events_latest",
+		"DROP TABLE IF EXISTS lake.ingest_progress", "DROP TABLE IF EXISTS lake.raw_events",
+		`CREATE TABLE lake.raw_events (subject VARCHAR, "time" TIMESTAMP WITH TIME ZONE, type VARCHAR,
+			id VARCHAR, source VARCHAR, producer VARCHAR, data_content_type VARCHAR, data_version VARCHAR,
+			extras VARCHAR, data VARCHAR, data_base64 BLOB, data_index_key VARCHAR, voids_id VARCHAR)`,
+	} {
+		_, err := db.ExecContext(ctx, q)
+		require.NoError(t, err, q)
+	}
+
+	// ONE snapshot, 50 rows: a single transaction commits them as one snapshot, so the
+	// span bound cannot split it — only intra-snapshot pagination can bound the pass.
+	const events = 50
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	for i := range events {
+		at := base.Add(time.Duration(i) * time.Second)
+		ev := deviceStatus(fmt.Sprintf("pgpag-%d", i), subject, at, speedAt(at, float64(i)))
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO lake.raw_events (subject, "time", type, id, source, producer, data_content_type, data_version, extras, data)
+			 VALUES (?, ?, ?, ?, ?, ?, '', ?, '{}', ?)`,
+			ev.Subject, ev.Time.UTC(), ev.Type, ev.ID, ev.Source, ev.Producer, ev.DataVersion, string(ev.Data))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	run := func() {
+		svc := newPGLakeService(t, dsn, dataPath)
+		mat, err := materializer.NewDuckLakeMaterializer(ctx, svc.DB(), zerolog.Nop())
+		require.NoError(t, err)
+		mat.WithMaxRowsPerWindow(7) // force multi-window pagination of the fat snapshot
+		runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
+			WithDuckLake(mat)
+		for {
+			n, err := runner.RunOnce(ctx)
+			require.NoError(t, err)
+			if n == 0 {
+				return
+			}
+		}
+	}
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() { defer wg.Done(); run() }()
+	}
+	wg.Wait()
+
+	var rows int
+	require.NoError(t, db.QueryRowContext(ctx,
+		"SELECT count(*) FROM lake.signals WHERE subject = ? AND name = 'speed'", subject).Scan(&rows))
+	assert.Equal(t, events, rows, "paginated fat snapshot decoded exactly once under concurrent materializers")
+
+	var dupes int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM (
+		SELECT cloud_event_id, name, timestamp FROM lake.signals
+		GROUP BY cloud_event_id, name, timestamp HAVING count(*) > 1)`).Scan(&dupes))
+	assert.Zero(t, dupes, "no duplicate decoded rows across paginated windows")
+}

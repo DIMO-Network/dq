@@ -104,6 +104,25 @@ type DuckLakeMaterializer struct {
 	// maxDirtySubjects is the overflow cap (defaultMaxDirtySubjects). Shared by both
 	// dirty sets.
 	maxDirtySubjects int
+
+	// windowByteBudget / maxRowsPerWindow bound the resident working set of a SINGLE
+	// snapshot's decode+write (finding #1c). maxSnapshotSpan count-bounds the
+	// MULTI-snapshot backlog, but a single fat snapshot (span can't drop below 1) with
+	// a large blob fan-out would still materialize whole and OOM the writer. Instead
+	// the (cursor, to] insert delta is read+decoded+written in row-key-ordered WINDOWS:
+	// intermediate windows are written idempotently WITHOUT advancing the cursor, and
+	// only the FINAL window's transaction advances it — so "cursor advanced ⟺ every
+	// window durable" still holds and a crash mid-span re-reads from the un-advanced
+	// cursor, the anti-join collapsing already-written windows. A window is flushed once
+	// its resident raw-payload bytes reach windowByteBudget OR its row count reaches
+	// maxRowsPerWindow. <= 0 disables that bound (the other still applies).
+	windowByteBudget int64
+	maxRowsPerWindow int
+	// windowCommitHook is a TEST-ONLY seam: called with the 0-based index after each
+	// INTERMEDIATE window commits (never for the final cursor-advancing commit). Returning
+	// an error aborts the pass after that window is durable but before the cursor advances,
+	// deterministically reproducing a crash mid-span. nil in production.
+	windowCommitHook func(windowIndex int) error
 }
 
 // WithBackfillMode toggles backfill tuning (skip the cross-batch dedup anti-join;
@@ -169,6 +188,8 @@ func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger
 		dirtySubjects:      map[string]struct{}{},
 		dirtyEventSubjects: map[string]struct{}{},
 		maxDirtySubjects:   defaultMaxDirtySubjects,
+		windowByteBudget:   defaultWindowByteBudget,
+		maxRowsPerWindow:   defaultWindowMaxRows,
 	}
 	if err := m.ensureSchema(ctx); err != nil {
 		return nil, err
@@ -180,6 +201,41 @@ func NewDuckLakeMaterializer(ctx context.Context, db *sql.DB, log zerolog.Logger
 // doc). A non-positive n restores unbounded behavior. Returns m for chaining.
 func (m *DuckLakeMaterializer) WithMaxSnapshotSpan(n int64) *DuckLakeMaterializer {
 	m.maxSnapshotSpan = n
+	return m
+}
+
+// defaultWindowByteBudget / defaultWindowMaxRows bound one intra-snapshot window's
+// resident working set (finding #1c). 64 MiB of raw payloads keeps a window well inside
+// the pod's non-DuckDB headroom even under a large blob fan-out; the row cap bounds the
+// count when payloads are tiny (so the decoded-row and temp-parquet working set stays
+// bounded too). windowReadChunk is how many change-feed rows are read per query while
+// filling a window.
+const (
+	defaultWindowByteBudget = 64 << 20 // 64 MiB
+	defaultWindowMaxRows    = 100_000
+	windowReadChunk         = 512
+)
+
+// WithWindowByteBudget overrides the per-window resident-byte bound (finding #1c).
+// A non-positive n disables the byte bound (the row cap still applies). Returns m.
+func (m *DuckLakeMaterializer) WithWindowByteBudget(n int64) *DuckLakeMaterializer {
+	m.windowByteBudget = n
+	return m
+}
+
+// WithMaxRowsPerWindow overrides the per-window row cap (finding #1c). A non-positive n
+// disables the row bound (the byte budget still applies). Tests use a tiny value to force
+// multi-window pagination of a small snapshot. Returns m.
+func (m *DuckLakeMaterializer) WithMaxRowsPerWindow(n int) *DuckLakeMaterializer {
+	m.maxRowsPerWindow = n
+	return m
+}
+
+// WithWindowCommitHook installs the TEST-ONLY crash seam (see the field doc): the hook
+// runs after each intermediate window commits, and a returned error aborts the pass
+// before the cursor advances. Returns m.
+func (m *DuckLakeMaterializer) WithWindowCommitHook(fn func(windowIndex int) error) *DuckLakeMaterializer {
+	m.windowCommitHook = fn
 	return m
 }
 
@@ -512,40 +568,39 @@ func (m *DuckLakeMaterializer) processChunk(ctx context.Context, cur, head int64
 		to = cur + m.maxSnapshotSpan
 	}
 
-	events, err := m.readDelta(ctx, cur, to)
+	// Decode+write the (cur, to] insert delta in byte/row-bounded windows so a single
+	// fat snapshot can't materialize whole and OOM the writer (#1c). Only the final
+	// window advances the cursor, so a crash mid-span re-reads from cur and the
+	// anti-join collapses already-written windows — exactly-once preserved.
+	res, err := m.decodeAndWriteSpan(ctx, cur, to, dec)
 	if err != nil {
-		// Any feed-read failure might mean din's maintenance expired the cursor
-		// range. Decide on retention (the oldest retained snapshot), not on the
-		// error text — so a real expiry with unmatched wording can't wedge us
-		// forever, and a transient error that merely looks like expiry can't make
-		// us skip retained data.
+		if errors.Is(err, errSnapshotMoved) {
+			return 0, cur, true, nil // another decoder won this range; retry next pass
+		}
+		// A feed-read failure might mean din's maintenance expired the cursor range.
+		// Decide on retention (the oldest retained snapshot), not on the error text —
+		// so a real expiry with unmatched wording can't wedge us forever, and a
+		// transient error that merely looks like expiry can't make us skip retained data.
 		if n, handled, rerr := m.maybeRecoverExpired(ctx, cur, err); handled {
 			return n, cur, true, rerr
 		}
 		return 0, cur, true, err
 	}
 
-	if len(events) > 0 {
-		observeLakeLag(events) // decode lag = age of the oldest pending event
-		decoded := dec.decodeEvents(ctx, events)
-		if cerr := m.commit(ctx, decoded, cur, to); cerr != nil {
-			if errors.Is(cerr, errSnapshotMoved) {
-				return 0, cur, true, nil // another decoder won this range; retry next pass
-			}
-			return 0, cur, true, cerr
-		}
-		// A batch committed: feed the freshness/throughput alerts (CHD-12).
+	if res.rawRows > 0 {
+		observeLakeLagAt(res.oldest) // decode lag = age of the oldest pending event
+		// A span committed: feed the freshness/throughput alerts (CHD-12).
 		batchesTotal.WithLabelValues(lakeMetricType).Inc()
-		rowsTotal.WithLabelValues("signals").Add(float64(decoded.signalCount))
-		rowsTotal.WithLabelValues("events").Add(float64(decoded.eventCount))
-		errorsTotal.Add(float64(decoded.errorCount))
+		rowsTotal.WithLabelValues("signals").Add(float64(res.signalRows))
+		rowsTotal.WithLabelValues("events").Add(float64(res.eventRows))
+		errorsTotal.Add(float64(res.errRows))
 		cursorSnapshotID.Set(float64(to))
-		// Report progress to din's snapshot-expiry floor. Throttled: the batch is
+		// Report progress to din's snapshot-expiry floor. Throttled: the span is
 		// already durable, and din only needs the floor within its retention window
 		// — a lagging report just holds expiry back slightly (conservative, never
 		// unsafe), so it needn't be a catalog txn on every batch.
 		m.maybeReportProgress(ctx, to)
-		return len(events), to, true, nil
+		return res.rawRows, to, true, nil
 	}
 
 	// Empty span. If it reached head, the decoder is caught up: head advanced only
@@ -783,12 +838,207 @@ func (m *DuckLakeMaterializer) headSnapshot(ctx context.Context) (int64, error) 
 }
 
 // readDelta reconstructs the raw events inserted in (from, to].
-func (m *DuckLakeMaterializer) readDelta(ctx context.Context, from, to int64) ([]cloudevent.RawEvent, error) {
+// rawRowKey is the unique, totally-ordered key used to paginate the (cur, to] insert
+// change feed: (subject, time, id). id (the cloud_event_id) is globally unique, so the
+// triple is a strict total order — a `> after` cursor + ORDER BY partitions the feed
+// into windows with no row skipped or repeated.
+type rawRowKey struct {
+	subject string
+	ts      time.Time
+	id      string
+}
+
+// spanCounts accumulates what a span (or window) processed, for metrics and the
+// caught-up/empty-span decision. rawRows counts raw_events rows READ (before any poison
+// drop) so the cursor and lag stay correct even when a payload is dropped.
+type spanCounts struct {
+	rawRows    int
+	signalRows int
+	eventRows  int
+	errRows    int
+	oldest     time.Time // oldest raw event Time seen (for decode-lag)
+}
+
+// readDeltaWindow reads up to `limit` raw_events INSERT rows from the (from, to] change
+// feed, ordered by the unique row key and strictly after `after` when hasAfter, then
+// resolves their blob payloads. It returns the resolved rows (poison rows dropped), the
+// key of the LAST row read (captured from the raw scan, before any drop, so pagination
+// never skips a row whose payload was dropped), and got = the number of rows actually
+// read (0 ⇒ the feed is exhausted past `after`).
+func (m *DuckLakeMaterializer) readDeltaWindow(ctx context.Context, from, to int64, after rawRowKey, hasAfter bool, limit int) (events []cloudevent.RawEvent, last rawRowKey, got int, err error) {
+	where := ""
+	var args []any
+	if hasAfter {
+		where = ` AND (subject, "time", id) > (?, ?, ?)`
+		args = []any{after.subject, after.ts.UTC(), after.id}
+	}
 	q := fmt.Sprintf(
-		"SELECT %s FROM ducklake_table_changes('lake', 'main', 'raw_events', %d, %d) WHERE change_type = 'insert'",
-		duck.RawEventColumns, from+1, to)
-	// Don't classify a query error here — RunOnce decides expired-vs-transient on retention.
-	return m.scanAndResolveRaw(ctx, q, "reading raw_events delta")
+		`SELECT %s FROM ducklake_table_changes('lake', 'main', 'raw_events', %d, %d) `+
+			`WHERE change_type = 'insert'%s ORDER BY subject, "time", id LIMIT %d`,
+		duck.RawEventColumns, from+1, to, where, limit)
+	rows, qerr := m.db.QueryContext(ctx, q, args...)
+	if qerr != nil {
+		// Don't classify here — processChunk decides expired-vs-transient on retention.
+		return nil, rawRowKey{}, 0, fmt.Errorf("reading raw_events delta window: %w", qerr)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []cloudevent.RawEvent
+	var blobKeys []string
+	for rows.Next() {
+		ev, blobKey, serr := scanRawEvent(rows)
+		if serr != nil {
+			return nil, rawRowKey{}, 0, serr
+		}
+		out = append(out, ev)
+		blobKeys = append(blobKeys, blobKey)
+		last = rawRowKey{subject: ev.Subject, ts: ev.Time, id: ev.ID}
+		got++
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return nil, rawRowKey{}, 0, rerr
+	}
+	resolved, berr := m.resolveBlobs(ctx, out, blobKeys)
+	if berr != nil {
+		return nil, rawRowKey{}, 0, berr
+	}
+	return resolved, last, got, nil
+}
+
+// rawResidentBytes estimates the resident payload bytes of a batch of raw events (the
+// working set the window byte-budget bounds — blob fan-out is the OOM risk in #1c).
+func rawResidentBytes(events []cloudevent.RawEvent) int64 {
+	var n int64
+	for i := range events {
+		n += int64(len(events[i].Data)) + int64(len(events[i].DataBase64))
+	}
+	return n
+}
+
+// appendDecoded folds src into dst (rows and counts).
+func appendDecoded(dst, src *decodedBatch) {
+	dst.signals = append(dst.signals, src.signals...)
+	dst.events = append(dst.events, src.events...)
+	dst.signalCount += src.signalCount
+	dst.eventCount += src.eventCount
+	dst.errorCount += src.errorCount
+}
+
+// earlier returns the earlier of two times, ignoring the zero value.
+func earlier(a, b time.Time) time.Time {
+	switch {
+	case a.IsZero():
+		return b
+	case b.IsZero():
+		return a
+	case b.Before(a):
+		return b
+	default:
+		return a
+	}
+}
+
+// nextWindow accumulates one byte/row-bounded window of the (from, to] delta, advancing
+// *after past the rows it consumed. It reads the feed in windowReadChunk-sized pages and
+// decodes each page, stopping once the window's resident bytes reach windowByteBudget or
+// its row count reaches maxRowsPerWindow (or the feed is exhausted). c.rawRows == 0 means
+// no rows remain past *after.
+func (m *DuckLakeMaterializer) nextWindow(ctx context.Context, from, to int64, after *rawRowKey, hasAfter *bool, dec eventDecoder) (*decodedBatch, spanCounts, error) {
+	win := &decodedBatch{}
+	var c spanCounts
+	var winBytes int64
+	for {
+		readLimit := windowReadChunk
+		if m.maxRowsPerWindow > 0 {
+			rem := m.maxRowsPerWindow - c.rawRows
+			if rem <= 0 {
+				break // row cap reached: window is full
+			}
+			if rem < readLimit {
+				readLimit = rem
+			}
+		}
+		resolved, last, got, err := m.readDeltaWindow(ctx, from, to, *after, *hasAfter, readLimit)
+		if err != nil {
+			return nil, c, err
+		}
+		if got == 0 {
+			break // feed exhausted past `after`
+		}
+		*after = last
+		*hasAfter = true
+		c.rawRows += got
+		winBytes += rawResidentBytes(resolved)
+		for i := range resolved {
+			c.oldest = earlier(c.oldest, resolved[i].Time)
+		}
+		d := dec.decodeEvents(ctx, resolved)
+		appendDecoded(win, d)
+		c.signalRows += d.signalCount
+		c.eventRows += d.eventCount
+		c.errRows += d.errorCount
+		if got < readLimit {
+			break // fewer rows than asked ⇒ feed exhausted (tail window)
+		}
+		if m.windowByteBudget > 0 && winBytes >= m.windowByteBudget {
+			break // byte budget reached: window is full
+		}
+	}
+	return win, c, nil
+}
+
+// decodeAndWriteSpan decodes and writes the (from, to] insert delta in byte/row-bounded
+// windows (finding #1c). Every window but the last is written idempotently WITHOUT
+// advancing the cursor; the final window's commit advances the cursor from→to coupled to
+// its insert, exactly as the pre-#1c monolithic commit did. So the invariant holds:
+// cursor advanced ⟺ every window durable. A crash mid-span leaves the cursor at `from`;
+// restart re-reads the whole span and the cloud_event_id anti-join collapses the windows
+// that already landed. Returns 0 rawRows (and does NOT touch the cursor) for an empty
+// span, leaving the caller to run the empty-span/caught-up handling.
+func (m *DuckLakeMaterializer) decodeAndWriteSpan(ctx context.Context, from, to int64, dec eventDecoder) (spanCounts, error) {
+	var total spanCounts
+	var after rawRowKey
+	hasAfter := false
+	var pending *decodedBatch
+	havePending := false
+	windowIdx := 0
+	for {
+		win, c, err := m.nextWindow(ctx, from, to, &after, &hasAfter, dec)
+		if err != nil {
+			return total, err
+		}
+		if c.rawRows == 0 {
+			break // no more rows: `pending`, if any, is the final window
+		}
+		total.rawRows += c.rawRows
+		total.signalRows += c.signalRows
+		total.eventRows += c.eventRows
+		total.errRows += c.errRows
+		total.oldest = earlier(total.oldest, c.oldest)
+		if havePending {
+			// The previous window is now known NOT to be the last, so write it as an
+			// intermediate window (idempotent, no cursor advance).
+			if err := m.writeWindow(ctx, pending); err != nil {
+				return total, err
+			}
+			if m.windowCommitHook != nil {
+				if err := m.windowCommitHook(windowIdx); err != nil {
+					return total, err
+				}
+			}
+			windowIdx++
+		}
+		pending = win
+		havePending = true
+	}
+	if !havePending {
+		return total, nil // empty span
+	}
+	// The final window advances the cursor, coupled to its insert.
+	if err := m.commit(ctx, pending, from, to); err != nil {
+		return total, err
+	}
+	return total, nil
 }
 
 // scanAndResolveRaw runs a raw_events SELECT (projected with duck.RawEventColumns so
@@ -1131,27 +1381,10 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if len(dec.signals) > 0 {
-		tmp, err := writeTempParquet(m.tempDir, writeSignalParquet, dec.signals)
-		if err != nil {
-			return err
-		}
-		cleanup = append(cleanup, tmp)
-		tsMin, tsMax := timeRange(dec.signals, func(r SignalRow) time.Time { return r.Timestamp })
-		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp, tsMin, tsMax, m.backfillMode)); err != nil {
-			return fmt.Errorf("insert signals: %w", err)
-		}
-	}
-	if len(dec.events) > 0 {
-		tmp, err := writeTempParquet(m.tempDir, writeEventParquet, dec.events)
-		if err != nil {
-			return err
-		}
-		cleanup = append(cleanup, tmp)
-		tsMin, tsMax := timeRange(dec.events, func(r EventRow) time.Time { return r.Timestamp })
-		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp, tsMin, tsMax, m.backfillMode)); err != nil {
-			return fmt.Errorf("insert events: %w", err)
-		}
+	files, err := m.insertDecodedSteady(ctx, tx, dec)
+	cleanup = append(cleanup, files...)
+	if err != nil {
+		return err
 	}
 
 	// NOTE: the lake.signals_latest rollup is no longer maintained here. It is a
@@ -1192,26 +1425,59 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		m.log.Warn().Err(err).Int64("to", to).
 			Msg("commit returned an error but the cursor advanced to the target; treating as committed (lost ack)")
 	}
-	// The base rows are durable. Mark the subjects this batch wrote so the
-	// decoupled FlushRollup recomputes only their rollup rows (B2). Done after
+	// The base rows are durable. Mark the subjects this batch wrote so the decoupled
+	// FlushRollup/FlushEventRollup recompute only their rollup rows (B2/#5a). Done after
 	// commit so a rolled-back batch never dirties the rollup.
+	m.markDirtyFromBatch(dec)
+	return nil
+}
+
+// insertDecodedSteady stages dec's signals+events as temp parquet and issues the
+// idempotent (cloud_event_id anti-join) INSERTs into lake.signals/events within tx,
+// clamping the dedup probe to dedupProbeFloor (the steady-state live-decode window —
+// redeliveries are recent). Returns the temp-file paths the caller must remove after
+// the transaction completes. Shared by commit (the cursor-advancing final window) and
+// writeWindow (a non-cursor-advancing intermediate window); backfillWrite keeps its own
+// unclamped probe for arbitrarily-old data.
+func (m *DuckLakeMaterializer) insertDecodedSteady(ctx context.Context, tx *sql.Tx, dec *decodedBatch) ([]string, error) {
+	var cleanup []string
+	if len(dec.signals) > 0 {
+		tmp, err := writeTempParquet(m.tempDir, writeSignalParquet, dec.signals)
+		if err != nil {
+			return cleanup, err
+		}
+		cleanup = append(cleanup, tmp)
+		tsMin, tsMax := timeRange(dec.signals, func(r SignalRow) time.Time { return r.Timestamp })
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp, tsMin, tsMax, m.backfillMode)); err != nil {
+			return cleanup, fmt.Errorf("insert signals: %w", err)
+		}
+	}
+	if len(dec.events) > 0 {
+		tmp, err := writeTempParquet(m.tempDir, writeEventParquet, dec.events)
+		if err != nil {
+			return cleanup, err
+		}
+		cleanup = append(cleanup, tmp)
+		tsMin, tsMax := timeRange(dec.events, func(r EventRow) time.Time { return r.Timestamp })
+		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.events", tmp, tsMin, tsMax, m.backfillMode)); err != nil {
+			return cleanup, fmt.Errorf("insert events: %w", err)
+		}
+	}
+	return cleanup, nil
+}
+
+// markDirtyFromBatch records the subjects dec wrote so the decoupled rollups refresh
+// only their rows, escalating to a full rebuild if either dirty set overflows its cap
+// (a fleet-wide catch-up would otherwise grow the maps unbounded — see the field docs).
+// Single-writer: mutated only on the decode-loop goroutine.
+func (m *DuckLakeMaterializer) markDirtyFromBatch(dec *decodedBatch) {
 	for i := range dec.signals {
 		m.dirtySubjects[dec.signals[i].Subject] = struct{}{}
 	}
-	// Bound the dirty set: a fleet-wide catch-up (initial backfill defers the
-	// flush until fully drained) would otherwise grow this map with every
-	// subject in the fleet — ~1GB+ at 10M vehicles, inside the pod's ~2GB
-	// non-DuckDB headroom. Past the cap, per-subject tracking is no cheaper
-	// than a full rebuild anyway, so escalate: clear the map and let the next
-	// flush run the bucket-chunked, memory-bounded RecomputeRollup.
 	if len(m.dirtySubjects) > m.maxDirtySubjects {
 		m.dirtySubjects = map[string]struct{}{}
 		m.rollupFullRebuild = true
 	}
-	// Same dirty-tracking for the events_latest rollup (finding #5a): a batch can
-	// write events for subjects with no signals (and vice versa), so track them
-	// independently. Post-commit like the signals set, so a rolled-back batch never
-	// dirties the rollup.
 	for i := range dec.events {
 		m.dirtyEventSubjects[dec.events[i].Subject] = struct{}{}
 	}
@@ -1219,6 +1485,48 @@ func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, fr
 		m.dirtyEventSubjects = map[string]struct{}{}
 		m.eventRollupFullRebuild = true
 	}
+}
+
+// writeWindow writes an INTERMEDIATE pagination window (finding #1c): the decoded rows
+// go into lake.signals/events in their own transaction that does NOT advance the ingest
+// cursor. It is idempotent (the cloud_event_id anti-join) and cursor-independent, so —
+// unlike the final commit — ANY commit error, lost ack included, is safe to treat as a
+// failure: the pass aborts, and restart re-reads from the un-advanced cursor while the
+// anti-join collapses whatever landed. A window with no decoded rows (e.g. all payloads
+// were poison-dropped) is a no-op.
+func (m *DuckLakeMaterializer) writeWindow(ctx context.Context, dec *decodedBatch) error {
+	if len(dec.signals) == 0 && len(dec.events) == 0 {
+		return nil
+	}
+	var cleanup []string
+	defer func() {
+		for _, f := range cleanup {
+			_ = os.Remove(f)
+		}
+	}()
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring conn: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin window: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	files, err := m.insertDecodedSteady(ctx, tx, dec)
+	cleanup = append(cleanup, files...)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		if isCommitConflict(err) {
+			return errSnapshotMoved
+		}
+		return fmt.Errorf("commit window: %w", err)
+	}
+	m.markDirtyFromBatch(dec)
 	return nil
 }
 
