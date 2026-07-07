@@ -246,19 +246,33 @@ func (q *Queries) getSignalSummariesLake(ctx context.Context, subject string, fi
 	return summaries, rows.Err()
 }
 
+// locationGapFillLookback bounds how far before a requested timestamp LocationAt /
+// LocationsAt will reach for the nearest non-origin fix; a fix older than this is
+// treated as "no fix" and the caller substitutes the (0,0) no-data sentinel. Without
+// a floor a GPS-sparse or fix-less vehicle forces a full reverse scan of its entire
+// retained subject_bucket partition on every point lookup (finding #8). 90d is
+// generous enough that a real trip's prior fix is virtually always inside it, while
+// capping the deep scan and letting day-partition pruning drop older files. LocationAt
+// and LocationsAt MUST share this floor so the batched path stays exactly equivalent
+// to the per-point path.
+const locationGapFillLookback = 90 * 24 * time.Hour
+
 // LocationAt returns the nearest non-origin currentLocationCoordinates fix at or
-// before ts — a point lookup that reaches back before any window, deterministic on
-// ties (lowest cloud_event_id, matching the read-path dedup). nil means the vehicle
-// has no known fix at/before ts. The segment enrichment uses it to gap-fill a trip's
-// start/end location when no GPS fix landed inside the (often short) trip window — a
-// correctness win a window-bounded argMin/argMax structurally cannot do.
+// before ts — a point lookup that reaches back up to locationGapFillLookback before
+// ts, deterministic on ties (lowest cloud_event_id, matching the read-path dedup).
+// nil means the vehicle has no known fix in [ts-lookback, ts]. The segment enrichment
+// uses it to gap-fill a trip's start/end location when no GPS fix landed inside the
+// (often short) trip window — a correctness win a window-bounded argMin/argMax
+// structurally cannot do. LocationsAt is the batched, index-aligned equivalent.
 func (q *Queries) LocationAt(ctx context.Context, subject string, ts time.Time) (*model.Location, error) {
+	floorMicro := ts.UTC().Add(-locationGapFillLookback).UnixMicro()
 	query := fmt.Sprintf(`
 SELECT loc_lat, loc_lon, loc_hdop FROM lake.signals
 WHERE subject = ? AND %[2]s AND name = ? AND %[1]s
   AND timestamp <= make_timestamp(%[3]d)
+  AND timestamp >= make_timestamp(%[4]d)
 ORDER BY timestamp DESC, cloud_event_id ASC LIMIT 1`,
-		lakeNonZeroLoc, subjectBucketPredicate("", subject), ts.UTC().UnixMicro())
+		lakeNonZeroLoc, subjectBucketPredicate("", subject), ts.UTC().UnixMicro(), floorMicro)
 
 	var loc model.Location
 	err := q.svc.db.QueryRowContext(ctx, query, subject, vss.FieldCurrentLocationCoordinates).
@@ -270,4 +284,89 @@ ORDER BY timestamp DESC, cloud_event_id ASC LIMIT 1`,
 		return nil, fmt.Errorf("lake location at %s: %w", ts, err)
 	}
 	return &loc, nil
+}
+
+// LocationsAt resolves, for each timestamp in tss, the nearest non-origin
+// currentLocationCoordinates fix at or before it — the batched form of LocationAt.
+// The result is index-aligned with tss (out[i] is the fix for tss[i], nil when the
+// vehicle has no fix in [tss[i]-lookback, tss[i]]). It replaces the per-boundary
+// LocationAt fan-out in segment / daily-activity enrichment: one ASOF join instead of
+// O(segments) reverse-scan point queries (finding #8).
+//
+// Exactly equivalent to calling LocationAt for each timestamp. The right side filters
+// to non-origin fixes for the location name FIRST, then collapses duplicate
+// (subject,name,timestamp) rows to the lowest cloud_event_id (read dedup key #1) —
+// exactly LocationAt's ORDER BY timestamp DESC, cloud_event_id ASC LIMIT 1 tie-break.
+// The (0,0) exclusion MUST precede the dedup (like LocationAt's WHERE): a two-source
+// collision where the (0,0) row sorts lower on cloud_event_id would otherwise win
+// dedup and then be filtered out, dropping the real fix. ASOF LEFT JOIN then picks,
+// per probe row, the single right row with the greatest timestamp <= the probe (the
+// nearest prior fix), leaving NULL when none — so the tie-free dedup makes the ASOF
+// pick deterministic and identical to the point lookup. The lookback floor is the
+// minimum requested timestamp minus locationGapFillLookback, so the shared scan prunes
+// old day-partitions; a per-probe floor is re-applied below to match LocationAt exactly.
+func (q *Queries) LocationsAt(ctx context.Context, subject string, tss []time.Time) ([]*model.Location, error) {
+	out := make([]*model.Location, len(tss))
+	if len(tss) == 0 {
+		return out, nil
+	}
+	minTS := tss[0].UTC()
+	probes := make([]string, len(tss))
+	for i, t := range tss {
+		tu := t.UTC()
+		if tu.Before(minTS) {
+			minTS = tu
+		}
+		probes[i] = fmt.Sprintf("(%d, %d)", i, tu.UnixMicro())
+	}
+	lookbackMicro := locationGapFillLookback.Microseconds()
+	floorMicro := minTS.Add(-locationGapFillLookback).UnixMicro()
+
+	// The right subquery mirrors LocationAt's WHERE (non-origin fixes for the location
+	// name in the subject's bucket, globally floored so the shared scan prunes old
+	// day-partitions) then dedups per timestamp to the lowest cloud_event_id. ASOF
+	// matches the greatest right timestamp <= the probe. The outer WHERE re-applies the
+	// PER-PROBE floor (probe - lookback): a probe later than minTS could otherwise ASOF
+	// onto a fix older than its own lookback that survived the looser global floor, so
+	// this keeps LocationsAt exactly equal to LocationAt. Unmatched probes (NULL right)
+	// survive the WHERE and stay nil in the output.
+	query := fmt.Sprintf(`
+SELECT q.idx, s.loc_lat, s.loc_lon, s.loc_hdop
+FROM (VALUES %[1]s) AS q(idx, ts_us)
+ASOF LEFT JOIN (
+	SELECT timestamp, loc_lat, loc_lon, loc_hdop FROM lake.signals
+	WHERE %[2]s AND subject = ? AND name = ? AND %[3]s
+	  AND timestamp >= make_timestamp(%[4]d)
+	%[5]s
+) AS s
+ON make_timestamp(q.ts_us) >= s.timestamp
+WHERE s.timestamp IS NULL OR s.timestamp >= make_timestamp(q.ts_us - %[6]d)
+ORDER BY q.idx`,
+		strings.Join(probes, ", "),
+		subjectBucketPredicate("", subject),
+		lakeNonZeroLoc,
+		floorMicro,
+		signalDedupQualify,
+		lookbackMicro)
+
+	rows, err := q.svc.db.QueryContext(ctx, query, subject, vss.FieldCurrentLocationCoordinates)
+	if err != nil {
+		return nil, fmt.Errorf("lake locations at (%d probes): %w", len(tss), err)
+	}
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var idx int
+		var lat, lon, hdop sql.NullFloat64
+		if err := rows.Scan(&idx, &lat, &lon, &hdop); err != nil {
+			return nil, fmt.Errorf("scanning locations-at row: %w", err)
+		}
+		if idx < 0 || idx >= len(out) || !lat.Valid {
+			continue // unmatched probe (ASOF NULL) → leave nil (no fix within lookback)
+		}
+		out[idx] = &model.Location{Latitude: lat.Float64, Longitude: lon.Float64, Hdop: hdop.Float64}
+	}
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("locations-at row error: %w", rows.Err())
+	}
+	return out, nil
 }

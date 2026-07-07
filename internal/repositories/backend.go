@@ -15,6 +15,15 @@ type LocationAtSource interface {
 	LocationAt(ctx context.Context, subject string, ts time.Time) (*model.Location, error)
 }
 
+// BatchLocationAtSource is the batched form of LocationAtSource: resolve the nearest
+// non-origin fix at or before EACH of many timestamps in one query (index-aligned with
+// the input). The lake backend implements it (duck.Queries.LocationsAt) so segment /
+// daily-activity gap-fill issues O(1) location queries instead of one per boundary
+// (finding #8).
+type BatchLocationAtSource interface {
+	LocationsAt(ctx context.Context, subject string, tss []time.Time) ([]*model.Location, error)
+}
+
 // Compile-time interface assertions for the DuckLake backend (the only backend).
 var (
 	_ Backend         = (*duck.Queries)(nil)
@@ -41,6 +50,16 @@ func ComposeBackend(backend Backend, segments SegmentsBackend) QueryService {
 func (b composedBackend) LocationAt(ctx context.Context, subject string, ts time.Time) (*model.Location, error) {
 	if las, ok := b.Backend.(LocationAtSource); ok {
 		return las.LocationAt(ctx, subject, ts)
+	}
+	return nil, nil
+}
+
+// LocationsAt promotes the underlying Backend's batched nearest-fix lookup so the
+// composed service satisfies BatchLocationAtSource; returns nil when the Backend
+// lacks it (the caller then substitutes the (0,0) no-data sentinel).
+func (b composedBackend) LocationsAt(ctx context.Context, subject string, tss []time.Time) ([]*model.Location, error) {
+	if las, ok := b.Backend.(BatchLocationAtSource); ok {
+		return las.LocationsAt(ctx, subject, tss)
 	}
 	return nil, nil
 }

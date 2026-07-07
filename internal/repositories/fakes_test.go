@@ -2,6 +2,7 @@ package repositories
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
@@ -68,4 +69,60 @@ type fakePrimary struct {
 
 func (f *fakePrimary) GetSegments(context.Context, string, time.Time, time.Time, model.DetectionMechanism, *model.SegmentConfig) ([]*model.Segment, error) {
 	return f.segments, nil
+}
+
+// locationCountingFake is a QueryService that counts location gap-fill queries: the
+// batched LocationsAt path (finding #8) vs. the legacy per-point LocationAt path. The
+// batched call resolves each probe via locFn so a test can assert the scattered
+// results as well as the O(1) query count. Unimplemented methods panic through the
+// embedded nil QueryService, so an unexpected call fails loudly.
+type locationCountingFake struct {
+	QueryService
+	segments      []*model.Segment
+	batchCalls    int32
+	pointCalls    int32
+	lastBatchSize int32
+	locFn         func(ts time.Time) *model.Location
+}
+
+func (f *locationCountingFake) GetSegments(context.Context, string, time.Time, time.Time, model.DetectionMechanism, *model.SegmentConfig) ([]*model.Segment, error) {
+	return f.segments, nil
+}
+
+func (f *locationCountingFake) GetAggregatedSignalsForRanges(context.Context, string, []qtypes.TimeRange, time.Time, time.Time, []model.FloatSignalArgs, []model.LocationSignalArgs) ([]*qtypes.AggSignalForRange, error) {
+	return nil, nil // no aggregate locations → every boundary needs gap-fill
+}
+
+func (f *locationCountingFake) GetEventCountsForRanges(context.Context, string, []qtypes.TimeRange, []string) ([]*qtypes.EventCountForRange, error) {
+	return nil, nil
+}
+
+func (f *locationCountingFake) GetAggregatedSignals(context.Context, string, *model.AggregatedSignalArgs) ([]*qtypes.AggSignal, error) {
+	return nil, nil
+}
+
+func (f *locationCountingFake) GetEventCounts(context.Context, string, time.Time, time.Time, []string) ([]*qtypes.EventCount, error) {
+	return nil, nil
+}
+
+// LocationAt is the legacy per-point path; a batched implementation must never call it.
+func (f *locationCountingFake) LocationAt(_ context.Context, _ string, ts time.Time) (*model.Location, error) {
+	atomic.AddInt32(&f.pointCalls, 1)
+	if f.locFn != nil {
+		return f.locFn(ts), nil
+	}
+	return nil, nil
+}
+
+// LocationsAt is the batched path: one call resolves every probe.
+func (f *locationCountingFake) LocationsAt(_ context.Context, _ string, tss []time.Time) ([]*model.Location, error) {
+	atomic.AddInt32(&f.batchCalls, 1)
+	atomic.StoreInt32(&f.lastBatchSize, int32(len(tss)))
+	out := make([]*model.Location, len(tss))
+	for i, ts := range tss {
+		if f.locFn != nil {
+			out[i] = f.locFn(ts)
+		}
+	}
+	return out, nil
 }

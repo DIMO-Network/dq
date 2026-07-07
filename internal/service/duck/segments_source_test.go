@@ -441,3 +441,67 @@ func TestLakeQueries_LocationAt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
+
+// TestLakeQueries_LocationsAt_MatchesLocationAt proves the batched as-of lookup
+// (finding #8) returns, for every probe timestamp, EXACTLY what the per-point
+// LocationAt returns — including the (0,0) skip, the cloud_event_id tie-break, and
+// the lookback floor — so batching the segment gap-fills is behavior-preserving.
+func TestLakeQueries_LocationsAt_MatchesLocationAt(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeServiceForTest(t)
+	q := NewLakeQueries(svc)
+	subject := testSubject1
+	const loc = "currentLocationCoordinates"
+	base := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
+	at := func(m int) time.Time { return base.Add(time.Duration(m) * time.Minute) }
+
+	insertLoc := func(ceID string, ts time.Time, lat, lon, hdop float64) {
+		_, err := svc.db.ExecContext(ctx,
+			`INSERT INTO lake.signals (subject, subject_bucket, name, timestamp, source, producer, cloud_event_id, value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading)
+			 VALUES (?, ?, ?, ?, 'src', 'prod', ?, 0.0, '', ?, ?, ?, 0.0)`,
+			subject, HashBucket(subject), loc, ts.UTC(), ceID, lat, lon, hdop)
+		require.NoError(t, err)
+	}
+	insertLoc("l1", at(0), 40.0, -75.0, 1.1)
+	insertLoc("l2", at(10), 41.0, -76.0, 1.2)
+	insertLoc("origin", at(20), 0.0, 0.0, 0.0) // (0,0) must be skipped by both paths
+	// Duplicate reading at the same timestamp under two cloud_event_ids: the lowest
+	// (aaa) must win the tie-break in both paths.
+	insertLoc("zzz", at(30), 99.0, 99.0, 9.9)
+	insertLoc("aaa", at(30), 42.0, -77.0, 1.3)
+	// A fix 180d before base — older than the 90d floor of the far probe below, so both
+	// paths must return nil for that probe (lookback-floor parity).
+	staleProbe := base.Add(-80 * 24 * time.Hour)
+	insertLoc("stale", base.Add(-180*24*time.Hour), 10.0, 10.0, 5.0)
+
+	probes := []time.Time{
+		at(-10),    // before any fix → nil
+		at(5),      // → l1
+		at(15),     // → l2 (between l2 and origin)
+		at(25),     // → l2 (origin (0,0) skipped)
+		at(35),     // → aaa (tie-break at ts=30)
+		at(10),     // exactly on l2 (>= boundary)
+		staleProbe, // only the 180d-old stale fix is prior → beyond 90d floor → nil
+	}
+
+	batched, err := q.LocationsAt(ctx, subject, probes)
+	require.NoError(t, err)
+	require.Len(t, batched, len(probes))
+
+	for i, p := range probes {
+		want, err := q.LocationAt(ctx, subject, p)
+		require.NoError(t, err)
+		got := batched[i]
+		if want == nil {
+			assert.Nilf(t, got, "probe %d (%s): batched must be nil to match LocationAt", i, p)
+			continue
+		}
+		require.NotNilf(t, got, "probe %d (%s): batched nil but LocationAt returned %+v", i, p, want)
+		assert.Equalf(t, *want, *got, "probe %d (%s): batched must equal LocationAt", i, p)
+	}
+
+	// Empty input is a well-formed no-op (no query issued).
+	empty, err := q.LocationsAt(ctx, subject, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
