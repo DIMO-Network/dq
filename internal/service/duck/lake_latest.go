@@ -247,15 +247,17 @@ func (q *Queries) getSignalSummariesLake(ctx context.Context, subject string, fi
 }
 
 // locationGapFillLookback bounds how far before a requested timestamp LocationAt /
-// LocationsAt will reach for the nearest non-origin fix; a fix older than this is
-// treated as "no fix" and the caller substitutes the (0,0) no-data sentinel. Without
-// a floor a GPS-sparse or fix-less vehicle forces a full reverse scan of its entire
-// retained subject_bucket partition on every point lookup (finding #8). 90d is
-// generous enough that a real trip's prior fix is virtually always inside it, while
-// capping the deep scan and letting day-partition pruning drop older files. LocationAt
-// and LocationsAt MUST share this floor so the batched path stays exactly equivalent
-// to the per-point path.
-const locationGapFillLookback = 90 * 24 * time.Hour
+// LocationsAt will reach for the nearest non-origin fix. This floor only exists to give
+// DuckLake a finite lower bound for the reverse scan (so day-partition pruning has a stop);
+// it is deliberately sized WELL BEYOND any realistic decoded retention so it NEVER drops a
+// fix that is still in the retained base. An earlier 90d value was a behavior regression vs
+// the pre-#8 unbounded LocationAt: a vehicle whose last GPS fix was, say, 120 days ago (but
+// still within LAKE_DECODED_RETENTION, default 8760h/~1y) would get (0,0) instead of its
+// last real coordinate. The base is already retention-pruned, so a floor >= retention costs
+// nothing (there is no data below it) yet preserves the old semantics. Must stay >=
+// LAKE_DECODED_RETENTION. LocationAt and LocationsAt MUST share it so the batched path stays
+// exactly equivalent to the per-point path.
+const locationGapFillLookback = 10 * 365 * 24 * time.Hour
 
 // LocationAt returns the nearest non-origin currentLocationCoordinates fix at or
 // before ts — a point lookup that reaches back up to locationGapFillLookback before

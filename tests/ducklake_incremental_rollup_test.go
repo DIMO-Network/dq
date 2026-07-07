@@ -289,3 +289,21 @@ func TestDuckLake_IncrementalRollup_Randomized(t *testing.T) {
 func odoAt(ts time.Time, v float64) map[string]any {
 	return map[string]any{"name": "powertrainTransmissionTravelledDistance", "timestamp": ts.Format(time.RFC3339Nano), "value": v}
 }
+
+// TestDuckLake_IncrementalRollup_AncientRedelivery pins the >30d-redelivery count fix: a
+// reading older than the 30d dedup probe floor, redelivered (same cloud_event_id) through
+// the live path, must NOT inflate signals_latest.count — it stays equal to RecomputeRollup.
+func TestDuckLake_IncrementalRollup_AncientRedelivery(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeService(t, t.TempDir())
+	db := svc.DB()
+	subj := fmt.Sprintf("did:erc721:137:%s:73", vehicleNFT.Hex())
+	ancient := time.Now().UTC().Add(-40 * 24 * time.Hour).Truncate(time.Hour) // > dedupProbeFloor (30d)
+	runner, mat := incrRunner(t, ctx, db)
+	seedRawStatus(t, db, "anc1", subj, ancient, speedAt(ancient, 22))
+	drainNoFlush(t, ctx, runner)
+	seedRawStatus(t, db, "anc1", subj, ancient, speedAt(ancient, 22)) // redelivery of the SAME event, >30d old
+	drainNoFlush(t, ctx, runner)
+	assertMatchesRecompute(t, ctx, db, mat)
+	assert.EqualValues(t, 1, dumpRollupMap(t, ctx, db)[subj+"|speed"].count, "an ancient redelivery must not inflate count")
+}

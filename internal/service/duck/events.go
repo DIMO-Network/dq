@@ -157,7 +157,22 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 // falling back to the base scan until the rollup table exists (getEventSummariesLake).
 func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
 	if q.eventsRollupAvailable(ctx) {
-		return q.getEventSummariesRollup(ctx, subject)
+		summaries, err := q.getEventSummariesRollup(ctx, subject)
+		if err != nil {
+			return nil, err
+		}
+		if len(summaries) > 0 {
+			return summaries, nil
+		}
+		// An empty rollup for this subject is ambiguous: the vehicle genuinely has no
+		// events, OR events_latest hasn't been populated for it yet — the query pod
+		// (a separate release) can observe the table existing but empty during the
+		// one-time first-create migration rebuild, or for a brand-new subject before the
+		// next FlushEventRollup. Falling back to the live base scan makes both cases
+		// correct (a genuinely-eventless vehicle just does one extra, bucket-pruned,
+		// empty scan) rather than transiently reporting zero events for a vehicle that
+		// has them. The rollup fast-path still serves every populated subject.
+		return q.getEventSummariesLake(ctx, subject)
 	}
 	return q.getEventSummariesLake(ctx, subject)
 }

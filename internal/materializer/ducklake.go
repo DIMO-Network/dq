@@ -333,14 +333,24 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 			m.rollupFullRebuild = true
 		}
 	}
-	// events_latest first-create over a PRE-EXISTING lake.events base is a migration
-	// (finding #5a): an existing catalog getting the events rollup for the first time
-	// must backfill every already-decoded subject, or dormant vehicles (no new events)
-	// would read an empty summary. Escalate the first FlushEventRollup to a full
-	// rebuild. A brand-new catalog creates events + events_latest in the same pass
-	// (exists["events"] is false), so this does NOT fire there — no 256-bucket
-	// snapshot churn on a fresh boot; the per-batch dirty tracking fills it instead.
-	if !exists["events_latest"] && exists["events"] {
+	// events_latest completeness marker (crash-safe, mirrors the loc_ts pattern above).
+	// A first-create migration over a PRE-EXISTING lake.events base must backfill every
+	// already-decoded subject, or dormant vehicles (no new events) read an empty summary.
+	// Deriving that from PRE-DDL existence (an in-memory flag) is NOT crash-safe: a pod
+	// killed after events_latest is created but before RecomputeEventRollup finishes would,
+	// on restart, see the table exists and silently skip the rebuild — stranding dormant
+	// subjects forever (Q3b). Instead re-derive it from DB STATE each boot: "the event base
+	// is non-empty but the rollup has NO rows" precisely means "rollup incomplete", and it
+	// survives any crash mid-rebuild. A truly fresh catalog (events not yet flowing) has an
+	// empty base, so this does not fire; once the base has data, one rebuild populates the
+	// rollup and it never fires again. (The per-subject GetEventSummaries fallback keeps
+	// reads correct during the window.)
+	var eventsPending bool
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM lake.events) AND NOT EXISTS (SELECT 1 FROM lake.events_latest)`).Scan(&eventsPending); err != nil {
+		return fmt.Errorf("checking events_latest backfill marker: %w", err)
+	}
+	if eventsPending {
 		m.eventRollupFullRebuild = true
 	}
 	return nil
@@ -1455,7 +1465,7 @@ func (m *DuckLakeMaterializer) insertDecodedSteady(ctx context.Context, tx *sql.
 		// replayed window idempotent). Backfill (bulk/arbitrarily-old) skips the fold and
 		// defers to the end-of-catch-up recompute (markDirtyFromBatch marks it dirty).
 		if !m.backfillMode {
-			if err := m.captureRollupDelta(ctx, tx, tmp, tsMin, tsMax); err != nil {
+			if err := m.captureRollupDelta(ctx, tx, tmp); err != nil {
 				return cleanup, err
 			}
 		}
@@ -1511,20 +1521,24 @@ func (m *DuckLakeMaterializer) markDirtyFromBatch(dec *decodedBatch) {
 // captureRollupDelta stages, into the per-connection temp table _rollup_delta, the number
 // of NEWLY-DISTINCT (subject, name, timestamp) tuples this batch adds — i.e. the exact
 // increment to lake.signals_latest.count (#5b). It must run BEFORE the base insert: it
-// probes lake.signals for tuples that DON'T already exist within the anti-join's dedup
-// window [tsMin, tsMax], so a redelivery or a same-(subject,name,timestamp) collision
-// (which the count must not double) contributes 0, and a replayed window (rows already at
-// rest) yields 0 — the idempotency the crash-recovery path relies on.
-func (m *DuckLakeMaterializer) captureRollupDelta(ctx context.Context, tx *sql.Tx, sigParquet string, tsMin, tsMax time.Time) error {
+// probes lake.signals for tuples that DON'T already exist, so a redelivery or a
+// same-(subject,name,timestamp) collision (which the count must not double) contributes 0,
+// and a replayed window (rows already at rest) yields 0 — the idempotency the crash-
+// recovery path relies on. The probe matches on the EXACT timestamp (partition-pruned by
+// subject_bucket + the day partition), deliberately NOT clamped to the anti-join's 30d
+// dedup window: an ancient (>30d) redelivery must still find its existing row so count
+// stays equal to a full RecomputeRollup, even though the physical anti-join may re-insert a
+// duplicate row (the read-path QUALIFY dedup collapses that, and count must match it).
+func (m *DuckLakeMaterializer) captureRollupDelta(ctx context.Context, tx *sql.Tx, sigParquet string) error {
 	q := fmt.Sprintf(`CREATE OR REPLACE TEMPORARY TABLE _rollup_delta AS
 SELECT b.subject, b.name, CAST(count(*) AS BIGINT) AS delta
 FROM (SELECT DISTINCT subject, name, subject_bucket, "timestamp" FROM read_parquet(%[1]s)) b
 WHERE NOT EXISTS (
   SELECT 1 FROM lake.signals s
   WHERE s.subject_bucket = b.subject_bucket AND s.subject = b.subject AND s.name = b.name
-    AND s."timestamp" = b."timestamp" AND s."timestamp" >= %[2]s AND s."timestamp" <= %[3]s
+    AND s."timestamp" = b."timestamp"
 )
-GROUP BY b.subject, b.name`, sqlLit(sigParquet), sqlTimestampLit(tsMin), sqlTimestampLit(tsMax))
+GROUP BY b.subject, b.name`, sqlLit(sigParquet))
 	if _, err := tx.ExecContext(ctx, q); err != nil {
 		return fmt.Errorf("capture rollup count delta: %w", err)
 	}

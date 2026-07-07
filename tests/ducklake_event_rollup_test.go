@@ -7,6 +7,7 @@ package tests
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -208,4 +209,68 @@ func TestDuckLake_EventRollup_FirstCreateBackfill(t *testing.T) {
 	got := eventSummaryByName(t, ctx, q, subject)
 	require.Contains(t, got, evEngineBlock, "dormant subject must be backfilled into events_latest on first create")
 	assert.EqualValues(t, 2, got[evEngineBlock].count)
+}
+
+// TestGetEventSummaries_FallsBackWhenRollupEmpty pins the #5a serving fix: while
+// events_latest exists but isn't yet populated for a subject (first-create migration
+// window, or a brand-new subject before the next flush), GetEventSummaries must fall back
+// to the live base scan instead of returning an empty summary.
+func TestGetEventSummaries_FallsBackWhenRollupEmpty(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeService(t, t.TempDir())
+	db := svc.DB()
+	subject := fmt.Sprintf("did:erc721:137:%s:14", vehicleNFT.Hex())
+	day := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour)
+	seedRawEvent(t, svc, deviceEvents("fb-1", subject, day.Add(time.Hour), eventAt(evEngineBlock, day.Add(time.Hour))))
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
+		WithDuckLake(mustMat(t, ctx, db))
+	require.Equal(t, 1, drainRunner(t, ctx, runner))
+
+	// Simulate the not-yet-populated window: the table exists but has no rows for anyone.
+	_, err := db.ExecContext(ctx, "DELETE FROM lake.events_latest")
+	require.NoError(t, err)
+
+	q := duck.NewLakeQueries(svc)
+	got := eventSummaryByName(t, ctx, q, subject)
+	require.Contains(t, got, evEngineBlock, "must fall back to the base scan when the rollup is empty for the subject")
+	assert.EqualValues(t, 1, got[evEngineBlock].count)
+}
+
+// TestDuckLake_EventRollup_CrashMidMigrationRestart pins the Q3b crash-safe marker: if a
+// pod is killed after creating events_latest but before its first-create rebuild finishes,
+// the RESTART must still detect the incomplete rollup (events present, rollup empty) and
+// rebuild — not silently skip it because the table now exists.
+func TestDuckLake_EventRollup_CrashMidMigrationRestart(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeService(t, t.TempDir())
+	db := svc.DB()
+	subject := fmt.Sprintf("did:erc721:137:%s:15", vehicleNFT.Hex())
+	day := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour)
+	seedRawEvent(t, svc, deviceEvents("cm-1", subject, day.Add(time.Hour), eventAt(evEngineBlock, day.Add(time.Hour))))
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
+		WithDuckLake(mustMat(t, ctx, db))
+	require.Equal(t, 1, drainRunner(t, ctx, runner))
+
+	// Crash mid-migration: events_latest exists (created by a prior boot) but is empty
+	// (the rebuild never finished). lake.events still holds the dormant subject's events.
+	_, err := db.ExecContext(ctx, "DELETE FROM lake.events_latest")
+	require.NoError(t, err)
+
+	// Restart: a fresh materializer over the same catalog must re-detect the incomplete
+	// rollup from DB state (not an in-memory flag) and rebuild on the next flush.
+	mat2 := mustMat(t, ctx, db)
+	require.NoError(t, mat2.FlushEventRollup(ctx))
+
+	// Read directly from the rollup (not via the fallback) to prove it was actually repopulated.
+	var cnt int
+	require.NoError(t, db.QueryRowContext(ctx,
+		"SELECT count(*) FROM lake.events_latest WHERE subject = ?", subject).Scan(&cnt))
+	assert.Positive(t, cnt, "restart after a crash mid-migration must rebuild events_latest for dormant subjects")
+}
+
+func mustMat(t *testing.T, ctx context.Context, db *sql.DB) *materializer.DuckLakeMaterializer {
+	t.Helper()
+	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
+	require.NoError(t, err)
+	return mat
 }

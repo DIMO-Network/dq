@@ -469,8 +469,9 @@ func TestLakeQueries_LocationsAt_MatchesLocationAt(t *testing.T) {
 	// (aaa) must win the tie-break in both paths.
 	insertLoc("zzz", at(30), 99.0, 99.0, 9.9)
 	insertLoc("aaa", at(30), 42.0, -77.0, 1.3)
-	// A fix 180d before base — older than the 90d floor of the far probe below, so both
-	// paths must return nil for that probe (lookback-floor parity).
+	// A fix 180d before base, 100d before the probe below — well within the (retention-
+	// sized) gap-fill lookback, so BOTH paths must return it (the batched path equals the
+	// per-point path; the equivalence is derived from LocationAt at assert time).
 	staleProbe := base.Add(-80 * 24 * time.Hour)
 	insertLoc("stale", base.Add(-180*24*time.Hour), 10.0, 10.0, 5.0)
 
@@ -481,7 +482,7 @@ func TestLakeQueries_LocationsAt_MatchesLocationAt(t *testing.T) {
 		at(25),     // → l2 (origin (0,0) skipped)
 		at(35),     // → aaa (tie-break at ts=30)
 		at(10),     // exactly on l2 (>= boundary)
-		staleProbe, // only the 180d-old stale fix is prior → beyond 90d floor → nil
+		staleProbe, // the 180d-old stale fix is prior and within the lookback → returned by both
 	}
 
 	batched, err := q.LocationsAt(ctx, subject, probes)
