@@ -167,6 +167,13 @@ func observeLakeLag(events []cloudevent.RawEvent) {
 			oldest = ts
 		}
 	}
+	observeLakeLagAt(oldest)
+}
+
+// observeLakeLagAt sets the decode-lag gauge from the already-computed oldest pending
+// event time (the windowed decode path tracks the running min as it pages, so it never
+// needs the whole delta resident just to measure lag). A zero time means caught up.
+func observeLakeLagAt(oldest time.Time) {
 	if oldest.IsZero() {
 		lagSeconds.WithLabelValues(lakeMetricType).Set(0)
 		return
