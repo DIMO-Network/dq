@@ -151,16 +151,43 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 	return result, nil
 }
 
-// GetEventSummaries returns per-event-name summaries (count, first/last seen)
-// for a subject over all time. This scans every event date partition for the
-// subject.
+// GetEventSummaries returns per-event-name summaries (count, first/last seen) for a
+// subject over all time. It serves from the events_latest rollup (finding #5a) —
+// O(distinct-names) instead of a full-history GROUP BY over lake.events per request —
+// falling back to the base scan until the rollup table exists (getEventSummariesLake).
 func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
-	var result []*qtypes.EventSummary
+	if q.eventsRollupAvailable(ctx) {
+		return q.getEventSummariesRollup(ctx, subject)
+	}
+	return q.getEventSummariesLake(ctx, subject)
+}
 
+// getEventSummariesLake computes the event summaries directly from the deduped base
+// table. This scans every event date partition for the subject (pruned to one bucket
+// via LakeEventsDeduped). It is the pre-rollup path, kept as the fallback.
+func (q *Queries) getEventSummariesLake(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
 	stmt := "SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM " + LakeEventsDeduped(subject) +
 		// All-time scan still prunes to one bucket: subject_bucket lives inside LakeEventsDeduped (B1).
 		" WHERE subject = ? GROUP BY name ORDER BY name"
+	return q.scanEventSummaries(ctx, stmt, subject)
+}
 
+// getEventSummariesRollup serves the summaries from lake.events_latest: each stored
+// row is already the per-(subject,name) count + first/last seen the base GROUP BY
+// would produce, by construction (eventRollupSelectSQL mirrors getEventSummariesLake).
+func (q *Queries) getEventSummariesRollup(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
+	stmt := fmt.Sprintf(
+		`SELECT name, CAST(count AS UBIGINT) AS count, first_seen, last_seen
+		 FROM lake.events_latest WHERE subject = ? AND %s ORDER BY name`,
+		subjectBucketPredicate("", subject))
+	return q.scanEventSummaries(ctx, stmt, subject)
+}
+
+// scanEventSummaries runs an event-summary query (name, count, first_seen, last_seen)
+// and scans the rows, normalizing timestamps to UTC. The column order is shared by
+// the lake and rollup queries, so it lives in one place.
+func (q *Queries) scanEventSummaries(ctx context.Context, stmt, subject string) ([]*qtypes.EventSummary, error) {
+	var result []*qtypes.EventSummary
 	rows, err := q.svc.db.QueryContext(ctx, stmt, subject)
 	if err != nil {
 		return nil, fmt.Errorf("failed querying duckdb for event summaries: %w", err)

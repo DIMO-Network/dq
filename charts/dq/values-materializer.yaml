@@ -49,9 +49,18 @@ env:
   # duration; ~1y). Empty lets them grow unbounded.
   LAKE_DECODED_RETENTION: 8760h
   # Decode + rollup recompute are memory-heavy (one pod). Size memory_limit to
-  # ~75% of the pod memory limit; threads to the CPU limit.
+  # ~75% of the pod memory limit; threads to the CPU limit. This is the DECODE
+  # instance's budget.
   DUCKDB_MEMORY_LIMIT: 6GiB
   DUCKDB_THREADS: 4
+  # This release always ALSO builds a query DuckDB instance (main.go serves the
+  # query HTTP/gRPC unconditionally), but it receives no traffic here: no ingress,
+  # and the query fleet is a separate release with its own Service. Without this it
+  # would honor the 6GiB DUCKDB_MEMORY_LIMIT too, so decode(6) + query(6) = 12GiB
+  # can OOM the 8Gi pod (finding #7). Cap the idle query instance at 1GiB so the two
+  # limits sum to 7GiB < 8Gi; only a query pod (MATERIALIZER_ENABLED=false) ignores
+  # this and keeps the full budget.
+  DUCKDB_QUERY_MEMORY_LIMIT: 1GiB
 
 resources:
   limits:

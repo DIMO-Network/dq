@@ -29,9 +29,11 @@ func TestSetupStatements_LayoutOnlyOnFirstCreation(t *testing.T) {
 		`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
 		`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
 		`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
+		`ALTER TABLE lake.events_latest SET PARTITIONED BY (subject_bucket)`,
 		"CREATE TABLE IF NOT EXISTS lake.signals ",
 		"CREATE TABLE IF NOT EXISTS lake.events ",
 		"CREATE TABLE IF NOT EXISTS lake.signals_latest ",
+		"CREATE TABLE IF NOT EXISTS lake.events_latest ",
 	} {
 		if !strings.Contains(fresh, want) {
 			t.Fatalf("fresh catalog setup missing %q\ngot:\n%s", want, fresh)
@@ -44,7 +46,7 @@ func TestSetupStatements_LayoutOnlyOnFirstCreation(t *testing.T) {
 	// consumer-floor table) still runs. Idempotent column migrations
 	// (ADD COLUMN IF NOT EXISTS — the H9 loc_ts backfill) are allowed: they
 	// are how existing catalogs pick up new rollup columns.
-	all := map[string]bool{"signals": true, "events": true, "signals_latest": true}
+	all := map[string]bool{"signals": true, "events": true, "signals_latest": true, "events_latest": true}
 	reboot := setupStatements(all, sigTmp, evTmp)
 	for _, s := range reboot {
 		if strings.Contains(s, "SET PARTITIONED BY") || strings.Contains(s, "SET SORTED BY") {

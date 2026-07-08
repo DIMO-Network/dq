@@ -132,26 +132,53 @@ func noDataLocation() *model.Location {
 	return &model.Location{Latitude: 0, Longitude: 0, Hdop: 0}
 }
 
-// gapFillLocation returns loc when it is already set; otherwise the nearest fix at
-// or before ts from the lake backend (when it supports the lookup), or nil if none.
-// Callers apply noDataLocation() for the final nil → (0,0). Shared by GetSegments
-// and GetDailyActivity (the windowed aggregate → prior-fix → (0,0) fallback chain).
-func (r *Repository) gapFillLocation(ctx context.Context, subject string, loc *model.Location, ts time.Time) *model.Location {
-	if loc != nil {
-		return loc
+// batchLocationsAt resolves the nearest prior fix for each timestamp in one query
+// when the backend supports it, returning an index-aligned slice (entry nil = no fix
+// within the lookback floor). This replaces the per-boundary LocationAt fan-out
+// (finding #8): one as-of join instead of O(boundaries) reverse-scan point queries.
+// A transient backend error is swallowed (best-effort, like the prior per-point path):
+// every lookup counts toward segmentGapFillErrorsTotal and the caller substitutes
+// (0,0), so a flaky location backend is visible without failing the segment.
+func (r *Repository) batchLocationsAt(ctx context.Context, subject string, tss []time.Time) []*model.Location {
+	if len(tss) == 0 {
+		return nil
 	}
-	if las, ok := r.query.(LocationAtSource); ok {
-		switch got, err := las.LocationAt(ctx, subject, ts); {
-		case err != nil:
-			// Best-effort: a transient lookup error must not fail the segment — fall back to
-			// (0,0) like the no-data case, but count it so a flaky location backend is visible
-			// rather than masquerading as genuinely location-less trips.
-			segmentGapFillErrorsTotal.Inc()
-		case got != nil:
-			return got
+	las, ok := r.query.(BatchLocationAtSource)
+	if !ok {
+		return nil
+	}
+	locs, err := las.LocationsAt(ctx, subject, tss)
+	if err != nil {
+		segmentGapFillErrorsTotal.Add(float64(len(tss)))
+		return nil
+	}
+	return locs
+}
+
+// fillBoundaryLocations resolves, in ONE batched LocationsAt call, every boundary
+// whose Value is still nil (no GPS fix from the windowed aggregate), then substitutes
+// the (0,0) no-data sentinel for any that still have no prior fix. Shared by segment
+// and daily-activity gap-fill; the (0,0) fallback preserves the prior per-point chain
+// (windowed aggregate → nearest prior fix → (0,0)).
+func (r *Repository) fillBoundaryLocations(ctx context.Context, subject string, boundaries []*model.SignalLocation) {
+	if len(boundaries) == 0 {
+		return
+	}
+	tss := make([]time.Time, len(boundaries))
+	for i, b := range boundaries {
+		tss[i] = b.Timestamp
+	}
+	locs := r.batchLocationsAt(ctx, subject, tss)
+	for i, b := range boundaries {
+		var got *model.Location
+		if i < len(locs) {
+			got = locs[i]
 		}
+		if got == nil {
+			got = noDataLocation()
+		}
+		b.Value = got
 	}
-	return loc // nil
 }
 
 func mergeSegmentSignalRequests(defaultSet []*model.SegmentSignalRequest, clientRequests []*model.SegmentSignalRequest) []*model.SegmentSignalRequest {
@@ -281,6 +308,11 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 		}
 	}
 
+	// Batched location gap-fill for every boundary the aggregate left fix-less: one
+	// LocationsAt as-of join for the whole page instead of 2 LocationAt point queries
+	// per segment (finding #8).
+	r.gapFillSegmentLocations(ctx, did, segments)
+
 	if mechanism == model.DetectionMechanismIdling {
 		segments = filterIdlingSegmentsBySpeed(segments, 0)
 		// Truncate only now that moving segments are removed (deferred from above).
@@ -320,16 +352,15 @@ func truncateToLimit(segments []*model.Segment, limit *int) []*model.Segment {
 const idlingEnrichCandidateCap = 8 * maxSegmentLimit
 
 // capIdlingCandidates bounds the IDLING candidate list before enrichment (Q3).
-// Every detected idle run in the window is otherwise summary-fetched AND
-// location-enriched (up to 2 LocationAt point lookups each) before the deferred
-// truncation — unbounded work for a wide window. Segments arrive ordered ascending
-// by start (mergeTimeRanges) and the final truncate keeps the first *limit idle runs
-// that survive the speed filter, so capping the FIRST idlingEnrichCandidateCap (same
-// ascending order) yields the EXACT surviving set as long as at least *limit of those
-// candidates are non-moving. A page could under-return only if >(cap-1)/cap of the
-// earliest idle-RPM runs also show movement (>87.5% at 8×) — pathological; the fully
-// sound fix (batching the LocationAt gap-fills into one query) is the heavier deferred
-// option. 8× buys the soundness headroom cheaply.
+// Every detected idle run in the window is otherwise summary-fetched before the
+// deferred truncation — unbounded work for a wide window. (Location gap-fill is no
+// longer per-candidate: it is a single batched LocationsAt as-of join for the whole
+// page, finding #8.) Segments arrive ordered ascending by start (mergeTimeRanges) and
+// the final truncate keeps the first *limit idle runs that survive the speed filter,
+// so capping the FIRST idlingEnrichCandidateCap (same ascending order) yields the
+// EXACT surviving set as long as at least *limit of those candidates are non-moving.
+// A page could under-return only if >(cap-1)/cap of the earliest idle-RPM runs also
+// show movement (>87.5% at 8×) — pathological. 8× buys the soundness headroom cheaply.
 func capIdlingCandidates(segments []*model.Segment) []*model.Segment {
 	if len(segments) > idlingEnrichCandidateCap {
 		return segments[:idlingEnrichCandidateCap]
@@ -377,35 +408,45 @@ func buildSegmentRanges(segments []*model.Segment, to time.Time, extendSummaryEn
 	return ranges, aggRanges, globalFrom, globalTo
 }
 
-// enrichSegment fills a segment's signals/eventCounts (when wantSummary) and then
-// resolves its start/end location through the fallback chain: windowed aggregate →
-// nearest prior fix (lake backend) → (0,0).
+// enrichSegment fills a segment's signals/eventCounts and its start/end location
+// from the windowed aggregate (when wantSummary). Boundaries the aggregate leaves
+// without a fix stay nil here and are resolved in a single batched pass afterwards
+// (gapFillSegmentLocations) rather than one LocationAt point query each (finding #8).
 func (r *Repository) enrichSegment(ctx context.Context, did string, seg *model.Segment, to time.Time, wantSummary bool, signalReqs []*model.SegmentSignalRequest, eventNames []string, eventCounts []*qtypes.EventCount, preFetchedAggs []*qtypes.AggSignal) error {
-	if wantSummary {
-		summary, err := r.segmentSummary(ctx, did, seg, to, signalReqs, eventNames, eventCounts, preFetchedAggs)
-		if err != nil {
-			return err
-		}
-		seg.Signals = summary.Signals
-		seg.EventCounts = summary.EventCounts
-		if summary.StartLocation != nil {
-			seg.Start.Value = summary.StartLocation
-		}
-		if seg.End != nil && summary.EndLocation != nil {
-			seg.End.Value = summary.EndLocation
-		}
+	if !wantSummary {
+		return nil
 	}
-	seg.Start.Value = r.gapFillLocation(ctx, did, seg.Start.Value, seg.Start.Timestamp)
-	if seg.Start.Value == nil {
-		seg.Start.Value = noDataLocation()
+	summary, err := r.segmentSummary(ctx, did, seg, to, signalReqs, eventNames, eventCounts, preFetchedAggs)
+	if err != nil {
+		return err
 	}
-	if seg.End != nil {
-		seg.End.Value = r.gapFillLocation(ctx, did, seg.End.Value, seg.End.Timestamp)
-		if seg.End.Value == nil {
-			seg.End.Value = noDataLocation()
-		}
+	seg.Signals = summary.Signals
+	seg.EventCounts = summary.EventCounts
+	if summary.StartLocation != nil {
+		seg.Start.Value = summary.StartLocation
+	}
+	if seg.End != nil && summary.EndLocation != nil {
+		seg.End.Value = summary.EndLocation
 	}
 	return nil
+}
+
+// gapFillSegmentLocations resolves every segment boundary (start, and end when
+// present) that the windowed aggregate left without a GPS fix, in ONE batched
+// LocationsAt as-of join instead of one reverse-scan point query per boundary
+// (finding #8). Boundaries still nil after the lookup fall back to the (0,0) no-data
+// sentinel — the exact fallback chain the prior per-segment path applied.
+func (r *Repository) gapFillSegmentLocations(ctx context.Context, subject string, segments []*model.Segment) {
+	var boundaries []*model.SignalLocation
+	for _, seg := range segments {
+		if seg.Start != nil && seg.Start.Value == nil {
+			boundaries = append(boundaries, seg.Start)
+		}
+		if seg.End != nil && seg.End.Value == nil {
+			boundaries = append(boundaries, seg.End)
+		}
+	}
+	r.fillBoundaryLocations(ctx, subject, boundaries)
 }
 
 func segmentMaxSpeed(signals []*model.SignalAggregationValue) float64 {
@@ -448,8 +489,8 @@ func buildSummaryFromAggs(aggs []*qtypes.AggSignal, floatArgs []model.FloatSigna
 		}
 		// (0,0) is the "no GPS fix" sentinel, not a real location. The ranges aggregation
 		// (GetAggregatedSignalsForRanges) does NOT exclude it (unlike the single-window
-		// path), so skip it here and leave the slot nil — gapFillLocation then substitutes
-		// the nearest prior real fix instead of pinning the segment to null island.
+		// path), so skip it here and leave the slot nil — the batched location gap-fill
+		// then substitutes the nearest prior real fix instead of pinning to null island.
 		if a.SignalType == qtypes.LocType && (a.ValueLocation.Latitude != 0 || a.ValueLocation.Longitude != 0) {
 			loc := &model.Location{
 				Latitude:  a.ValueLocation.Latitude,
@@ -615,17 +656,9 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 		if lastSeg != nil && lastSeg.End != nil && lastSeg.End.Value != nil {
 			endLoc = lastSeg.End.Value
 		}
-		// Gap-fill the day's start/end location from the nearest prior fix (lake
-		// backend only) when neither a segment nor the windowed aggregate supplied one.
-		startLoc = r.gapFillLocation(ctx, did, startLoc, dayStartUTC)
-		endLoc = r.gapFillLocation(ctx, did, endLoc, dayEndUTC)
-		if startLoc == nil {
-			startLoc = noDataLocation()
-		}
-		if endLoc == nil {
-			endLoc = noDataLocation()
-		}
-
+		// Boundaries left fix-less (no segment, no windowed aggregate) stay nil here and
+		// are resolved in one batched LocationsAt pass below instead of a LocationAt
+		// point query per day (finding #8).
 		startSignalLoc := &model.SignalLocation{Timestamp: dayStartUTC, Value: startLoc}
 		endSignalLoc := &model.SignalLocation{Timestamp: dayEndUTC, Value: endLoc}
 		out = append(out, &model.DailyActivity{
@@ -637,10 +670,29 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 			EventCounts:  eventSummary,
 		})
 	}
+	// One batched gap-fill for every day boundary the aggregate/segments left fix-less;
+	// any still without a prior fix falls back to (0,0).
+	r.gapFillDailyLocations(ctx, did, out)
 	if out == nil {
 		out = []*model.DailyActivity{}
 	}
 	return out, nil
+}
+
+// gapFillDailyLocations resolves every day-activity boundary the aggregate and its
+// overlapping segments left fix-less in one batched LocationsAt call (finding #8),
+// substituting the (0,0) no-data sentinel for any without a prior fix.
+func (r *Repository) gapFillDailyLocations(ctx context.Context, subject string, days []*model.DailyActivity) {
+	var boundaries []*model.SignalLocation
+	for _, d := range days {
+		if d.Start != nil && d.Start.Value == nil {
+			boundaries = append(boundaries, d.Start)
+		}
+		if d.End != nil && d.End.Value == nil {
+			boundaries = append(boundaries, d.End)
+		}
+	}
+	r.fillBoundaryLocations(ctx, subject, boundaries)
 }
 
 // daySegmentStats accounts one calendar day's [dayStart, dayEnd) window against all

@@ -45,11 +45,22 @@ func main() {
 	runnerGroup, runnerCtx := errgroup.WithContext(mainCtx)
 
 	settingsFile := flag.String("settings", "settings.yaml", "settings file")
+	// Backfill mode (finding #1a): a one-shot re-decode of a raw_events time range into
+	// the decoded lake tables, for a range the decode loop permanently skipped on cursor
+	// expiry (DQMaterializerCursorReset). Both flags RFC3339; setting either runs the
+	// backfill and exits instead of starting the servers/decode loop. Idempotent.
+	backfillFrom := flag.String("backfill-from", "", "RFC3339 start (inclusive) of a raw_events range to re-decode, then exit")
+	backfillTo := flag.String("backfill-to", "", "RFC3339 end (exclusive) of a raw_events range to re-decode, then exit")
 	flag.Parse()
 
 	cfg, err := settings.LoadConfig[config.Settings](*settingsFile)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Couldn't load settings.")
+	}
+
+	if *backfillFrom != "" || *backfillTo != "" {
+		runBackfillAndExit(cfg, *backfillFrom, *backfillTo, logger)
+		return
 	}
 	// The shared env loader silently leaves a field zero on a malformed value (it swallows
 	// per-field parse errors), so boot-critical numerics never fail LoadConfig — validate
@@ -101,6 +112,25 @@ func main() {
 		logger.Fatal().Err(err).Msg("Server shut down due to an error.")
 	}
 	logger.Info().Msg("Server shut down.")
+}
+
+// runBackfillAndExit parses the RFC3339 backfill window, runs the one-shot re-decode
+// (finding #1a), and exits. Both bounds are required and from must precede to.
+func runBackfillAndExit(cfg config.Settings, fromStr, toStr string, logger zerolog.Logger) {
+	if fromStr == "" || toStr == "" {
+		logger.Fatal().Msg("backfill requires both -backfill-from and -backfill-to (RFC3339)")
+	}
+	from, err := time.Parse(time.RFC3339, fromStr)
+	if err != nil {
+		logger.Fatal().Err(err).Str("backfill-from", fromStr).Msg("invalid -backfill-from (want RFC3339)")
+	}
+	to, err := time.Parse(time.RFC3339, toStr)
+	if err != nil {
+		logger.Fatal().Err(err).Str("backfill-to", toStr).Msg("invalid -backfill-to (want RFC3339)")
+	}
+	if err := app.RunBackfill(cfg, from, to, logger); err != nil {
+		logger.Fatal().Err(err).Msg("backfill failed")
+	}
 }
 
 // maxHTTPBodyBytes caps a request body on the public query surface. GraphQL

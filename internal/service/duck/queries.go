@@ -1,8 +1,10 @@
 package duck
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
@@ -18,12 +20,38 @@ import (
 // cloudevent queries are out of scope.
 type Queries struct {
 	svc *Service
+	// eventsRollupReady caches that lake.events_latest exists, so GetEventSummaries
+	// serves from the rollup (finding #5a). Until it does — a fresh catalog, or a
+	// rollout where a query pod started before the materializer created the table —
+	// summaries fall back to the full lake.events scan. The transition is one-way
+	// (false→true) and self-healing: re-checked each call while false, so once the
+	// materializer's ensureSchema creates the table the read path picks it up. Unlike
+	// signals_latest (long-established), events_latest is a NEW table, so this guard
+	// prevents a rollout-ordering error before it exists.
+	eventsRollupReady atomic.Bool
 }
 
 // NewLakeQueries creates a query layer that reads the DuckLake catalog tables
 // (lake.signals / lake.events) attached on svc.
 func NewLakeQueries(svc *Service) *Queries {
 	return &Queries{svc: svc}
+}
+
+// eventsRollupAvailable reports whether lake.events_latest exists, caching a
+// positive result so the metadata check runs only until the materializer has
+// created the table (see the eventsRollupReady field doc).
+func (q *Queries) eventsRollupAvailable(ctx context.Context) bool {
+	if q.eventsRollupReady.Load() {
+		return true
+	}
+	var n int
+	if err := q.svc.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = 'events_latest'`).
+		Scan(&n); err != nil || n == 0 {
+		return false
+	}
+	q.eventsRollupReady.Store(true)
+	return true
 }
 
 // LakeEventsDeduped is the canonical DuckLake decoded-event source for one
