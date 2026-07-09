@@ -1,11 +1,12 @@
 package graph
 
 import (
+	"context"
 	"slices"
 
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
 )
 
 // privilegeEnumToPermission maps GraphQL Privilege enum values (as they appear
@@ -41,4 +42,12 @@ func hasPrivilegesForSignal(repo *repositories.Repository, name string, permissi
 		}
 	}
 	return true
+}
+
+// permissionsFromCtx returns the caller's token permissions, or nil when unauthenticated.
+func permissionsFromCtx(ctx context.Context) []string {
+	if tok, _ := ctx.Value(ClaimsContextKey{}).(*tokenclaims.Token); tok != nil {
+		return tok.Permissions
+	}
+	return nil
 }

@@ -4,7 +4,7 @@ package auth
 import (
 	"context"
 
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	jwtmiddleware "github.com/auth0/go-jwt-middleware/v2"
 )
 

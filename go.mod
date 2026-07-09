@@ -6,23 +6,23 @@ toolchain go1.26.4
 
 require (
 	github.com/99designs/gqlgen v0.17.89
-	github.com/DIMO-Network/cloudevent v0.2.13
+	github.com/DIMO-Network/cloudevent v1.1.0
+	github.com/DIMO-Network/dauth v0.0.1
 	github.com/DIMO-Network/model-garage v1.0.11
-	github.com/DIMO-Network/server-garage v0.1.1
-	github.com/DIMO-Network/shared v1.1.7
-	github.com/DIMO-Network/token-exchange-api v0.4.0
+	github.com/DIMO-Network/server-garage v0.4.0
+	github.com/DIMO-Network/shared v1.1.9
 	github.com/auth0/go-jwt-middleware/v2 v2.3.0
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.14
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
 	github.com/aws/smithy-go v1.24.2
 	github.com/duckdb/duckdb-go/v2 v2.10504.0
-	github.com/ethereum/go-ethereum v1.17.1
-	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.2
+	github.com/ethereum/go-ethereum v1.17.3
+	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/parquet-go/parquet-go v0.30.1
 	github.com/prometheus/client_golang v1.23.2
-	github.com/rs/zerolog v1.34.0
+	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.11.1
 	github.com/uber/h3-go/v4 v4.3.0
 	github.com/vektah/gqlparser/v2 v2.5.32
@@ -95,7 +95,7 @@ require (
 	github.com/sosodev/duration v1.4.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/teslamotors/fleet-telemetry v0.9.0 // indirect
-	github.com/tidwall/gjson v1.18.0 // indirect
+	github.com/tidwall/gjson v1.19.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/twpayne/go-geom v1.6.1 // indirect

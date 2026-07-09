@@ -14,8 +14,8 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/introspection"
 	"github.com/DIMO-Network/cloudevent"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/DIMO-Network/dq/internal/graph/model"
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
 	gqlparser "github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
 )

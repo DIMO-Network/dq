@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/metadata"
 )

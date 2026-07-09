@@ -23,7 +23,7 @@ import (
 	"github.com/99designs/gqlgen/graphql/handler/transport"
 	"github.com/DIMO-Network/dq/internal/graph"
 	"github.com/DIMO-Network/dq/internal/service/duck"
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/stretchr/testify/require"
 )
 

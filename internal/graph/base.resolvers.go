@@ -12,7 +12,6 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
 )
 
 // Signals is the resolver for the signals field.
@@ -31,14 +30,6 @@ func (r *queryResolver) SignalsLatest(ctx context.Context, subject string, filte
 		return nil, err
 	}
 	return r.SignalRepo.GetSignalLatest(ctx, latestArgs)
-}
-
-// permissionsFromCtx returns the caller's token permissions, or nil when unauthenticated.
-func permissionsFromCtx(ctx context.Context) []string {
-	if tok, _ := ctx.Value(ClaimsContextKey{}).(*tokenclaims.Token); tok != nil {
-		return tok.Permissions
-	}
-	return nil
 }
 
 // AvailableSignals is the resolver for the availableSignals field.

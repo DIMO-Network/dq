@@ -5,7 +5,7 @@ import (
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 )
 
 func TestHasPrivilegesForSignal(t *testing.T) {
