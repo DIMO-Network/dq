@@ -353,7 +353,88 @@ func (m *DuckLakeMaterializer) ensureSchema(ctx context.Context) error {
 	if eventsPending {
 		m.eventRollupFullRebuild = true
 	}
+	// #4: migrate a pre-existing rollup that was created partitioned-but-unsorted to
+	// SORTED BY (subject). Crash-safe + idempotent (gated on the sort being absent).
+	if err := m.migrateLatestSort(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+// migrateLatestSort applies SORTED BY (subject) to a pre-#4 rollup table that was created
+// partitioned-but-unsorted, so per-vehicle reads zone-map-prune within the subject_bucket
+// instead of scanning it whole (scale review #4). Crash-safe and idempotent: the ALTER is
+// issued ONLY when the sort spec is currently absent (re-derived from the catalog each
+// boot), so a normal reboot mints zero schema changes — the same discipline the first-create
+// ALTER gating enforces (re-ALTERing an active spec is the schema-version-churn hazard the
+// gating avoids). Existing data files re-sort lazily as the rollup rewrites/merges them; new
+// writes are sorted immediately.
+//
+// OPERATIONAL NOTE (adversarial review): the ALTER bumps the DuckLake schema_version and
+// renames the inline-data tables, so on the ONE upgrade boot it opens the same "din
+// maintenance flush_inlined_data under a concurrent read → FATAL/instance invalidation"
+// window the layout gating exists to avoid. The materializer self-heals (isDatabaseInvalidated
+// / recoverPoisonedSession → restart), but QUERY pods have no in-process recovery and heal
+// only via K8s liveness — so a brief read blip on signals_latest is possible during the
+// upgrade boot. It is one-time (the gate skips forever after), metadata-only (no data
+// rewrite), and best-effort (a failure stays unsorted, retried next boot). Prefer deploying
+// this materializer release during a low-traffic / low-maintenance window.
+func (m *DuckLakeMaterializer) migrateLatestSort(ctx context.Context) error {
+	// Best-effort: SORTED BY is a read-pruning optimization, not a correctness invariant, so
+	// a transient catalog/metadata hiccup here must NOT block the single writer from booting
+	// (that would halt all decode). Failures are logged and retried on the next boot; the
+	// table just stays unsorted (the pre-#4 status quo) meanwhile. The first-create sort in
+	// setupStatements is still enforced as part of schema creation.
+	for _, table := range []string{"signals_latest", "events_latest"} {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		exists, err := m.tableExists(ctx, "lake", table)
+		if err != nil {
+			m.log.Warn().Err(err).Str("table", table).Msg("sort migration: table-exists check failed; skipping this boot (#4)")
+			continue
+		}
+		if !exists {
+			continue
+		}
+		sorted, err := m.latestIsSortedBySubject(ctx, table)
+		if err != nil {
+			m.log.Warn().Err(err).Str("table", table).Msg("sort migration: sort-spec check failed; skipping this boot (#4)")
+			continue
+		}
+		if sorted {
+			continue
+		}
+		stmt := fmt.Sprintf(`ALTER TABLE lake.%s SET SORTED BY (subject)`, table)
+		var aerr error
+		for attempt := 0; attempt < 5; attempt++ {
+			if _, aerr = m.db.ExecContext(ctx, stmt); aerr == nil || !isCommitConflict(aerr) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
+			}
+		}
+		if aerr != nil {
+			m.log.Warn().Err(aerr).Str("table", table).Msg("sort migration: SET SORTED BY failed; staying unsorted, will retry next boot (#4)")
+			continue
+		}
+		m.log.Info().Str("table", table).Msg("migrated rollup to SORTED BY (subject) (#4)")
+	}
+	return nil
+}
+
+// latestIsSortedBySubject reports whether table has an ACTIVE SORTED BY spec (a
+// ducklake_sort_info row with end_snapshot IS NULL), mirroring din's isSorted probe.
+func (m *DuckLakeMaterializer) latestIsSortedBySubject(ctx context.Context, table string) (bool, error) {
+	var ok bool
+	err := m.db.QueryRowContext(ctx, `
+		SELECT count(*) > 0 FROM __ducklake_metadata_lake.ducklake_sort_info
+		WHERE end_snapshot IS NULL
+		  AND table_id = (SELECT table_id FROM ducklake_table_info('lake') WHERE table_name = ?)`, table).Scan(&ok)
+	return ok, err
 }
 
 // tableExists reports whether schema.name is already in the attached catalog.
@@ -437,6 +518,11 @@ func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 				loc_ts TIMESTAMP WITH TIME ZONE,
 				count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
 			`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
+			// SORTED BY (subject) clusters each subject_bucket file by subject so a per-vehicle
+			// latest/dataSummary/location read prunes to a few row groups via parquet zone maps
+			// instead of scanning the whole bucket (~fleet/256 rows) — scale review #4. Existing
+			// catalogs are migrated by migrateLatestSort (below), gated on the sort being absent.
+			`ALTER TABLE lake.signals_latest SET SORTED BY (subject)`,
 		)
 	} else if !exists["signals_latest.loc_ts"] {
 		// Migrate catalogs whose rollup predates loc_ts (H9). Emitted only
@@ -464,6 +550,8 @@ func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 				count BIGINT,
 				first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
 			`ALTER TABLE lake.events_latest SET PARTITIONED BY (subject_bucket)`,
+			// See signals_latest above (#4); existing catalogs migrated by migrateLatestSort.
+			`ALTER TABLE lake.events_latest SET SORTED BY (subject)`,
 		)
 	}
 	// The remaining statements are genuinely idempotent (CREATE IF NOT EXISTS /
