@@ -7,7 +7,7 @@ import (
 
 	"github.com/DIMO-Network/dq/internal/auth"
 	"github.com/DIMO-Network/dq/pkg/grpc"
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"

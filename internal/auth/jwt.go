@@ -14,7 +14,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// newValidator builds the token-exchange JWT validator (RS256, dimo.zone
+// newValidator builds the dauth JWT validator (RS256, dimo.zone
 // audience, *DQClaim custom claims) shared by the HTTP middleware and the gRPC
 // fetch interceptor so both enforce identical token semantics.
 func newValidator(issuer, jwksURI string) (*validator.Validator, error) {
@@ -43,7 +43,7 @@ func newValidator(issuer, jwksURI string) (*validator.Validator, error) {
 	)
 }
 
-// NewJWTMiddleware creates JWT middleware with the given token-exchange issuer and JWKS URI.
+// NewJWTMiddleware creates JWT middleware with the given dauth issuer and JWKS URI.
 func NewJWTMiddleware(issuer, jwksURI string) (*jwtmiddleware.JWTMiddleware, error) {
 	jwtValidator, err := newValidator(issuer, jwksURI)
 	if err != nil {

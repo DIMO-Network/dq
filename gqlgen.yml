@@ -38,19 +38,19 @@ models:
     model: github.com/99designs/gqlgen/graphql.String
     enum_values:
       VEHICLE_NON_LOCATION_DATA:
-        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetNonLocationHistory
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetNonLocationHistory
       VEHICLE_COMMANDS:
-        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionExecuteCommands
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionExecuteCommands
       VEHICLE_CURRENT_LOCATION:
-        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetCurrentLocation
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetCurrentLocation
       VEHICLE_ALL_TIME_LOCATION:
-        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetLocationHistory
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetLocationHistory
       VEHICLE_VIN_CREDENTIAL:
-        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetVINCredential
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetVINCredential
       VEHICLE_APPROXIMATE_LOCATION:
-        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetApproximateLocation
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetApproximateLocation
       VEHICLE_RAW_DATA:
-        value: github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims.PermissionGetRawData
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetRawData
   Time:
     model:
       - github.com/99designs/gqlgen/graphql.Time

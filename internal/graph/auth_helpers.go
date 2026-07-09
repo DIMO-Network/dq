@@ -8,7 +8,7 @@ import (
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/pkg/grpc"
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 )
 
 const (

@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/DIMO-Network/token-exchange-api/pkg/tokenclaims"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/auth0/go-jwt-middleware/v2/validator"
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
