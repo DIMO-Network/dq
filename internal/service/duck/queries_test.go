@@ -36,7 +36,7 @@ type sigFixture struct {
 
 // writeSignalsFixture inserts decoded signal rows into lake.signals. The day
 // argument is retained for call-site readability but no longer partitions
-// physically — DuckLake partitions by (subject_bucket, day(timestamp)) from the
+// physically — DuckLake partitions by (subject_bucket, year/month/day(timestamp)) from the
 // row's own timestamp.
 func writeSignalsFixture(t *testing.T, svc *Service, _ string, _ string, rows []sigFixture) {
 	t.Helper()

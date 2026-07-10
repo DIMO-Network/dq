@@ -21,7 +21,7 @@ const subjectBloomFilterBitsPerValue = 10
 type SignalRow struct {
 	Subject string `parquet:"subject"`
 	// SubjectBucket is HashBucket(Subject): the decoded tables are PARTITIONED
-	// BY (subject_bucket, day(timestamp)) so per-vehicle reads prune to one
+	// BY (subject_bucket, year/month/day(timestamp)) so per-vehicle reads prune to one
 	// bucket instead of scanning the fleet (CHD-1). Stamped at decode time so
 	// it always agrees with the read-side duck.HashBucket.
 	SubjectBucket int32     `parquet:"subject_bucket"`

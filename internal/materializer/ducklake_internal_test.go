@@ -24,9 +24,9 @@ func TestSetupStatements_LayoutOnlyOnFirstCreation(t *testing.T) {
 	// Fresh catalog: every decoded table is created AND laid out.
 	fresh := strings.Join(setupStatements(map[string]bool{}, sigTmp, evTmp), "\n")
 	for _, want := range []string{
-		`ALTER TABLE lake.signals SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
+		`ALTER TABLE lake.signals SET PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp"))`,
 		`ALTER TABLE lake.signals SET SORTED BY (subject, "timestamp")`,
-		`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
+		`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp"))`,
 		`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
 		`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
 		`ALTER TABLE lake.events_latest SET PARTITIONED BY (subject_bucket)`,

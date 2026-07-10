@@ -395,6 +395,14 @@ func (m *DuckLakeMaterializer) columnExists(ctx context.Context, table, column s
 // configure it on creation — which this does. "timestamp" is quoted because it is
 // a DuckDB keyword.
 //
+// The time partition is the year/month/day TRIPLE: DuckLake's year()/month()/
+// day() are component extractions (day(x) alone is day-of-month 1-31, NOT a
+// date — the original single-day() spec cycled 31 buckets mixing every month),
+// evaluated in the session TimeZone (UTC, pinned per-conn). Known trade-off of
+// daily grain: ducklake_merge_adjacent_files only consolidates within one
+// partition, so a low-traffic (bucket, day) keeps its tiny files forever;
+// accepted for layout legibility.
+//
 // Trade-off: a decoded table created WITHOUT this layout (older code, partial
 // setup) would not be re-laid-out. That can't happen here because this block is
 // their only creator, so the existence gate is sufficient and simpler than reading
@@ -405,14 +413,14 @@ func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 	if !exists["signals"] {
 		stmts = append(stmts,
 			fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.signals AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(sigTmp)),
-			`ALTER TABLE lake.signals SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
+			`ALTER TABLE lake.signals SET PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp"))`,
 			`ALTER TABLE lake.signals SET SORTED BY (subject, "timestamp")`,
 		)
 	}
 	if !exists["events"] {
 		stmts = append(stmts,
 			fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.events AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(evTmp)),
-			`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, day("timestamp"))`,
+			`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp"))`,
 			`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
 		)
 	}
@@ -2214,7 +2222,7 @@ func (m *DuckLakeMaterializer) recomputeOneEventBucket(ctx context.Context, wher
 // window. A redelivered row carries the SAME timestamp as the original, so every
 // possible duplicate falls inside the batch's range — the bound can never miss
 // one. What it does is let DuckLake prune the probe to the day-partitions the
-// batch actually spans (it is PARTITIONED BY day("timestamp")) instead of
+// batch actually spans (it is PARTITIONED BY year/month/day("timestamp")) instead of
 // scanning the whole table, which is what made the anti-join O(history)/batch and
 // the dominant steady-state cost on a backlog. skipDedup drops the guard entirely
 // for a backfill of a known-clean dump (the read path dedups regardless).
