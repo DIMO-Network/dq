@@ -28,7 +28,7 @@ func HashBucket(subject string) int {
 
 // subjectBucketPredicate returns the inlined partition-pruning predicate for a
 // subject: "<prefix>subject_bucket = N" where N = HashBucket(subject). The
-// decoded lake tables are PARTITIONED BY (subject_bucket, day(timestamp))
+// decoded lake tables are PARTITIONED BY (subject_bucket, year/month/day(timestamp))
 // (CHD-1), so pairing this with the subject filter lets DuckLake skip every
 // partition but the subject's. The value is a small int stamped at decode time
 // by the same HashBucket, so it is inlined (like the timestamp literals) rather
