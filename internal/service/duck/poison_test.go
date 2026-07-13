@@ -138,9 +138,9 @@ func TestPoisonRecoveryServiceTransparent(t *testing.T) {
 
 	stmt, err := db.Prepare("SELECT ?::INT")
 	require.NoError(t, err, "prepared statements must forward through the wrapper")
+	defer stmt.Close() //nolint:errcheck
 	require.NoError(t, stmt.QueryRow(7).Scan(&one))
 	assert.Equal(t, 7, one)
-	require.NoError(t, stmt.Close())
 
 	assert.False(t, rec.armed, "healthy traffic and ordinary errors must not arm recovery")
 	assert.Empty(t, fatalReason)
