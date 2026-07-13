@@ -58,6 +58,11 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		// the materializer overrides it off (its delta read crashes under spatial's
 		// RTree optimizer) — see startDuckLakeMaterializer.
 		LoadSpatial: true,
+		// Recover from ducklake session/instance poison after a din maintenance
+		// collision (#21). Default on for the query path; the materializer
+		// overrides it off — its decode loop carries its own calibrated
+		// two-strike recovery (1736873) and must not stack a second one.
+		PoisonRecovery: true,
 	}
 }
 
@@ -201,6 +206,10 @@ func buildDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	// DuckLake delta (ducklake_table_changes); spatial's RTreeIndexScanOptimizer
 	// crashes the planner on that read, so never load it here.
 	cfg.LoadSpatial = false
+	// The decode loop's Runner already carries the calibrated two-strike poison
+	// recovery (1736873); the driver-level port (#21) would race it — recycling
+	// under the loop's feet and exiting before the loop's own escalation.
+	cfg.PoisonRecovery = false
 	cfg.MetricsPoolLabel = "materializer" // separate dq_db_pool_* series from the query pool (H4)
 	duckSvc, err := duck.NewService(cfg)
 	if err != nil {

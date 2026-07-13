@@ -32,6 +32,49 @@ const readyCacheTTL = 3 * time.Second
 // long a pod serves stale reads well under any real outage's response time.
 const readyGraceWindow = 60 * time.Second
 
+// readySustainedFailureExit is how long readiness may fail CONTINUOUSLY (no
+// successful backing probe at all) before the process exits so the pod
+// supervisor restarts it. Liveness probes the mon port and always passes, so
+// without this a pod whose DuckDB instance was poisoned by the
+// din-maintenance/inlined-data collision (#21) parks Running-but-NotReady
+// indefinitely — 0/1, x100+ probe failures, healed only by manual deletion.
+// 5m is far past the 60s cascade grace (this is real ill health, not load)
+// yet bounds the outage; if the catalog itself is down a restart every ~5m is
+// harmless and keeps re-attaching promptly once it returns. The poison-class
+// errors additionally self-heal faster via the driver-level recovery
+// (duck/poison.go); this is the backstop for everything that classifier
+// doesn't catch.
+const readySustainedFailureExit = 5 * time.Minute
+
+// exitOnSustainedFailure wraps check so a failure sustained past window with
+// no intervening success calls fatal (process exit in production). It wraps
+// the RAW backend check — inside loadTolerantReadiness's cache — so it judges
+// real backing probes, not cached verdicts. A cold pod that has never
+// succeeded is NOT exempt: the boot-time bootstrap Ping already proved the
+// catalog attach once, so five straight minutes of probe failure means
+// restart-worthy either way.
+func exitOnSustainedFailure(check func(context.Context) error, window time.Duration, fatal func(error)) func(context.Context) error {
+	var (
+		mu           sync.Mutex
+		failingSince time.Time
+	)
+	return func(ctx context.Context) error {
+		err := check(ctx)
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil {
+			failingSince = time.Time{}
+			return nil
+		}
+		if failingSince.IsZero() {
+			failingSince = time.Now()
+		} else if time.Since(failingSince) >= window {
+			fatal(err)
+		}
+		return err
+	}
+}
+
 // loadTolerantReadiness wraps check so a burst of probes reuses one result within ttl,
 // and a transient failure after a recent success stays Ready for graceWindow — breaking
 // the saturated-pool → NotReady → load-shed → cascade loop. Sustained failure still fails.
