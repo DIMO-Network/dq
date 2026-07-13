@@ -16,6 +16,9 @@ import (
 // Service wraps a DuckDB-backed *sql.DB.
 type Service struct {
 	db *sql.DB
+	// poison is the driver-level poison recovery when Config.PoisonRecovery
+	// is set (nil otherwise); kept for tests to observe/override escalation.
+	poison *poisonRecovery
 }
 
 // NewService opens an in-memory DuckDB database and applies the bootstrap
@@ -36,7 +39,20 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("failed to create duckdb connector: %w", err)
 	}
 
-	db := sql.OpenDB(connector)
+	// Poison recovery (#21) observes every query at the driver level; see
+	// poison.go. Wired here — not per call site — so GraphQL reads, fetch
+	// RPCs, and the /ready probe all funnel through one recovery.
+	var rec *poisonRecovery
+	dbConnector := driver.Connector(connector)
+	if cfg.PoisonRecovery {
+		rec = newPoisonRecovery()
+		dbConnector = &recoveringConnector{Connector: connector, rec: rec}
+	}
+
+	db := sql.OpenDB(dbConnector)
+	if rec != nil {
+		rec.db = db // before Ping: the first connection is already observed
+	}
 	db.SetMaxOpenConns(cfg.MaxConns)
 	db.SetMaxIdleConns(cfg.MaxConns)
 	// Recycle connections so a DuckLake→Postgres catalog attach poisoned by a
@@ -57,7 +73,7 @@ func NewService(cfg Config) (*Service, error) {
 	}
 	poolStats.track(label, db)
 
-	return &Service{db: db}, nil
+	return &Service{db: db, poison: rec}, nil
 }
 
 // DB returns the underlying *sql.DB.

@@ -50,6 +50,35 @@ func TestLoadTolerantReadiness(t *testing.T) {
 	require.Error(t, ready(ctx), "a failure past the grace window must report NotReady")
 }
 
+// TestExitOnSustainedFailure pins the NotReady-forever escape hatch (#21):
+// liveness always passes, so a pod whose DuckDB instance is poisoned parks
+// Running-but-NotReady indefinitely unless sustained readiness failure exits
+// the process. Any intervening success must reset the failure window.
+func TestExitOnSustainedFailure(t *testing.T) {
+	var result error
+	fatals := 0
+	check := func(context.Context) error { return result }
+	ready := exitOnSustainedFailure(check, 50*time.Millisecond, func(error) { fatals++ })
+	ctx := context.Background()
+
+	result = errors.New("catalog poisoned")
+	require.Error(t, ready(ctx))
+	require.Error(t, ready(ctx))
+	require.Equal(t, 0, fatals, "failures within the window must not exit")
+
+	result = nil
+	require.NoError(t, ready(ctx), "a success must reset the failure window")
+	result = errors.New("catalog poisoned")
+	require.Error(t, ready(ctx))
+	time.Sleep(30 * time.Millisecond)
+	require.Error(t, ready(ctx))
+	require.Equal(t, 0, fatals, "the window must restart after a success")
+
+	time.Sleep(30 * time.Millisecond)
+	require.Error(t, ready(ctx))
+	require.Equal(t, 1, fatals, "failing for the whole window must exit the process")
+}
+
 // TestLoadTolerantReadiness_CachesWithinTTL verifies a burst of probes reuses one backing
 // result within the TTL, so the probe doesn't pile demand onto the query pool.
 func TestLoadTolerantReadiness_CachesWithinTTL(t *testing.T) {

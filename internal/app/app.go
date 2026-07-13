@@ -176,8 +176,15 @@ func New(settings config.Settings) (*App, error) {
 
 	var readyCheck func(context.Context) error
 	if duckSvc != nil {
+		// Sustained NotReady exits the process (#21): liveness always passes, so a
+		// query pod poisoned by the din-maintenance/inlined-data collision would
+		// otherwise park Running-but-NotReady until manual deletion.
+		probe := exitOnSustainedFailure(duckReadiness(duckSvc), readySustainedFailureExit, func(err error) {
+			logger.Fatal().Err(err).Dur("window", readySustainedFailureExit).
+				Msg("readiness failing for the whole window; exiting so the pod supervisor restarts with a fresh DuckDB instance")
+		})
 		// Wrap so query load can't flip a healthy pod to NotReady and cascade (CHD review).
-		readyCheck = loadTolerantReadiness(duckReadiness(duckSvc), readyCacheTTL, readyGraceWindow)
+		readyCheck = loadTolerantReadiness(probe, readyCacheTTL, readyGraceWindow)
 	}
 
 	ok = true // App now owns backendCleanup + stopMaterializer; disarm the deferred cleanup

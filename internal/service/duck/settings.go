@@ -98,6 +98,15 @@ type Config struct {
 	// RTreeIndexScanOptimizer hooks the planner and crashes (INTERNAL Error) on the
 	// materializer's DuckLake delta read, so the materializer leaves this false.
 	LoadSpatial bool `yaml:"DUCKDB_LOAD_SPATIAL"`
+
+	// PoisonRecovery enables the query-pool port of the materializer's
+	// two-strike ducklake poison recovery (#21): aborted catalog sessions
+	// (din maintenance flushing inlined data under an in-flight read) recycle
+	// the idle pool; instance-level poison exits the process so the pod
+	// supervisor restarts it. Query/read services only — the materializer's
+	// decode loop carries its own calibrated recovery (1736873) and must not
+	// stack a second one. Role-wired (backend.go), not operator-set.
+	PoisonRecovery bool `yaml:"-"`
 }
 
 // effectiveCatalogDSN is the catalog DSN this role connects to: the read
