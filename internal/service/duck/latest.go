@@ -21,11 +21,12 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 	// (0,0)-filtered latest-fix timestamp is stored as loc_ts (H9) — in
 	// O(distinct-names). Only source-filtered queries fall back to the full
 	// deduped scan (SR-5): the rollup folds sources by construction.
-	if noSourceFilter(latestArgs.Filter) {
-		observeLakePath(true)
+	rollup := noSourceFilter(latestArgs.Filter)
+	observeLakePath(rollup)
+	defer observeLakeQuery(rollup, "signalsLatest", time.Now())
+	if rollup {
 		return q.getLatestSignalsRollup(ctx, subject, latestArgs)
 	}
-	observeLakePath(false)
 	return q.getLatestSignalsLake(ctx, subject, latestArgs)
 }
 
@@ -34,33 +35,36 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 // unconditional max(timestamp) while the location value comes from the nonzero
 // columns.
 func (q *Queries) GetAllLatestSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error) {
-	if noSourceFilter(filter) {
-		observeLakePath(true)
+	rollup := noSourceFilter(filter)
+	observeLakePath(rollup)
+	defer observeLakeQuery(rollup, "allLatest", time.Now())
+	if rollup {
 		return q.getAllLatestSignalsRollup(ctx, subject) // O(distinct-names) rollup (CHD-3)
 	}
-	observeLakePath(false)
 	return q.getAllLatestSignalsLake(ctx, subject, filter)
 }
 
 // GetAvailableSignals returns the distinct signal names stored for a subject,
 // sorted ascending. Returns nil when none.
 func (q *Queries) GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
-	if noSourceFilter(filter) {
-		observeLakePath(true)
+	rollup := noSourceFilter(filter)
+	observeLakePath(rollup)
+	defer observeLakeQuery(rollup, "availableSignals", time.Now())
+	if rollup {
 		return q.getAvailableSignalsRollup(ctx, subject) // rollup (CHD-3)
 	}
-	observeLakePath(false)
 	return q.getAvailableSignalsLake(ctx, subject, filter)
 }
 
 // GetSignalSummaries returns per-name signal counts and first/last seen
 // timestamps for a subject, aggregated across sources.
 func (q *Queries) GetSignalSummaries(ctx context.Context, subject string, filter *model.SignalFilter) ([]*model.SignalDataSummary, error) {
-	if noSourceFilter(filter) {
-		observeLakePath(true)
+	rollup := noSourceFilter(filter)
+	observeLakePath(rollup)
+	defer observeLakeQuery(rollup, "signalSummaries", time.Now())
+	if rollup {
 		return q.getSignalSummariesRollup(ctx, subject) // rollup (CHD-3)
 	}
-	observeLakePath(false)
 	return q.getSignalSummariesLake(ctx, subject, filter)
 }
 
