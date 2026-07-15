@@ -3,6 +3,7 @@ package duck
 import (
 	"database/sql"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -82,6 +83,32 @@ func observeLakePath(rollup bool) {
 		return
 	}
 	lakeLatestServedTotal.WithLabelValues("scan").Inc()
+}
+
+// lakeLatestQuerySeconds measures the wall-clock duration of latest/summary/
+// available reads, split by serving path (rollup vs scan) and operation. This
+// is the true single-read latency the pool-saturation symptom lacked: a
+// subject-scoped rollup point-read SHOULD be single-digit ms, so a rollup-path
+// p50 in the hundreds-of-ms/seconds range is direct evidence that per-query
+// DuckLake planning (snapshot resolution + file listing over the fragmented,
+// constantly-rewritten rollup tables) — not scan volume — is what saturates the
+// read pool under the morning mirror burst. Buckets span 1ms..~32s.
+var lakeLatestQuerySeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "dq_lake_latest_query_seconds",
+	Help:    "Wall-clock duration of latest/summary/available reads by serving path (rollup|scan) and operation.",
+	Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
+}, []string{"path", "op"})
+
+// observeLakeQuery records the duration of a latest/summary/available read.
+// Call it deferred with time.Now() evaluated at the query start:
+//
+//	defer observeLakeQuery(rollup, "signalsLatest", time.Now())
+func observeLakeQuery(rollup bool, op string, start time.Time) {
+	path := "scan"
+	if rollup {
+		path = "rollup"
+	}
+	lakeLatestQuerySeconds.WithLabelValues(path, op).Observe(time.Since(start).Seconds())
 }
 
 // fetchBlobMissingTotal counts fetch reads whose externalized blob payload was
