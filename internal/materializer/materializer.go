@@ -168,11 +168,17 @@ func (r *Runner) Run(ctx context.Context) error {
 				r.maybePrune(ctx, &lastPrune)
 				continue // drain the backlog without waiting
 			}
-			// Caught up: the decode backlog is drained, so flush the decoupled rollup
-			// for every subject touched since the last flush. Subject-scoped, chunked
-			// per bucket and off the commit, so it can't OOM the writer or stall decode.
-			r.flushRollup(ctx)
-			lastRollup = time.Now()
+			// Caught up: flush the decoupled rollup for every subject touched since
+			// the last flush. Subject-scoped, chunked per bucket and off the commit,
+			// so it can't OOM the writer or stall decode. Interval-gated exactly like
+			// the mid-drain path: at low volume the decoder is caught up on nearly
+			// every poll, so an UNCONDITIONAL flush here recomputed events_latest every
+			// PollInterval (15s) regardless of RollupInterval — churning ~256 tiny
+			// files per flush into the 256-way-partitioned rollup tables. Honoring
+			// RollupInterval here makes MATERIALIZER_ROLLUP_INTERVAL actually govern
+			// the steady-state cadence (signals_latest stays fresh either way — it is
+			// folded incrementally at commit, so this flush is a no-op for it).
+			r.maybeFlushRollup(ctx, &lastRollup)
 		}
 		// The decoded tables (lake.signals/events) are merged + expired by din's
 		// catalog-wide maintenance (one maintenance process per catalog), so dq
