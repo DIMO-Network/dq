@@ -44,22 +44,36 @@ func q2WindowedToken() *tokenclaims.Token {
 	}
 }
 
-func TestSignalRangeAllowed_Windowed(t *testing.T) {
+func TestSignalRangeWithinWindows(t *testing.T) {
 	repo := testRepo(t)
 	tok := q2WindowedToken()
 
 	inQ2From, inQ2To := mustTS(t, "2026-05-01T00:00:00Z"), mustTS(t, "2026-06-01T00:00:00Z")
 	allTimeFrom, allTimeTo := mustTS(t, "2020-01-01T00:00:00Z"), mustTS(t, "2027-01-01T00:00:00Z")
 
-	// The unconditional permission covers any range.
-	assert.True(t, signalRangeAllowed(repo, "speed", tok, allTimeFrom, allTimeTo))
-	// The windowed location permission covers only in-window ranges.
-	assert.True(t, signalRangeAllowed(repo, "currentLocationCoordinates", tok, inQ2From, inQ2To))
-	assert.False(t, signalRangeAllowed(repo, "currentLocationCoordinates", tok, allTimeFrom, allTimeTo))
+	// The unconditional permission imposes no window.
+	assert.True(t, signalRangeWithinWindows(repo, "speed", tok, allTimeFrom, allTimeTo))
+	// The windowed location permission admits only in-window ranges.
+	assert.True(t, signalRangeWithinWindows(repo, "currentLocationCoordinates", tok, inQ2From, inQ2To))
+	assert.False(t, signalRangeWithinWindows(repo, "currentLocationCoordinates", tok, allTimeFrom, allTimeTo))
 	// The derived approximate signal follows the location window here (no
 	// approximate permission on the token).
-	assert.True(t, signalRangeAllowed(repo, model.ApproximateCoordinatesField, tok, inQ2From, inQ2To))
-	assert.False(t, signalRangeAllowed(repo, model.ApproximateCoordinatesField, tok, allTimeFrom, allTimeTo))
+	assert.True(t, signalRangeWithinWindows(repo, model.ApproximateCoordinatesField, tok, inQ2From, inQ2To))
+	assert.False(t, signalRangeWithinWindows(repo, model.ApproximateCoordinatesField, tok, allTimeFrom, allTimeTo))
+
+	// Possession is NOT this check's job: a signal whose permission the token
+	// does not hold at all passes through, to be denied per-field by the
+	// privilege directives rather than rejecting the whole query.
+	vinOnly := &tokenclaims.Token{CustomClaims: tokenclaims.CustomClaims{
+		ScopedPermissions: []tokenclaims.ScopedPermission{{
+			Name: tokenclaims.PermissionGetVINCredential,
+			Constraint: []tokenclaims.Constraint{
+				{LeftOperand: tokenclaims.LeftOperandRecordedAt, Operator: tokenclaims.OperatorGteq, RightOperand: "2026-04-01T00:00:00Z"},
+			},
+		}},
+	}}
+	assert.True(t, signalRangeWithinWindows(repo, "speed", vinOnly, allTimeFrom, allTimeTo))
+	assert.True(t, signalRangeWithinWindows(repo, model.ApproximateCoordinatesField, vinOnly, allTimeFrom, allTimeTo))
 }
 
 func TestSignalValueVisible_Windowed(t *testing.T) {

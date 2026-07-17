@@ -35,10 +35,11 @@ func aggregationArgsFromContext(ctx context.Context, repo *repositories.Reposito
 			continue
 		}
 		// Possession is checked by the field's privilege directive; this rejects
-		// requested ranges outside a scoped permission's data window. Rejection —
-		// not silent clamping — because an aggregate computed over a narrower
-		// range than requested would be mislabeled as covering the full range.
-		if hasScopedPermissions(tok) && !signalRangeAllowed(repo, field.Name, tok, from, to) {
+		// requested ranges outside a HELD scoped permission's data window.
+		// Rejection — not silent clamping — because an aggregate computed over
+		// a narrower range than requested would be mislabeled as covering the
+		// full range.
+		if hasScopedPermissions(tok) && !signalRangeWithinWindows(repo, field.Name, tok, from, to) {
 			if desc := signalWindowDescription(repo, field.Name, tok); desc != "" {
 				return nil, fmt.Errorf("unauthorized: requested range for signal %s is outside the token's data window: %s", field.Name, desc)
 			}

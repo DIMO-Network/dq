@@ -65,13 +65,35 @@ func hasUnscopedPrivilegesForSignal(repo *repositories.Repository, name string, 
 	return signalPermissionCheck(repo, name, tok, scope.Unscoped)
 }
 
-// signalRangeAllowed reports whether the token may read the named signal over
-// the half-open interval [from, to): every required permission must be held
-// and its data window (if any) must contain the interval.
-func signalRangeAllowed(repo *repositories.Repository, name string, tok *tokenclaims.Token, from, to time.Time) bool {
-	return signalPermissionCheck(repo, name, tok, func(tok *tokenclaims.Token, perm string) bool {
-		return scope.AllowsRange(tok, perm, from, to)
-	})
+// signalRangeWithinWindows reports whether no HELD permission's data window
+// excludes any part of [from, to) for the named signal. Like
+// signalValueVisible it does not check possession — an unheld permission is
+// the field directives' problem — it only vetoes ranges that a
+// held-but-scoped permission's window does not contain.
+func signalRangeWithinWindows(repo *repositories.Repository, name string, tok *tokenclaims.Token, from, to time.Time) bool {
+	if name == model.ApproximateCoordinatesField {
+		heldApprox := scope.Holds(tok, tokenclaims.PermissionGetApproximateLocation)
+		heldLoc := scope.Holds(tok, tokenclaims.PermissionGetLocationHistory)
+		if !heldApprox && !heldLoc {
+			return true
+		}
+		return scope.AllowsRange(tok, tokenclaims.PermissionGetApproximateLocation, from, to) ||
+			scope.AllowsRange(tok, tokenclaims.PermissionGetLocationHistory, from, to)
+	}
+	required, ok := repo.RequiredPrivileges(name)
+	if !ok {
+		return true
+	}
+	for _, priv := range required {
+		perm, mapped := privilegeEnumToPermission[priv]
+		if !mapped {
+			continue
+		}
+		if scope.Holds(tok, perm) && !scope.AllowsRange(tok, perm, from, to) {
+			return false
+		}
+	}
+	return true
 }
 
 // signalAllowsAt reports whether the token may see a value of the named signal
