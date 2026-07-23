@@ -47,6 +47,18 @@ LAKE_DECODED_RETENTION: ""
 # Rebuild signals_latest from full base on boot (disaster recovery only; O(history)).
 LAKE_REBUILD_ROLLUP_ON_BOOT: false
 
+# signals-latest NATS KV cache (write side; materializer-only). When enabled the
+# materializer folds every decoded signal batch into the KV bucket so
+# signalsLatest can be served without per-query DuckLake planning. Best-effort:
+# a NATS outage means a staler cache, never a blocked decode.
+NATS_URL: ""
+LATEST_KV_WRITE_ENABLED: false
+# Bucket name; empty = "signals-latest". Writer and reader must agree.
+LATEST_KV_BUCKET: ""
+# Re-run the lake.signals_latest -> KV bootstrap even though its completion
+# marker is present (repair after a sustained publish outage). One boot, then unset.
+LATEST_KV_FORCE_BOOTSTRAP: false
+
 # Require a valid DIMO JWT on the fetch gRPC port. False admits a missing token
 # (invalid tokens are always rejected); pair with a NetworkPolicy until true.
 FETCH_GRPC_REQUIRE_JWT: false

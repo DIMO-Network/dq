@@ -120,6 +120,24 @@ type Settings struct {
 	// it is O(history) and unnecessary in steady state. Set it for one boot to
 	// repair, then unset.
 	LakeRebuildRollupOnBoot bool `yaml:"LAKE_REBUILD_ROLLUP_ON_BOOT"`
+	// NATSURL is the NATS server the signals-latest KV cache lives on (the
+	// cluster's JetStream, e.g. nats://nats-<env>:4222). Required when
+	// LatestKVWriteEnabled; unused otherwise — dq has no other NATS coupling.
+	NATSURL string `yaml:"NATS_URL"`
+	// LatestKVWriteEnabled makes the materializer fold every decoded signal
+	// batch into the NATS KV signals-latest bucket (internal/latestkv) — the
+	// phase-1 write side of serving signalsLatest off DuckLake. Best-effort: a
+	// NATS outage degrades to a staler cache (readers fall back to the rollup),
+	// never blocks decode. Materializer-only; the query fleet ignores it.
+	LatestKVWriteEnabled bool `yaml:"LATEST_KV_WRITE_ENABLED"`
+	// LatestKVBucket overrides the KV bucket name (default latestkv.DefaultBucket,
+	// "signals-latest"). Writer and reader must agree.
+	LatestKVBucket string `yaml:"LATEST_KV_BUCKET"`
+	// LatestKVForceBootstrap re-runs the lake.signals_latest → KV bootstrap on
+	// boot even though the completion marker is present — the repair for a
+	// sustained publish outage (entries otherwise heal only per-subject as new
+	// readings arrive). One boot, then unset, like LAKE_REBUILD_ROLLUP_ON_BOOT.
+	LatestKVForceBootstrap bool `yaml:"LATEST_KV_FORCE_BOOTSTRAP"`
 	// MaterializerShardCount is read only to REJECT sharding: the DuckLake path's
 	// single global ingest_progress cursor allows exactly one materializer, so a
 	// value > 1 is refused (run a single replicaCount=1 release). See

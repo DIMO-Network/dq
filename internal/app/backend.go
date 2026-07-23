@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/config"
+	"github.com/DIMO-Network/dq/internal/latestkv"
 	"github.com/DIMO-Network/dq/internal/materializer"
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/dq/internal/service/duck"
@@ -171,6 +172,26 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 		return nil, err
 	}
 
+	// The signals-latest KV cache (phase-1 write side): fold every decoded
+	// batch into the bucket, and bootstrap it from lake.signals_latest on the
+	// loop goroutine (first enable / LATEST_KV_FORCE_BOOTSTRAP repair).
+	kvStore, err := openLatestKV(settings, logger)
+	if err != nil {
+		_ = duckSvc.Close()
+		return nil, err
+	}
+	var bootstrapKV func(context.Context)
+	if kvStore != nil {
+		mat.WithLatestPublisher(NewLatestKVPublisher(kvStore, logger))
+		bootstrapKV = func(ctx context.Context) {
+			if err := kvStore.BootstrapFromRollup(ctx, duckSvc.DB(), settings.LatestKVForceBootstrap); err != nil {
+				// Non-fatal: live publishes heal active subjects; rerun with
+				// LATEST_KV_FORCE_BOOTSTRAP to repair dormant ones.
+				logger.Error().Err(err).Msg("signals-latest KV bootstrap failed; continuing (rerun with LATEST_KV_FORCE_BOOTSTRAP to repair)")
+			}
+		}
+	}
+
 	// rebuildRollup is the opt-in disaster-recovery rebuild (LAKE_REBUILD_ROLLUP_ON_BOOT):
 	// the per-batch recompute only touches a batch's subjects, so a dropped/truncated
 	// rollup leaves dormant vehicles missing until rebuilt from the full base. It runs
@@ -178,11 +199,81 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	// synchronously at boot — so this O(history) scan can't outlast the liveness probe
 	// and CrashLoop the pod; a failure is logged and the loop proceeds (the per-batch
 	// recompute still heals active vehicles).
-	stop := runMaterializerLoop(runner, mat, settings.LakeRebuildRollupOnBoot, logger)
+	stop := runMaterializerLoop(runner, mat, settings.LakeRebuildRollupOnBoot, bootstrapKV, logger)
 	return func() {
 		stop()
+		if kvStore != nil {
+			kvStore.Close()
+		}
 		_ = duckSvc.Close()
 	}, nil
+}
+
+// openLatestKV connects the signals-latest KV store when LATEST_KV_WRITE_ENABLED,
+// returning (nil, nil) when disabled. Fails loudly on a missing NATS_URL — an
+// enabled cache silently wired to nothing would look healthy while going stale.
+func openLatestKV(settings *config.Settings, logger zerolog.Logger) (*latestkv.Store, error) {
+	if !settings.LatestKVWriteEnabled {
+		return nil, nil
+	}
+	if settings.NATSURL == "" {
+		return nil, fmt.Errorf("LATEST_KV_WRITE_ENABLED is set but NATS_URL is empty")
+	}
+	bucket := settings.LatestKVBucket
+	if bucket == "" {
+		bucket = latestkv.DefaultBucket
+	}
+	store, err := latestkv.Open(context.Background(), settings.NATSURL, bucket, logger)
+	if err != nil {
+		return nil, fmt.Errorf("opening signals-latest KV: %w", err)
+	}
+	return store, nil
+}
+
+// latestKVPublisher adapts latestkv.Store to materializer.LatestPublisher,
+// mapping SignalRow → latestkv.Row and downgrading publish errors to
+// log+metric per the LatestPublisher contract (best-effort, never block decode).
+type latestKVPublisher struct {
+	store *latestkv.Store
+	log   zerolog.Logger
+}
+
+// NewLatestKVPublisher wraps store as the materializer's LatestPublisher.
+func NewLatestKVPublisher(store *latestkv.Store, log zerolog.Logger) materializer.LatestPublisher {
+	return &latestKVPublisher{store: store, log: log}
+}
+
+// latestKVPublishTimeout caps one batch's KV publish. The publish runs on the
+// decode goroutine (before the catalog txn), and during a NATS outage every
+// per-subject round trip waits out the JetStream request timeout — uncapped, a
+// fleet-wide batch would stall decode for minutes. Missed subjects heal on
+// their next reading (or a forced bootstrap), which is the documented
+// degradation mode; stalling decode is not.
+const latestKVPublishTimeout = 30 * time.Second
+
+func (p *latestKVPublisher) PublishLatest(parent context.Context, rows []materializer.SignalRow) {
+	ctx, cancel := context.WithTimeout(parent, latestKVPublishTimeout)
+	defer cancel()
+	kvRows := make([]latestkv.Row, len(rows))
+	for i, r := range rows {
+		kvRows[i] = latestkv.Row{
+			Subject:      r.Subject,
+			Name:         r.Name,
+			Timestamp:    r.Timestamp,
+			CloudEventID: r.CloudEventID,
+			ValueNumber:  r.ValueNumber,
+			ValueString:  r.ValueString,
+			LocLat:       r.LocLat,
+			LocLon:       r.LocLon,
+			LocHDOP:      r.LocHDOP,
+			LocHeading:   r.LocHeading,
+		}
+	}
+	// Log unless the PARENT is done (shutdown): a publish-timeout expiry is
+	// exactly the outage this error line exists to surface.
+	if err := p.store.PublishSignals(ctx, kvRows); err != nil && parent.Err() == nil {
+		p.log.Error().Err(err).Msg("signals-latest KV publish failed; cache staler until those subjects' next readings (or a forced bootstrap)")
+	}
 }
 
 // buildDuckLakeMaterializer constructs the materializer's DuckDB service, the
@@ -282,6 +373,18 @@ func RunBackfill(settings config.Settings, from, to time.Time, logger zerolog.Lo
 	}
 	defer func() { _ = duckSvc.Close() }()
 
+	// Publish backfilled batches to the signals-latest KV too (when enabled):
+	// the fold discards anything older than the cache, and a backfilled range
+	// may carry a dormant subject's genuinely-latest reading.
+	kvStore, err := openLatestKV(&settings, logger)
+	if err != nil {
+		return err
+	}
+	if kvStore != nil {
+		defer kvStore.Close()
+		mat.WithLatestPublisher(NewLatestKVPublisher(kvStore, logger))
+	}
+
 	ctx := context.Background()
 	logger.Info().Time("from", from).Time("to", to).Msg("backfill: re-decoding raw_events range")
 	n, err := mat.BackfillTimeRange(ctx, runner, from, to)
@@ -300,8 +403,10 @@ func RunBackfill(settings config.Settings, from, to time.Time, logger zerolog.Lo
 }
 
 // runMaterializerLoop runs runner.Run in a goroutine and returns a stop
-// function that cancels it and waits for exit.
-func runMaterializerLoop(runner *materializer.Runner, mat *materializer.DuckLakeMaterializer, rebuildRollup bool, logger zerolog.Logger) func() {
+// function that cancels it and waits for exit. bootstrapKV (nil = disabled)
+// runs on the loop goroutine before processing, like the rollup rebuild, so
+// it never races the live publisher and can't outlast the liveness probe.
+func runMaterializerLoop(runner *materializer.Runner, mat *materializer.DuckLakeMaterializer, rebuildRollup bool, bootstrapKV func(context.Context), logger zerolog.Logger) func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -322,6 +427,9 @@ func runMaterializerLoop(runner *materializer.Runner, mat *materializer.DuckLake
 			} else {
 				logger.Info().Msg("events_latest rebuild complete")
 			}
+		}
+		if bootstrapKV != nil {
+			bootstrapKV(ctx)
 		}
 		if err := runner.Run(ctx); err != nil {
 			// Run returns an error only when the decode loop is durably broken (the
