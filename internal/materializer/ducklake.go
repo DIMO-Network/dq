@@ -123,6 +123,10 @@ type DuckLakeMaterializer struct {
 	// an error aborts the pass after that window is durable but before the cursor advances,
 	// deterministically reproducing a crash mid-span. nil in production.
 	windowCommitHook func(windowIndex int) error
+	// latestPub, when set (WithLatestPublisher), receives every decoded signal
+	// batch before its catalog transaction — see publishLatest for the ordering
+	// rationale. Best-effort by contract; nil disables it.
+	latestPub LatestPublisher
 }
 
 // WithBackfillMode toggles backfill tuning (skip the cross-batch dedup anti-join;
@@ -1136,6 +1140,10 @@ func (m *DuckLakeMaterializer) BackfillTimeRange(ctx context.Context, dec eventD
 // re-run. The wider probe is the correct trade-off for a rare repair op. The dedup
 // anti-join is always kept (never skipDedup) for the same reason.
 func (m *DuckLakeMaterializer) backfillWrite(ctx context.Context, dec *decodedBatch) error {
+	// Backfilled (arbitrarily-old) rows publish too: the fold discards anything
+	// older than the cache, and a backfill of a permanently-skipped range (#1a)
+	// may well carry a dormant subject's genuinely-latest reading.
+	m.publishLatest(ctx, dec)
 	var cleanup []string
 	defer func() {
 		for _, f := range cleanup {
@@ -1381,6 +1389,7 @@ func scanRawEvent(rows *sql.Rows) (cloudevent.RawEvent, string, error) {
 // commit writes the decoded rows and advances the snapshot cursor in one
 // transaction: the inserts and the cursor move atomically.
 func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, from, to int64) error {
+	m.publishLatest(ctx, dec)
 	var cleanup []string
 	defer func() {
 		for _, f := range cleanup {
@@ -1634,6 +1643,7 @@ func (m *DuckLakeMaterializer) writeWindow(ctx context.Context, dec *decodedBatc
 	if len(dec.signals) == 0 && len(dec.events) == 0 {
 		return nil
 	}
+	m.publishLatest(ctx, dec)
 	var cleanup []string
 	defer func() {
 		for _, f := range cleanup {
