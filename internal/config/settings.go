@@ -133,6 +133,13 @@ type Settings struct {
 	// LatestKVBucket overrides the KV bucket name (default latestkv.DefaultBucket,
 	// "signals-latest"). Writer and reader must agree.
 	LatestKVBucket string `yaml:"LATEST_KV_BUCKET"`
+	// LatestKVReadMode is the query fleet's use of the signals-latest cache
+	// (phase 2): "off" (default) ignores it; "shadow" serves from the rollup as
+	// before while comparing against the cache (dq_lake_latest_kv_shadow_total —
+	// the dark launch); "serve" answers from the cache with rollup fallback on
+	// any miss/error. Requires NATS_URL when not off. Meaningless on the
+	// materializer release.
+	LatestKVReadMode string `yaml:"LATEST_KV_READ_MODE"`
 	// LatestKVForceBootstrap re-runs the lake.signals_latest → KV bootstrap on
 	// boot even though the completion marker is present — the repair for a
 	// sustained publish outage (entries otherwise heal only per-subject as new

@@ -9,6 +9,8 @@ import (
 
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/DIMO-Network/dq/internal/latestkv"
+	"github.com/rs/zerolog"
 )
 
 // Queries answers the signal/latest/summary/event queries served by the query
@@ -29,6 +31,12 @@ type Queries struct {
 	// signals_latest (long-established), events_latest is a NEW table, so this guard
 	// prevents a rollout-ordering error before it exists.
 	eventsRollupReady atomic.Bool
+
+	// kvStore/kvMode/kvLog wire the NATS KV signals-latest cache into
+	// GetLatestSignals (WithLatestKV; kv_latest.go). nil/off = DuckLake only.
+	kvStore *latestkv.Store
+	kvMode  KVReadMode
+	kvLog   zerolog.Logger
 }
 
 // NewLakeQueries creates a query layer that reads the DuckLake catalog tables

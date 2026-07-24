@@ -85,6 +85,24 @@ func observeLakePath(rollup bool) {
 	lakeLatestServedTotal.WithLabelValues("scan").Inc()
 }
 
+// kvReadTotal counts signals-latest cache reads by outcome. In serve mode
+// every non-hit outcome is a rollup fallback, so a rising miss/error/version
+// rate under KVReadServe means the cache is silently degrading — the read-side
+// analogue of dq_latest_kv_publish_errors_total.
+var kvReadTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "dq_lake_latest_kv_read_total",
+	Help: "signals-latest KV cache reads by outcome (hit|miss|error|version); non-hits fall back to the rollup path.",
+}, []string{"outcome"})
+
+// kvShadowTotal classifies shadow-mode comparisons (KVReadShadow): match,
+// kv_newer (the benign pre-commit-fold freshness race), kv_miss (coverage
+// gap), and mismatch — the one class that must stay at zero before flipping
+// LATEST_KV_READ_MODE to serve.
+var kvShadowTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "dq_lake_latest_kv_shadow_total",
+	Help: "Shadow comparisons of the signals-latest KV cache against the rollup (match|kv_newer|kv_miss|mismatch).",
+}, []string{"result"})
+
 // lakeLatestQuerySeconds measures the wall-clock duration of latest/summary/
 // available reads, split by serving path (rollup vs scan) and operation. This
 // is the true single-read latency the pool-saturation symptom lacked: a

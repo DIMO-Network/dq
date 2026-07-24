@@ -22,10 +22,29 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 	// O(distinct-names). Only source-filtered queries fall back to the full
 	// deduped scan (SR-5): the rollup folds sources by construction.
 	rollup := noSourceFilter(latestArgs.Filter)
+	// The NATS KV cache serves the same no-source-filter case with no DuckLake
+	// planning at all (kv_latest.go). Source-filtered queries bypass it exactly
+	// as they bypass the rollup; an empty request keeps the paths' shared
+	// nothing-to-do answer.
+	kvEligible := rollup && q.kvStore != nil &&
+		(len(latestArgs.SignalNames) > 0 || len(latestArgs.LocationSignalNames) > 0 || latestArgs.IncludeLastSeen)
+	if kvEligible && q.kvMode == KVReadServe {
+		kvStart := time.Now()
+		if signals, ok := q.getLatestSignalsKV(ctx, subject, latestArgs); ok {
+			lakeLatestServedTotal.WithLabelValues("kv").Inc()
+			lakeLatestQuerySeconds.WithLabelValues("kv", "signalsLatest").Observe(time.Since(kvStart).Seconds())
+			return signals, nil
+		}
+		// miss/error/version: counted in kvReadTotal; serve from the rollup.
+	}
 	observeLakePath(rollup)
 	defer observeLakeQuery(rollup, "signalsLatest", time.Now())
 	if rollup {
-		return q.getLatestSignalsRollup(ctx, subject, latestArgs)
+		signals, err := q.getLatestSignalsRollup(ctx, subject, latestArgs)
+		if err == nil && kvEligible && q.kvMode == KVReadShadow {
+			q.shadowCompareLatest(ctx, subject, latestArgs, signals)
+		}
+		return signals, err
 	}
 	return q.getLatestSignalsLake(ctx, subject, latestArgs)
 }

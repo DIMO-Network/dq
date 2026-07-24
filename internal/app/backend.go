@@ -106,9 +106,43 @@ func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (reposito
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("couldn't create DuckDB service: %w", err)
 	}
+	queries := duck.NewLakeQueries(duckSvc)
+	cleanup := closeDuck(duckSvc, logger)
+
+	// signals-latest cache read path (phase 2, kv_latest.go): shadow compares
+	// against the rollup on real traffic; serve answers from the cache with
+	// rollup fallback. Fail loudly on a bad mode or a missing NATS_URL — a
+	// half-wired cache read silently degrades to 100% fallback and looks fine.
+	mode, valid := duck.ParseKVReadMode(settings.LatestKVReadMode)
+	if !valid {
+		_ = duckSvc.Close()
+		return nil, nil, nil, fmt.Errorf("invalid LATEST_KV_READ_MODE %q (want off, shadow, or serve)", settings.LatestKVReadMode)
+	}
+	if mode != duck.KVReadOff {
+		if settings.NATSURL == "" {
+			_ = duckSvc.Close()
+			return nil, nil, nil, fmt.Errorf("LATEST_KV_READ_MODE=%s but NATS_URL is empty", mode)
+		}
+		bucket := settings.LatestKVBucket
+		if bucket == "" {
+			bucket = latestkv.DefaultBucket
+		}
+		store, err := latestkv.Open(context.Background(), settings.NATSURL, bucket, logger)
+		if err != nil {
+			_ = duckSvc.Close()
+			return nil, nil, nil, fmt.Errorf("opening signals-latest KV for reads: %w", err)
+		}
+		queries = queries.WithLatestKV(store, mode, logger)
+		inner := cleanup
+		cleanup = func() {
+			store.Close()
+			inner()
+		}
+	}
+
 	// Reads and segment detection both come from the DuckLake catalog. Return
 	// duckSvc so the caller can share it with newEventService.
-	return repositories.ComposeBackend(duck.NewLakeQueries(duckSvc), duck.NewLakeSegments(duckSvc)), duckSvc, closeDuck(duckSvc, logger), nil
+	return repositories.ComposeBackend(queries, duck.NewLakeSegments(duckSvc)), duckSvc, cleanup, nil
 }
 
 // newEventService builds the DuckLake cloudevent fetch backend (lake.raw_events).
