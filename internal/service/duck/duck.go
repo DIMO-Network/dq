@@ -30,6 +30,9 @@ func NewService(cfg Config) (*Service, error) {
 	connector, err := duckdb.NewConnector("", func(execer driver.ExecerContext) error {
 		for _, query := range bootstrap {
 			if _, err := execer.ExecContext(context.Background(), query, nil); err != nil {
+				if tempDirAlreadyPinned(execer, query, err, cfg.TempDirectory) {
+					continue
+				}
 				return fmt.Errorf("failed to run bootstrap query %q: %w", redactQuery(query), err)
 			}
 		}
@@ -86,9 +89,49 @@ func (s *Service) Close() error {
 	return s.db.Close()
 }
 
+// tempDirAlreadyPinned reports whether a failed bootstrap statement is the one
+// benign case: re-running `SET temp_directory` after the shared database has
+// already spilled to it. Unlike the session-scoped SETs in the bootstrap,
+// temp_directory is DATABASE-scoped, and DuckDB refuses to move it once temp
+// has been used — even to the identical value. Without this tolerance, the
+// first pooled connection minted after a spill fails bootstrap, and so does
+// every one after it: the pool can never produce a healthy connection again
+// until the process restarts. (Observed 2026-07-23: a poison recycle during a
+// spilling catch-up left the materializer failing every pass for the full 1h
+// failure window, per pod restart, halving drain throughput.)
+//
+// The in-use value can only be our own — the database is in-memory and
+// process-private, and every pooled connection bootstraps from the same
+// Config — but verify via current_setting when the driver exposes a queryer
+// anyway, failing closed on a genuine mismatch. A verification error falls
+// back to the process-private invariant and tolerates.
+func tempDirAlreadyPinned(execer driver.ExecerContext, query string, err error, want string) bool {
+	if !strings.HasPrefix(query, "SET temp_directory") ||
+		!strings.Contains(err.Error(), "Cannot switch temporary directory") {
+		return false
+	}
+	queryer, ok := execer.(driver.QueryerContext)
+	if !ok {
+		return true
+	}
+	rows, qerr := queryer.QueryContext(context.Background(), "SELECT current_setting('temp_directory')", nil)
+	if qerr != nil {
+		return true
+	}
+	defer rows.Close() //nolint:errcheck
+	dest := make([]driver.Value, 1)
+	if rows.Next(dest) != nil {
+		return true
+	}
+	got, _ := dest[0].(string)
+	return got == want
+}
+
 // bootstrapQueries builds the per-connection initialization statements.
 // All statements are idempotent so they can safely run on every connection
-// in the pool against the shared database instance.
+// in the pool against the shared database instance (temp_directory is the
+// one exception — database-scoped and un-resettable after a spill — which
+// tempDirAlreadyPinned tolerates at exec time).
 func bootstrapQueries(cfg Config) []string {
 	var queries []string
 	if cfg.DuckDBMemoryLimit != "" {
