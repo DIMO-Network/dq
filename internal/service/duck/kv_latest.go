@@ -172,7 +172,13 @@ func signalsFromKVEntry(entry *latestkv.Entry, latestArgs *model.LatestSignalsAr
 //   - kv_miss:  the rollup had rows but the subject is absent from the cache
 //   - kv_error / kv_version: the cache was unreadable; nothing to compare
 func (q *Queries) shadowCompareLatest(ctx context.Context, subject string, latestArgs *model.LatestSignalsArgs, rollup []*vss.Signal) {
+	// Time the cache read under its own path label so the dark launch also
+	// measures the latency claim: dq_lake_latest_query_seconds{path="kv_shadow"}
+	// vs {path="rollup"} on the SAME real queries is the before/after evidence
+	// for the serve flip. Distinct from "kv" so serve-mode series stay clean.
+	kvStart := time.Now()
 	entry, ok := q.readKVEntry(ctx, subject)
+	lakeLatestQuerySeconds.WithLabelValues("kv_shadow", "signalsLatest").Observe(time.Since(kvStart).Seconds())
 	if !ok {
 		if len(rollup) > 0 {
 			// Distinguish "cache never saw this subject" from transport errors:
