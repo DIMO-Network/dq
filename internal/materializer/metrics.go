@@ -118,6 +118,23 @@ var (
 		Name: "dq_materializer_blob_poison_total",
 		Help: "raw_events rows skipped because their externalized blob payload is a deterministic poison pill (oversize/decrypt/sealed_no_key).",
 	}, []string{"reason"})
+	// phaseSeconds breaks one decode pass into its phases so a throughput
+	// investigation can see where the wall-clock goes (2026-07-24: the drain ran
+	// at ~0.3x realtime with CPU and memory both idle — the bottleneck was
+	// invisible without this). Phases:
+	//   read_delta    — the change-feed SQL + row scan, INCLUDING resolve_blobs
+	//                   (blob resolution happens inside the scan helper);
+	//                   subtract resolve_blobs for the pure catalog/scan cost
+	//   resolve_blobs — S3 GETs for externalized payloads (16-way concurrent)
+	//   decode        — model-garage conversion fan-out (CPU)
+	//   write_window  — one intermediate window's DuckLake txn (temp parquet,
+	//                   anti-join INSERT, incremental rollup fold, KV publish)
+	//   commit        — the final window's txn incl. the cursor CAS
+	phaseSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "dq_materializer_phase_seconds",
+		Help:    "Wall-clock of one decode-pass phase call (see code for phase meanings; read_delta includes resolve_blobs).",
+		Buckets: prometheus.ExponentialBuckets(0.01, 2, 16), // 10ms..~5.5m
+	}, []string{"phase"})
 	// progressReportErrorsTotal counts failures writing dq's snapshot floor to
 	// meta.din_consumer_progress. Decode keeps succeeding (a separate txn) so dq's own
 	// lag/cursor gauges stay healthy — without this counter the only signal is din's
@@ -144,7 +161,7 @@ func registerMetrics() {
 			rollupFlushErrorsTotal, eventRollupRefreshSeconds, eventRollupFlushErrorsTotal,
 			cursorResetsTotal, cursorSnapshotID,
 			headSnapshotID, cursorResetGap, blobMissingTotal, blobPoisonTotal,
-			progressReportErrorsTotal,
+			phaseSeconds, progressReportErrorsTotal,
 		)
 	})
 }

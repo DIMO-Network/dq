@@ -594,6 +594,7 @@ func (m *DuckLakeMaterializer) processChunk(ctx context.Context, cur, head int64
 	// fat snapshot can't materialize whole and OOM the writer (#1c). Only the final
 	// window advances the cursor, so a crash mid-span re-reads from cur and the
 	// anti-join collapses already-written windows — exactly-once preserved.
+	spanStart := time.Now()
 	res, err := m.decodeAndWriteSpan(ctx, cur, to, dec)
 	if err != nil {
 		if errors.Is(err, errSnapshotMoved) {
@@ -610,6 +611,12 @@ func (m *DuckLakeMaterializer) processChunk(ctx context.Context, cur, head int64
 	}
 
 	if res.rawRows > 0 {
+		// One line per committed span so a slow drain is diagnosable from logs
+		// alone: span width, rows in/out, and wall-clock (phase split is in
+		// dq_materializer_phase_seconds).
+		m.log.Info().Int64("from", cur).Int64("to", to).Int("raw_rows", res.rawRows).
+			Int("signal_rows", res.signalRows).Int("event_rows", res.eventRows).
+			Dur("took", time.Since(spanStart)).Msg("span committed")
 		observeLakeLagAt(res.oldest) // decode lag = age of the oldest pending event
 		// A span committed: feed the freshness/throughput alerts (CHD-12).
 		batchesTotal.WithLabelValues(lakeMetricType).Inc()
@@ -980,7 +987,9 @@ func (m *DuckLakeMaterializer) nextWindow(ctx context.Context, from, to int64, a
 				readLimit = rem
 			}
 		}
+		readStart := time.Now()
 		resolved, last, got, err := m.readDeltaWindow(ctx, from, to, *after, *hasAfter, readLimit)
+		phaseSeconds.WithLabelValues("read_delta").Observe(time.Since(readStart).Seconds())
 		if err != nil {
 			return nil, c, err
 		}
@@ -994,7 +1003,9 @@ func (m *DuckLakeMaterializer) nextWindow(ctx context.Context, from, to int64, a
 		for i := range resolved {
 			c.oldest = earlier(c.oldest, resolved[i].Time)
 		}
+		decodeStart := time.Now()
 		d := dec.decodeEvents(ctx, resolved)
+		phaseSeconds.WithLabelValues("decode").Observe(time.Since(decodeStart).Seconds())
 		appendDecoded(win, d)
 		c.signalRows += d.signalCount
 		c.eventRows += d.eventCount
@@ -1040,9 +1051,11 @@ func (m *DuckLakeMaterializer) decodeAndWriteSpan(ctx context.Context, from, to 
 		if havePending {
 			// The previous window is now known NOT to be the last, so write it as an
 			// intermediate window (idempotent, no cursor advance).
+			writeStart := time.Now()
 			if err := m.writeWindow(ctx, pending); err != nil {
 				return total, err
 			}
+			phaseSeconds.WithLabelValues("write_window").Observe(time.Since(writeStart).Seconds())
 			if m.windowCommitHook != nil {
 				if err := m.windowCommitHook(windowIdx); err != nil {
 					return total, err
@@ -1057,9 +1070,11 @@ func (m *DuckLakeMaterializer) decodeAndWriteSpan(ctx context.Context, from, to 
 		return total, nil // empty span
 	}
 	// The final window advances the cursor, coupled to its insert.
+	commitStart := time.Now()
 	if err := m.commit(ctx, pending, from, to); err != nil {
 		return total, err
 	}
+	phaseSeconds.WithLabelValues("commit").Observe(time.Since(commitStart).Seconds())
 	return total, nil
 }
 
@@ -1232,6 +1247,9 @@ func (m *DuckLakeMaterializer) resolveBlobs(ctx context.Context, events []cloude
 	if len(fetch) == 0 {
 		return events, nil
 	}
+	defer func(start time.Time) {
+		phaseSeconds.WithLabelValues("resolve_blobs").Observe(time.Since(start).Seconds())
+	}(time.Now())
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(blobFetchConcurrency)
