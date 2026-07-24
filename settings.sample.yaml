@@ -55,6 +55,10 @@ NATS_URL: ""
 LATEST_KV_WRITE_ENABLED: false
 # Bucket name; empty = "signals-latest". Writer and reader must agree.
 LATEST_KV_BUCKET: ""
+# Query-fleet read mode for the cache: off | shadow (serve from the rollup but
+# compare against the cache and count dq_lake_latest_kv_shadow_total) | serve
+# (answer from the cache, rollup fallback on miss/error). Needs NATS_URL.
+LATEST_KV_READ_MODE: off
 # Re-run the lake.signals_latest -> KV bootstrap even though its completion
 # marker is present (repair after a sustained publish outage). One boot, then unset.
 LATEST_KV_FORCE_BOOTSTRAP: false
