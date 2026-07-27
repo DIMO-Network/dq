@@ -68,8 +68,12 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 	conds = append(conds, perSignal)
 	args = append(args, perSignalArgs...)
 
+	// The requested names go INSIDE the dedup subquery as well as into the join
+	// (aggNames / LakeSignalsDeduped): the join alone cannot prune the scan or
+	// shrink the dedup window's input.
+	names := aggNames(aggArgs.FloatArgs, aggArgs.StringArgs, aggArgs.LocationArgs)
 	inner := "SELECT " + signalSrcColumns +
-		" FROM " + LakeSignalsDeduped(subject, srcCond) + " AS s JOIN " + aggValuesTable(aggArgs.FloatArgs, aggArgs.StringArgs, aggArgs.LocationArgs) +
+		" FROM " + LakeSignalsDeduped(subject, srcCond, names...) + " AS s JOIN " + aggValuesTable(aggArgs.FloatArgs, aggArgs.StringArgs, aggArgs.LocationArgs) +
 		" ON s.name = agg_table.name WHERE " + strings.Join(conds, " AND ")
 
 	originUs := aggArgs.FromTS.UnixMicro()
@@ -135,7 +139,7 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 	// subject_bucket pruning lives inside LakeSignalsDeduped (B1). No source filter
 	// on this path (Item 1: pass "" so the canonical dedup is unchanged).
 	inner := "SELECT " + segmentIndexCaseSQL("s.timestamp", ranges) + " AS seg_idx, " + signalSrcColumns +
-		" FROM " + LakeSignalsDeduped(subject, "") + " AS s JOIN " + aggValuesTable(floatArgs, nil, locationArgs) +
+		" FROM " + LakeSignalsDeduped(subject, "", aggNames(floatArgs, nil, locationArgs)...) + " AS s JOIN " + aggValuesTable(floatArgs, nil, locationArgs) +
 		" ON s.name = agg_table.name" +
 		" WHERE s.subject = ?" +
 		" AND s.timestamp >= " + tsMicroLiteral(globalFrom) +
@@ -243,6 +247,24 @@ func aggValuesTable(floatArgs []model.FloatSignalArgs, stringArgs []model.String
 		entries = append(entries, fmt.Sprintf("(%d, %d, %s)", qtypes.LocType, i, sqlString(a.Name)))
 	}
 	return "(VALUES " + strings.Join(entries, ", ") + ") AS agg_table(signal_type, signal_index, name)"
+}
+
+// aggNames is the set of signal names aggValuesTable joins on, in the same
+// order. It feeds LakeSignalsDeduped's name restriction, so the two MUST stay in
+// lockstep: a name in the join but missing here would be filtered out before the
+// join ever saw it and its aggregation would silently return no rows.
+func aggNames(floatArgs []model.FloatSignalArgs, stringArgs []model.StringSignalArgs, locationArgs []model.LocationSignalArgs) []string {
+	names := make([]string, 0, len(floatArgs)+len(stringArgs)+len(locationArgs))
+	for _, a := range floatArgs {
+		names = append(names, a.Name)
+	}
+	for _, a := range stringArgs {
+		names = append(names, a.Name)
+	}
+	for _, a := range locationArgs {
+		names = append(names, a.Name)
+	}
+	return names
 }
 
 // perSignalFilterSQL builds the per-signal value-filter block:
