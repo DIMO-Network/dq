@@ -15,6 +15,7 @@ import (
 // GetEvents returns events for a subject in [from, to), newest first, over the
 // deduped decoded events in the DuckLake catalog (lake.events).
 func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.Time, filter *model.EventFilter) ([]*vss.Event, error) {
+	defer observeLakeRead("events", time.Now())
 	events := []*vss.Event{}
 
 	conds := []string{
@@ -63,6 +64,7 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 // GetEventCounts returns event counts by name for a subject in [from, to).
 // If eventNames is non-empty only those names are counted.
 func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*qtypes.EventCount, error) {
+	defer observeLakeRead("eventCounts", time.Now())
 	var result []*qtypes.EventCount
 
 	conds := []string{
@@ -107,6 +109,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 	if len(ranges) == 0 {
 		return nil, nil
 	}
+	defer observeLakeRead("eventCountsRanges", time.Now())
 	globalFrom, globalTo := ranges[0].From, ranges[0].To
 	for _, r := range ranges[1:] {
 		if r.From.Before(globalFrom) {
@@ -155,6 +158,10 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 // subject over all time. It serves from the events_latest rollup (finding #5a) —
 // O(distinct-names) instead of a full-history GROUP BY over lake.events per request —
 // falling back to the base scan until the rollup table exists (getEventSummariesLake).
+// Timing lives in the two leaf paths (eventSummariesRollup / eventSummariesScan)
+// rather than here: an O(distinct-names) rollup read and a full-history scan are
+// different queries, and one request can do both (the empty-rollup fallback
+// below), so a single op here would be a blend of the two plus their sum.
 func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
 	if q.eventsRollupAvailable(ctx) {
 		summaries, err := q.getEventSummariesRollup(ctx, subject)
@@ -181,6 +188,7 @@ func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qty
 // table. This scans every event date partition for the subject (pruned to one bucket
 // via LakeEventsDeduped). It is the pre-rollup path, kept as the fallback.
 func (q *Queries) getEventSummariesLake(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
+	defer observeLakeRead("eventSummariesScan", time.Now())
 	stmt := "SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM " + LakeEventsDeduped(subject) +
 		// All-time scan still prunes to one bucket: subject_bucket lives inside LakeEventsDeduped (B1).
 		" WHERE subject = ? GROUP BY name ORDER BY name"
@@ -191,6 +199,7 @@ func (q *Queries) getEventSummariesLake(ctx context.Context, subject string) ([]
 // row is already the per-(subject,name) count + first/last seen the base GROUP BY
 // would produce, by construction (eventRollupSelectSQL mirrors getEventSummariesLake).
 func (q *Queries) getEventSummariesRollup(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
+	defer observeLakeRead("eventSummariesRollup", time.Now())
 	stmt := fmt.Sprintf(
 		`SELECT name, CAST(count AS UBIGINT) AS count, first_seen, last_seen
 		 FROM lake.events_latest WHERE subject = ? AND %s ORDER BY name`,

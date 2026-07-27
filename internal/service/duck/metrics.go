@@ -85,6 +85,44 @@ func observeLakePath(rollup bool) {
 	lakeLatestServedTotal.WithLabelValues("scan").Inc()
 }
 
+// lakeReadSeconds is the range/fetch counterpart of lakeLatestQuerySeconds:
+// per-op wall-clock for the lake reads the signals-latest cache does NOT
+// serve. These are what remains of dq's read latency after the KV flip
+// (2026-07-27) — the oracle's mirrored-read panel blends them with the
+// now-sub-ms latest reads, so this is the op-level split that says whether a
+// slow read is the shared DuckLake planning floor or genuine scan volume.
+//
+// One op per query shape, never per entry point: an op that blends shapes has
+// a multi-modal histogram, and its quantiles then describe no query anyone
+// actually ran. Ops:
+//
+//   - signalsRange, signalsRanges — the aggregation reads.
+//   - events, eventCounts, eventCountsRanges — the lake.events reads.
+//   - eventSummariesRollup, eventSummariesScan — the O(distinct-names) rollup
+//     read and the full-history scan. Split because one request can do both:
+//     an empty rollup falls back to the scan, so a scan observation appearing
+//     at all is itself the signal that events_latest is missing or unpopulated.
+//   - fetchIndexSearch, fetchLatestIndex — bounded index scan vs LIMIT 1. Same
+//     projection, different shape.
+//   - fetchByID, fetchByIDBatch — single point lookup vs a chunked IN-list of
+//     up to maxLakeQueryLimit ids.
+//   - fetchTypeSummary — the per-type aggregate.
+//   - fetchPayload — per-event S3 blob resolution, the only op here whose cost
+//     is off-lake.
+var lakeReadSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "dq_lake_read_seconds",
+	Help:    "Wall-clock of non-latest lake reads by op (range aggregations, event queries, cloudevent fetch scans and payload resolution).",
+	Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
+}, []string{"op"})
+
+// observeLakeRead records one non-latest lake read. Call deferred with
+// time.Now() evaluated at the start:
+//
+//	defer observeLakeRead("signalsRange", time.Now())
+func observeLakeRead(op string, start time.Time) {
+	lakeReadSeconds.WithLabelValues(op).Observe(time.Since(start).Seconds())
+}
+
 // kvReadTotal counts signals-latest cache reads by outcome. In serve mode
 // every non-hit outcome is a rollup fallback, so a rising miss/error/version
 // rate under KVReadServe means the cache is silently degrading — the read-side
