@@ -90,11 +90,25 @@ func observeLakePath(rollup bool) {
 // serve. These are what remains of dq's read latency after the KV flip
 // (2026-07-27) — the oracle's mirrored-read panel blends them with the
 // now-sub-ms latest reads, so this is the op-level split that says whether a
-// slow read is the shared DuckLake planning floor or genuine scan volume. Ops:
-// signalsRange/signalsRanges (aggregations), events/eventCounts/
-// eventCountsRanges/eventSummaries, fetchScan (the raw_events scan every
-// cloudevent list/get shares), fetchTypeSummary, and fetchPayload (per-event
-// S3 blob resolution — the only op here whose cost is off-lake).
+// slow read is the shared DuckLake planning floor or genuine scan volume.
+//
+// One op per query shape, never per entry point: an op that blends shapes has
+// a multi-modal histogram, and its quantiles then describe no query anyone
+// actually ran. Ops:
+//
+//   - signalsRange, signalsRanges — the aggregation reads.
+//   - events, eventCounts, eventCountsRanges — the lake.events reads.
+//   - eventSummariesRollup, eventSummariesScan — the O(distinct-names) rollup
+//     read and the full-history scan. Split because one request can do both:
+//     an empty rollup falls back to the scan, so a scan observation appearing
+//     at all is itself the signal that events_latest is missing or unpopulated.
+//   - fetchIndexSearch, fetchLatestIndex — bounded index scan vs LIMIT 1. Same
+//     projection, different shape.
+//   - fetchByID, fetchByIDBatch — single point lookup vs a chunked IN-list of
+//     up to maxLakeQueryLimit ids.
+//   - fetchTypeSummary — the per-type aggregate.
+//   - fetchPayload — per-event S3 blob resolution, the only op here whose cost
+//     is off-lake.
 var lakeReadSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "dq_lake_read_seconds",
 	Help:    "Wall-clock of non-latest lake reads by op (range aggregations, event queries, cloudevent fetch scans and payload resolution).",

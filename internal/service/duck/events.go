@@ -158,8 +158,11 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 // subject over all time. It serves from the events_latest rollup (finding #5a) —
 // O(distinct-names) instead of a full-history GROUP BY over lake.events per request —
 // falling back to the base scan until the rollup table exists (getEventSummariesLake).
+// Timing lives in the two leaf paths (eventSummariesRollup / eventSummariesScan)
+// rather than here: an O(distinct-names) rollup read and a full-history scan are
+// different queries, and one request can do both (the empty-rollup fallback
+// below), so a single op here would be a blend of the two plus their sum.
 func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
-	defer observeLakeRead("eventSummaries", time.Now())
 	if q.eventsRollupAvailable(ctx) {
 		summaries, err := q.getEventSummariesRollup(ctx, subject)
 		if err != nil {
@@ -185,6 +188,7 @@ func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qty
 // table. This scans every event date partition for the subject (pruned to one bucket
 // via LakeEventsDeduped). It is the pre-rollup path, kept as the fallback.
 func (q *Queries) getEventSummariesLake(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
+	defer observeLakeRead("eventSummariesScan", time.Now())
 	stmt := "SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM " + LakeEventsDeduped(subject) +
 		// All-time scan still prunes to one bucket: subject_bucket lives inside LakeEventsDeduped (B1).
 		" WHERE subject = ? GROUP BY name ORDER BY name"
@@ -195,6 +199,7 @@ func (q *Queries) getEventSummariesLake(ctx context.Context, subject string) ([]
 // row is already the per-(subject,name) count + first/last seen the base GROUP BY
 // would produce, by construction (eventRollupSelectSQL mirrors getEventSummariesLake).
 func (q *Queries) getEventSummariesRollup(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
+	defer observeLakeRead("eventSummariesRollup", time.Now())
 	stmt := fmt.Sprintf(
 		`SELECT name, CAST(count AS UBIGINT) AS count, first_seen, last_seen
 		 FROM lake.events_latest WHERE subject = ? AND %s ORDER BY name`,

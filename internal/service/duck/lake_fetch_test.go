@@ -459,7 +459,7 @@ func TestQueryLakeRaw_BeforeOnlyAnchorsLookbackFloor(t *testing.T) {
 
 	// Upper bound just after the event; no subject, no ids → only the default
 	// window guard applies. The floor must follow Before so the event is in range.
-	evs, err := lsvc.queryLakeRaw(ctx, RawFilter{Before: old.Add(time.Hour), ExcludeVoided: true}, 10)
+	evs, err := lsvc.queryLakeRaw(ctx, RawFilter{Before: old.Add(time.Hour), ExcludeVoided: true}, 10, "fetchIndexSearch")
 	require.NoError(t, err)
 	require.Len(t, evs, 1, "event before the requested upper bound must be returned, not clamped out")
 	assert.Equal(t, "old-1", evs[0].ID)

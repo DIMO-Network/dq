@@ -108,15 +108,22 @@ var _ eventrepo.EventService = (*LakeEventService)(nil)
 // and events referenced by a tombstone are excluded. ORDER BY direction:
 // DESC (newest-first) by default, ASC
 // (oldest-first) when filter.TimestampAsc is true.
-func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, limit int) ([]cloudevent.StoredEvent, error) {
-	return l.queryLakeRawCols(ctx, filter, limit, RawEventColumns)
+func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, limit int, op string) ([]cloudevent.StoredEvent, error) {
+	return l.queryLakeRawCols(ctx, filter, limit, RawEventColumns, op)
 }
 
 // queryLakeRawCols is queryLakeRaw with an explicit projection: index lookups
 // pass rawEventIndexColumns so payload column chunks are never read (H8);
 // payload fetches (by-id point lookups) pass RawEventColumns.
-func (l *LakeEventService) queryLakeRawCols(ctx context.Context, filter RawFilter, limit int, cols string) ([]cloudevent.StoredEvent, error) {
-	defer observeLakeRead("fetchScan", time.Now())
+//
+// op is the caller's dq_lake_read_seconds label. It is passed rather than
+// derived from cols because the projection does not separate the shapes that
+// matter: fetchIndexSearch and fetchLatestIndex share rawEventIndexColumns but
+// one is a bounded scan and the other a LIMIT 1, and blending them (or blending
+// either with the by-id point lookups) produces a multi-modal histogram whose
+// quantiles describe no real query.
+func (l *LakeEventService) queryLakeRawCols(ctx context.Context, filter RawFilter, limit int, cols, op string) ([]cloudevent.StoredEvent, error) {
+	defer observeLakeRead(op, time.Now())
 	// Apply the default lookback only when nothing else narrows the scan: not a
 	// point lookup by id (GetCloudEventFromIndex), and not a subject-scoped
 	// fetch. A subject prunes via raw_events' (subject, time) sort + zone maps to
@@ -192,7 +199,7 @@ func (l *LakeEventService) ListIndexesAdvanced(ctx context.Context, limit int, o
 	if err != nil {
 		return nil, err
 	}
-	evs, err := l.queryLakeRawCols(ctx, f, limit, rawEventIndexColumns)
+	evs, err := l.queryLakeRawCols(ctx, f, limit, rawEventIndexColumns, "fetchIndexSearch")
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +223,7 @@ func (l *LakeEventService) GetLatestIndexAdvanced(ctx context.Context, opts *grp
 	}
 	f.TimestampAsc = false // always newest-first for "get latest"
 
-	evs, err := l.queryLakeRawCols(ctx, f, 1, rawEventIndexColumns)
+	evs, err := l.queryLakeRawCols(ctx, f, 1, rawEventIndexColumns, "fetchLatestIndex")
 	if err != nil {
 		return cloudevent.CloudEvent[eventrepo.ObjectInfo]{}, err
 	}
@@ -299,7 +306,7 @@ func (l *LakeEventService) GetCloudEventFromIndex(ctx context.Context, index *cl
 		Subject:       index.Subject,
 		IDs:           []string{index.ID},
 		ExcludeVoided: true,
-	}, 1)
+	}, 1, "fetchByID")
 	if err != nil {
 		return cloudevent.RawEvent{}, err
 	}
@@ -410,7 +417,7 @@ func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, index
 		// LIMIT.
 		for start := 0; start < len(ids); start += maxLakeQueryLimit {
 			batch := ids[start:min(start+maxLakeQueryLimit, len(ids))]
-			evs, err := l.queryLakeRaw(ctx, RawFilter{Subject: subject, IDs: batch, ExcludeVoided: true}, len(batch))
+			evs, err := l.queryLakeRaw(ctx, RawFilter{Subject: subject, IDs: batch, ExcludeVoided: true}, len(batch), "fetchByIDBatch")
 			if err != nil {
 				return nil, err
 			}
