@@ -15,6 +15,7 @@ import (
 // GetEvents returns events for a subject in [from, to), newest first, over the
 // deduped decoded events in the DuckLake catalog (lake.events).
 func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.Time, filter *model.EventFilter) ([]*vss.Event, error) {
+	defer observeLakeRead("events", time.Now())
 	events := []*vss.Event{}
 
 	conds := []string{
@@ -63,6 +64,7 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 // GetEventCounts returns event counts by name for a subject in [from, to).
 // If eventNames is non-empty only those names are counted.
 func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to time.Time, eventNames []string) ([]*qtypes.EventCount, error) {
+	defer observeLakeRead("eventCounts", time.Now())
 	var result []*qtypes.EventCount
 
 	conds := []string{
@@ -107,6 +109,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 	if len(ranges) == 0 {
 		return nil, nil
 	}
+	defer observeLakeRead("eventCountsRanges", time.Now())
 	globalFrom, globalTo := ranges[0].From, ranges[0].To
 	for _, r := range ranges[1:] {
 		if r.From.Before(globalFrom) {
@@ -156,6 +159,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 // O(distinct-names) instead of a full-history GROUP BY over lake.events per request —
 // falling back to the base scan until the rollup table exists (getEventSummariesLake).
 func (q *Queries) GetEventSummaries(ctx context.Context, subject string) ([]*qtypes.EventSummary, error) {
+	defer observeLakeRead("eventSummaries", time.Now())
 	if q.eventsRollupAvailable(ctx) {
 		summaries, err := q.getEventSummariesRollup(ctx, subject)
 		if err != nil {

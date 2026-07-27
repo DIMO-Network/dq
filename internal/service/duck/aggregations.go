@@ -43,6 +43,9 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 	if aggArgs.Interval <= 0 {
 		return nil, errors.New("aggregation interval must be positive")
 	}
+	// After the arg guards: only observations that reach the lake belong in the
+	// histogram (an empty-arg or invalid-interval return is a validation no-op).
+	defer observeLakeRead("signalsRange", time.Now())
 
 	signals := []*qtypes.AggSignal{}
 
@@ -125,6 +128,7 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 	if len(floatArgs) == 0 && len(locationArgs) == 0 {
 		return []*qtypes.AggSignalForRange{}, nil
 	}
+	defer observeLakeRead("signalsRanges", time.Now())
 
 	result := []*qtypes.AggSignalForRange{}
 

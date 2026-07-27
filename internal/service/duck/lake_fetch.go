@@ -116,6 +116,7 @@ func (l *LakeEventService) queryLakeRaw(ctx context.Context, filter RawFilter, l
 // pass rawEventIndexColumns so payload column chunks are never read (H8);
 // payload fetches (by-id point lookups) pass RawEventColumns.
 func (l *LakeEventService) queryLakeRawCols(ctx context.Context, filter RawFilter, limit int, cols string) ([]cloudevent.StoredEvent, error) {
+	defer observeLakeRead("fetchScan", time.Now())
 	// Apply the default lookback only when nothing else narrows the scan: not a
 	// point lookup by id (GetCloudEventFromIndex), and not a subject-scoped
 	// fetch. A subject prunes via raw_events' (subject, time) sort + zone maps to
@@ -249,6 +250,7 @@ func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Contex
 	if err != nil {
 		return nil, err
 	}
+	defer observeLakeRead("fetchTypeSummary", time.Now())
 	// Build base WHERE with unqualified columns for the aggregate query.
 	where, args := whereClauseQ(f, "")
 	// Dedup redelivered duplicates (the same second-precision key the fetch path uses)
@@ -328,6 +330,11 @@ func (l *LakeEventService) resolvePayload(ctx context.Context, ev cloudevent.Sto
 		}
 		return raw, nil // no blob reference: genuinely empty payload
 	}
+	// Timed from here, not from function entry: the two returns above do no S3
+	// work, and an inline payload is the common case — counting those zeros
+	// would pin fetchPayload's p50 at ~0 and hide the blob-resolution cost this
+	// op exists to measure.
+	defer observeLakeRead("fetchPayload", time.Now())
 	if l.getter == nil {
 		return cloudevent.RawEvent{}, fmt.Errorf("blob payload %s requires an object store but none is configured", ev.DataIndexKey)
 	}

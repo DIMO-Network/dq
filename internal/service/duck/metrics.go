@@ -85,6 +85,30 @@ func observeLakePath(rollup bool) {
 	lakeLatestServedTotal.WithLabelValues("scan").Inc()
 }
 
+// lakeReadSeconds is the range/fetch counterpart of lakeLatestQuerySeconds:
+// per-op wall-clock for the lake reads the signals-latest cache does NOT
+// serve. These are what remains of dq's read latency after the KV flip
+// (2026-07-27) — the oracle's mirrored-read panel blends them with the
+// now-sub-ms latest reads, so this is the op-level split that says whether a
+// slow read is the shared DuckLake planning floor or genuine scan volume. Ops:
+// signalsRange/signalsRanges (aggregations), events/eventCounts/
+// eventCountsRanges/eventSummaries, fetchScan (the raw_events scan every
+// cloudevent list/get shares), fetchTypeSummary, and fetchPayload (per-event
+// S3 blob resolution — the only op here whose cost is off-lake).
+var lakeReadSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "dq_lake_read_seconds",
+	Help:    "Wall-clock of non-latest lake reads by op (range aggregations, event queries, cloudevent fetch scans and payload resolution).",
+	Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
+}, []string{"op"})
+
+// observeLakeRead records one non-latest lake read. Call deferred with
+// time.Now() evaluated at the start:
+//
+//	defer observeLakeRead("signalsRange", time.Now())
+func observeLakeRead(op string, start time.Time) {
+	lakeReadSeconds.WithLabelValues(op).Observe(time.Since(start).Seconds())
+}
+
 // kvReadTotal counts signals-latest cache reads by outcome. In serve mode
 // every non-hit outcome is a rollup fallback, so a rising miss/error/version
 // rate under KVReadServe means the cache is silently degrading — the read-side
