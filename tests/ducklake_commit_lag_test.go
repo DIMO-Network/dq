@@ -5,16 +5,18 @@
 // node it read 11–13h through every business day while decode ran seconds behind,
 // so the alert was permanently firing on a healthy pipeline.
 //
-// Two things here can only be caught against a real lake, and both would
-// otherwise fail SILENTLY (oldestPendingCommit's error is logged, never fatal, so
-// decode is unaffected by a broken metric query):
+// Two things here can only be caught against a real lake:
 //
-//   - the column name in `SELECT min(snapshot_time) FROM lake.snapshots()`
+//   - the snapshot_time column and the FILTER aggregate in snapshotState's query
 //   - the timezone of what it returns — a naive timestamp read as local time
-//     would make time.Since() land hours off, or negative
+//     would make the age land hours off, or negative
 //
-// A "> 0 while behind" assertion catches all of it: a failed query leaves the
-// gauge untouched at 0, and a tz misread makes it negative.
+// Both matter more since commit lag was folded into the head read: that query is
+// on the decode path, so a mistake in it fails every pass rather than quietly
+// skipping a metric. Cheap to get right, expensive to ship wrong — hence a real
+// lake rather than a stub. The "> 0 while behind" assertion covers both: a
+// timezone misread comes back negative, and a wrong column fails the query
+// outright.
 package tests
 
 import (

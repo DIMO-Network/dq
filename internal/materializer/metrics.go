@@ -227,10 +227,17 @@ func observeLakeLagAt(oldest time.Time) {
 // this is the distribution that min throws away. Zero timestamps (a producer that
 // never set one) are skipped rather than recorded as a 56-year-old event.
 func observeEventAge(ts time.Time) {
+	observeEventAgeAt(time.Now(), ts)
+}
+
+// observeEventAgeAt is observeEventAge against a caller-supplied "now", so a decode
+// window can take one clock reading for the whole batch instead of one per row (the
+// clock read is about half the cost of the observation).
+func observeEventAgeAt(now, ts time.Time) {
 	if ts.IsZero() {
 		return
 	}
-	eventAgeSeconds.Observe(time.Since(ts).Seconds())
+	eventAgeSeconds.Observe(now.Sub(ts).Seconds())
 }
 
 // observeCommitLag sets the decode-position gauge from the catalog commit time of
