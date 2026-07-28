@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -74,12 +75,49 @@ const signalDedupQualify = `QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, nam
 // one-value-per-instant policy unchanged). CAUTION at call sites: this marker is
 // in the FROM subquery, so in SQL text order it precedes every outer `?` — its
 // bind arg must be appended FIRST.
-func LakeSignalsDeduped(subject, srcCond string) string {
+//
+// names is an OPTIONAL restriction to the requested signal names (empty = every
+// name, the previous behaviour). Callers that already know which names they want
+// — the aggregation paths, which then INNER JOIN agg_table ON s.name — should
+// pass them: a join is not a filter, so the name restriction cannot reach the
+// scan on its own and the dedup window would otherwise sort every signal the
+// vehicle ever reported just to throw all but the requested few away (B1 again,
+// for `name`). It is safe inside for the same reason subject_bucket is: `name`
+// is a dedup PARTITION BY column, so restricting the name set keeps every
+// surviving partition whole and cannot change which row wins one — and the
+// partitions it removes are exactly the ones the outer join would have dropped.
+// Names are INLINED as literals (like aggValuesTable's), deliberately NOT bound:
+// bind markers here would land ahead of every outer `?` and re-open the
+// arg-ordering trap documented above.
+func LakeSignalsDeduped(subject, srcCond string, names ...string) string {
 	pred := subjectBucketPredicate("", subject)
 	if srcCond != "" {
 		pred += " AND " + srcCond
 	}
+	if nameCond := signalNameInCond("name", names); nameCond != "" {
+		pred += " AND " + nameCond
+	}
 	return `(SELECT * FROM lake.signals WHERE ` + pred + ` ` + signalDedupQualify + `)`
+}
+
+// signalNameInCond renders `col IN (...)` over the distinct names, or "" for an
+// empty set (no restriction). Names are deduplicated and sorted so the same
+// request always renders the same SQL text.
+func signalNameInCond(col string, names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	seen := make(map[string]struct{}, len(names))
+	lits := make([]string, 0, len(names))
+	for _, n := range names {
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		lits = append(lits, sqlString(n))
+	}
+	sort.Strings(lits)
+	return col + " IN (" + strings.Join(lits, ", ") + ")"
 }
 
 // lakeNonZeroLoc is the on-the-fly (0,0)-exclusion computed over the base
