@@ -16,6 +16,7 @@ import (
 	"github.com/DIMO-Network/dq/internal/materializer"
 	"github.com/DIMO-Network/dq/internal/service/duck"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,4 +118,71 @@ func TestLatestKV_ShadowServesRollupResult(t *testing.T) {
 	}
 	require.NotNil(t, found, "shadow mode serves the rollup result")
 	assert.Equal(t, 40.0, found.Data.ValueNumber)
+}
+
+// TestLatestKV_FallbackTimeIsCharged pins the fix for a hole in the read-latency
+// histogram: path="kv" was observed only on a cache HIT, and the rollup timer
+// starts after the KV attempt, so a read that consulted the cache and did not get
+// an answer had its cache time charged to nothing at all. The failure mode that
+// hides is the one that matters — a NATS stall burning up to kvReadTimeout (1.5s)
+// before the fallback even begins would leave the panel showing a healthy
+// sub-millisecond kv path and a normal rollup, with the seconds the user actually
+// waited invisible. A miss must now land under path="kv_fallback".
+func TestLatestKV_FallbackTimeIsCharged(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeService(t, t.TempDir())
+	db := svc.DB()
+	store := newLatestKVStore(t, "read-fallback")
+
+	// One decoded event so the rollup table the fallback lands on exists.
+	seeded := fmt.Sprintf("did:erc721:137:%s:22", vehicleNFT.Hex())
+	ts := time.Now().UTC().AddDate(0, 0, -1).Truncate(time.Hour)
+	seedRawStatus(t, db, "kvf-1", seeded, ts, speedAt(ts, 55))
+	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
+	require.NoError(t, err)
+	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, zerolog.Nop()))
+	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
+		WithDuckLake(mat)
+	require.Equal(t, 1, drainRunner(t, ctx, runner))
+
+	serveQ := duck.NewLakeQueries(svc).WithLatestKV(store, duck.KVReadServe, zerolog.Nop())
+
+	before := latestQueryCount(t, "kv_fallback")
+
+	// A subject the cache has never seen: the KV read runs, misses, and the query
+	// is answered from the rollup path.
+	missing := fmt.Sprintf("did:erc721:137:%s:909", vehicleNFT.Hex())
+	_, err = serveQ.GetLatestSignals(ctx, missing, latestArgsFor("speed"))
+	require.NoError(t, err)
+
+	assert.Equal(t, before+1, latestQueryCount(t, "kv_fallback"),
+		"the non-serving cache read must be timed under kv_fallback, not dropped on the floor")
+}
+
+// latestQueryCount reads the observation count of
+// dq_lake_latest_query_seconds{path=<path>,op="signalsLatest"}.
+func latestQueryCount(t *testing.T, path string) uint64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != "dq_lake_latest_query_seconds" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			var gotPath, gotOp string
+			for _, l := range m.GetLabel() {
+				switch l.GetName() {
+				case "path":
+					gotPath = l.GetValue()
+				case "op":
+					gotOp = l.GetValue()
+				}
+			}
+			if gotPath == path && gotOp == "signalsLatest" {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0 // series not created yet — no observations
 }

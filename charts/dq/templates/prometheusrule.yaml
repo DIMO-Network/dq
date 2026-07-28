@@ -54,16 +54,30 @@ spec:
     - name: dq-materializer
       rules:
         - alert: DQMaterializerDecodeLag
-          expr: max by (type) (dq_materializer_lag_seconds) > 300
-          for: 10m
+          # Keyed off commit lag (decode position), NOT dq_materializer_lag_seconds.
+          # That gauge is now − min(event time) over the batch — PRODUCER lateness,
+          # and a min at that, so a single hourly-reporting device sets it for ~600
+          # rows. On the GCP node it sat at 11–13h through every business day while
+          # decode ran seconds behind, so `> 300` fired more or less permanently
+          # (measured 2026-07-28: 97.7% of rows arrive within 5min; the 0.8% that
+          # are 1–6h old come from 4 of 41 subjects). Same shape as
+          # DinSnapshotAgeNearRetention: an alert true by construction teaches the
+          # channel to be ignored. Threshold is ~2x the observed daily peak
+          # (~50min) and still 36x inside LAKE_SNAPSHOT_RETENTION (72h).
+          expr: max(dq_materializer_commit_lag_seconds) > 7200
+          for: 15m
           labels:
             severity: warning
           annotations:
-            summary: materializer decode lag over 5m for 10m
+            summary: materializer decode position is over 2h behind the catalog
             description: >-
-              Raw cloudevents are arriving faster than the materializer
-              decodes them ({{ "{{ $labels.type }}" }}). Queries serve stale
-              data; din's snapshot expiry is also held back by this consumer floor.
+              The oldest un-decoded DuckLake snapshot has been waiting over 2h —
+              raw events are landing faster than the materializer drains them, so
+              queries serve stale data and din's snapshot expiry is held back by
+              this consumer floor. The clock runs against LAKE_SNAPSHOT_RETENTION
+              (72h), past which the cursor resets and un-decoded data is skipped
+              permanently. For how late the PRODUCERS are (a different question),
+              see dq_materializer_event_age_seconds.
         - alert: DQMaterializerStalled
           # Label algebra matters here (H1): bare `and` intersects on ALL labels,
           # and rate() over a differently-labeled counter never matches an
@@ -71,7 +85,12 @@ spec:
           # are aggregated to the empty label set and joined `and on()`. The
           # `or vector(0)` keeps the left side alive when the counter has gone
           # stale/absent-but-scraped (a pod that stopped committing entirely).
-          expr: (sum(rate(dq_materializer_batches_total[30m])) or vector(0)) == 0 and on() max(dq_materializer_lag_seconds) > 0
+          # "Pending work" is decode position, not producer lateness: gating on
+          # dq_materializer_lag_seconds > 0 tied this alert to whether some device
+          # was late rather than to whether anything is waiting to be decoded (and
+          # it read 0 while genuinely behind whenever the last batch happened to be
+          # all-fresh). commit_lag > 0 is the direct statement.
+          expr: (sum(rate(dq_materializer_batches_total[30m])) or vector(0)) == 0 and on() max(dq_materializer_commit_lag_seconds) > 0
           for: 30m
           labels:
             severity: critical
@@ -116,8 +135,11 @@ spec:
         # backlog: head is the catalog-global max snapshot id, which includes
         # this decoder's own signals/events/rollup snapshots and din's
         # maintenance snapshots, so the value stays non-zero when fully caught
-        # up — use it for trend/growth, and dq_materializer_lag_seconds for the
-        # decode-lag SLO. Since materializer metrics are registered only in the
+        # up — use it for trend/growth, and dq_materializer_commit_lag_seconds
+        # for the decode-lag SLO (that one zeroes on the caught-up branch and is
+        # denominated in seconds, so it is comparable to retention; a snapshot
+        # COUNT is not — 176 snapshots was ~50min here). Since materializer
+        # metrics are registered only in the
         # materializer process (H2), this record is empty (not a misleading 0)
         # while the materializer is down.
         - record: dq:pipeline_snapshot_backlog

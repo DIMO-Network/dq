@@ -45,6 +45,16 @@ func Open(ctx context.Context, url, bucket string, log zerolog.Logger) (*Store, 
 	conn, err := nats.Connect(url,
 		nats.Name("dq-latest-kv"),
 		nats.MaxReconnects(-1),
+		// Without these the retry loop is completely silent: a reconnect (or a long
+		// disconnect) surfaces only as query latency on the serve path, with nothing
+		// in the logs to correlate against. Reconnects should be rare — and when they
+		// are not, that is exactly the thing worth knowing.
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			log.Warn().Err(err).Msg("latest-kv NATS connection lost; latest reads fall back to the rollup until it returns")
+		}),
+		nats.ReconnectHandler(func(c *nats.Conn) {
+			log.Info().Str("url", c.ConnectedUrl()).Msg("latest-kv NATS reconnected")
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NATS at %s: %w", url, err)

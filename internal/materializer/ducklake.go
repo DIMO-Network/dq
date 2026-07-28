@@ -543,9 +543,19 @@ func (m *DuckLakeMaterializer) RunOnce(ctx context.Context, dec eventDecoder) (i
 	cursorSnapshotID.Set(float64(cur))
 	headSnapshotID.Set(float64(head))
 	if head <= cur {
-		observeLakeLag(nil)           // caught up: no decode lag
+		observeLakeLag(nil)           // caught up: no straggler to report
+		observeCommitLag(time.Time{}) // …and nothing un-decoded, so no decode lag either
 		m.reportProgressNow(ctx, cur) // flush any throttled tail (no-op if already reported)
 		return 0, nil
+	}
+	// Decode position, on the same clock as LAKE_SNAPSHOT_RETENTION. Read every
+	// pass (not only on commit) so a decoder that is falling behind while still
+	// committing is visible before it approaches the retention horizon.
+	if oldestPending, cerr := m.oldestPendingCommit(ctx, cur); cerr != nil {
+		// Never fail a pass for a metric: the decode itself is unaffected.
+		m.log.Debug().Err(cerr).Msg("could not read the oldest un-decoded snapshot time; leaving commit lag unchanged")
+	} else {
+		observeCommitLag(oldestPending)
 	}
 
 	// Drain the (cur, head] backlog in memory-bounded snapshot-span chunks so a
@@ -636,7 +646,15 @@ func (m *DuckLakeMaterializer) processChunk(ctx context.Context, cur, head int64
 	// via this decoder's own writes. Don't burn a cursor-advance — the next pass
 	// re-reads the empty range cheaply and moves once real data arrives.
 	if to >= head {
-		observeLakeLag(nil)           // no pending raw events: no decode lag
+		observeLakeLag(nil) // no pending raw events: no decode lag
+		// …and no decode lag either. This zero is load-bearing: when caught up the
+		// cursor deliberately sits BELOW head (head counts this decoder's own
+		// signals/events/rollup snapshots and din's maintenance snapshots, which
+		// never advance it), so RunOnce's every-pass commit-lag query sees those
+		// own snapshots as "un-decoded" and would otherwise report their age —
+		// growing all night on an idle node, which is the exact false positive
+		// this metric exists to replace.
+		observeCommitLag(time.Time{})
 		m.reportProgressNow(ctx, cur) // flush the drained position once (no-op if unchanged)
 		return 0, cur, true, nil
 	}
@@ -720,6 +738,24 @@ func (m *DuckLakeMaterializer) oldestSnapshot(ctx context.Context) (int64, error
 		return 0, nil
 	}
 	return oldest.Int64, nil
+}
+
+// oldestPendingCommit returns the catalog commit time of the oldest snapshot the
+// decoder has not consumed (the first one after cur). A zero time means there is
+// none — the decoder is caught up. This is the decode-position clock: unlike the
+// snapshot-id backlog it is directly comparable to LAKE_SNAPSHOT_RETENTION, and
+// unlike dq_materializer_lag_seconds it says nothing about how late the producers
+// are.
+func (m *DuckLakeMaterializer) oldestPendingCommit(ctx context.Context, cur int64) (time.Time, error) {
+	var t sql.NullTime
+	if err := m.db.QueryRowContext(ctx,
+		"SELECT min(snapshot_time) FROM lake.snapshots() WHERE snapshot_id > ?", cur).Scan(&t); err != nil {
+		return time.Time{}, fmt.Errorf("reading oldest un-decoded snapshot time: %w", err)
+	}
+	if !t.Valid {
+		return time.Time{}, nil
+	}
+	return t.Time, nil
 }
 
 // consumerName is the identity dq reports under in meta.din_consumer_progress.
@@ -1002,6 +1038,7 @@ func (m *DuckLakeMaterializer) nextWindow(ctx context.Context, from, to int64, a
 		winBytes += rawResidentBytes(resolved)
 		for i := range resolved {
 			c.oldest = earlier(c.oldest, resolved[i].Time)
+			observeEventAge(resolved[i].Time) // the distribution behind c.oldest's min
 		}
 		decodeStart := time.Now()
 		d := dec.decodeEvents(ctx, resolved)

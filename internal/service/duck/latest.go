@@ -35,7 +35,14 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 			lakeLatestQuerySeconds.WithLabelValues("kv", "signalsLatest").Observe(time.Since(kvStart).Seconds())
 			return signals, nil
 		}
-		// miss/error/version: counted in kvReadTotal; serve from the rollup.
+		// miss/error/version: counted in kvReadTotal; serve from the rollup. Time the
+		// FAILED attempt too, under its own path. Charging it nowhere (the rollup
+		// timer below starts after this block) meant the one case where the cache
+		// hurts — a NATS stall burning up to kvReadTimeout before the fallback even
+		// starts — was the one case this histogram could not see: path="kv" records
+		// hits only, so the panel went quiet exactly when reads got slowest. A
+		// request's true cost is kv_fallback + rollup.
+		lakeLatestQuerySeconds.WithLabelValues("kv_fallback", "signalsLatest").Observe(time.Since(kvStart).Seconds())
 	}
 	observeLakePath(rollup)
 	defer observeLakeQuery(rollup, "signalsLatest", time.Now())
