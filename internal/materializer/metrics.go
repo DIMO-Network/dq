@@ -20,10 +20,34 @@ import (
 // outage (H2). Registration happens in registerMetrics, called from the
 // materializer constructors only.
 var (
+	// lagSeconds is PRODUCER lateness, not decode position: it is now − min(event
+	// time) over the batch, so ONE straggler dictates the value for the whole
+	// batch. On a fleet with a few hourly-reporting devices it sits in the hours
+	// all day while decode is seconds behind (measured 2026-07-28: 97.7% of rows
+	// arrive within 5 min, 0.8% are 1–6h old and come from 4 of 41 subjects).
+	// Alert on commitLagSeconds instead; read this one as data freshness, and
+	// eventAgeSeconds for the distribution it collapses.
 	lagSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "dq_materializer_lag_seconds",
-		Help: "Age of the oldest raw event not yet decoded. Zero when caught up.",
+		Help: "Producer lateness: now - the OLDEST event time in the last decoded batch (a min, so one straggler sets it). Not decode position — see dq_materializer_commit_lag_seconds.",
 	}, []string{"type"})
+	// commitLagSeconds is the honest decode-position lag: how long the oldest
+	// snapshot the decoder has NOT consumed has been sitting in the catalog. It
+	// runs on the same clock as LAKE_SNAPSHOT_RETENTION, so it is the quantity a
+	// decode-lag alert must compare against retention.
+	commitLagSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "dq_materializer_commit_lag_seconds",
+		Help: "Age of the oldest un-decoded DuckLake snapshot (now - its catalog commit time). Zero when caught up. This is decode position; compare against LAKE_SNAPSHOT_RETENTION.",
+	})
+	// eventAgeSeconds is the distribution lagSeconds collapses to its minimum:
+	// per-event producer lateness at decode. Buckets run to the 72h retention
+	// horizon so a genuinely stale backfill is distinguishable from the normal
+	// sub-5-minute mass.
+	eventAgeSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "dq_materializer_event_age_seconds",
+		Help:    "Age of each raw event at decode (now - producer event time). The distribution behind dq_materializer_lag_seconds, which reports only the batch minimum.",
+		Buckets: []float64{1, 5, 15, 60, 300, 900, 3600, 6 * 3600, 24 * 3600, 72 * 3600},
+	})
 	batchesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "dq_materializer_batches_total",
 		Help: "Raw batches committed to the DuckLake catalog.",
@@ -156,7 +180,7 @@ var registerMetricsOnce sync.Once
 func registerMetrics() {
 	registerMetricsOnce.Do(func() {
 		prometheus.MustRegister(
-			lagSeconds, batchesTotal, rowsTotal, errorsTotal,
+			lagSeconds, commitLagSeconds, eventAgeSeconds, batchesTotal, rowsTotal, errorsTotal,
 			pruneErrorsTotal, passErrorsTotal, rollupRefreshSeconds,
 			rollupFlushErrorsTotal, eventRollupRefreshSeconds, eventRollupFlushErrorsTotal,
 			cursorResetsTotal, cursorSnapshotID,
@@ -172,10 +196,10 @@ func registerMetrics() {
 // contract — don't rename the value.)
 const lakeMetricType = "ducklake"
 
-// observeLakeLag sets the decode-lag gauge from the oldest un-decoded event in a
-// DuckLake snapshot delta (now - min(event time)); zero when caught up. This is
-// what makes the DecodeLag / Stalled alerts live in ducklake mode — before
-// CHD-12 the lake path emitted only cursor resets, so those alerts were dead.
+// observeLakeLag sets the producer-lateness gauge from the oldest un-decoded event
+// in a DuckLake snapshot delta (now - min(event time)); zero when caught up.
+// Being a min, it reports the single worst straggler in the batch — see the
+// lagSeconds doc for why alerts must not key off it.
 func observeLakeLag(events []cloudevent.RawEvent) {
 	var oldest time.Time
 	for i := range events {
@@ -196,4 +220,33 @@ func observeLakeLagAt(oldest time.Time) {
 		return
 	}
 	lagSeconds.WithLabelValues(lakeMetricType).Set(time.Since(oldest).Seconds())
+}
+
+// observeEventAge records one raw event's producer lateness at decode. Called per
+// row as the windowed decode pages, next to the running min that feeds lagSeconds —
+// this is the distribution that min throws away. Zero timestamps (a producer that
+// never set one) are skipped rather than recorded as a 56-year-old event.
+func observeEventAge(ts time.Time) {
+	observeEventAgeAt(time.Now(), ts)
+}
+
+// observeEventAgeAt is observeEventAge against a caller-supplied "now", so a decode
+// window can take one clock reading for the whole batch instead of one per row (the
+// clock read is about half the cost of the observation).
+func observeEventAgeAt(now, ts time.Time) {
+	if ts.IsZero() {
+		return
+	}
+	eventAgeSeconds.Observe(now.Sub(ts).Seconds())
+}
+
+// observeCommitLag sets the decode-position gauge from the catalog commit time of
+// the oldest snapshot the decoder has not consumed. A zero time means caught up:
+// there is no un-decoded snapshot, so the lag is zero by definition.
+func observeCommitLag(oldestPending time.Time) {
+	if oldestPending.IsZero() {
+		commitLagSeconds.Set(0)
+		return
+	}
+	commitLagSeconds.Set(time.Since(oldestPending).Seconds())
 }
