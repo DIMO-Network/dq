@@ -36,7 +36,7 @@ func (q *Queries) GetEvents(ctx context.Context, subject string, from, to time.T
 	stmt := "SELECT name, source, timestamp, duration_ns, metadata, CAST(to_json(tags) AS VARCHAR) FROM " + LakeEventsDeduped(subject) +
 		" WHERE " + strings.Join(conds, " AND ") + " ORDER BY timestamp DESC"
 
-	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
+	rows, err := q.svc.queryLake(ctx, "events", stmt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed querying duckdb for events: %w", err)
 	}
@@ -83,7 +83,7 @@ func (q *Queries) GetEventCounts(ctx context.Context, subject string, from, to t
 	stmt := "SELECT name, CAST(count(*) AS BIGINT) AS count FROM " + LakeEventsDeduped(subject) +
 		" WHERE " + strings.Join(conds, " AND ") + " GROUP BY name ORDER BY name"
 
-	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
+	rows, err := q.svc.queryLake(ctx, "eventCounts", stmt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed querying duckdb for event counts: %w", err)
 	}
@@ -135,7 +135,7 @@ func (q *Queries) GetEventCountsForRanges(ctx context.Context, subject string, r
 	stmt := "SELECT CAST(seg_idx AS BIGINT), name, CAST(count(*) AS BIGINT) AS count FROM (" + inner + ")" +
 		" WHERE seg_idx >= 0 GROUP BY seg_idx, name ORDER BY seg_idx, name"
 
-	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
+	rows, err := q.svc.queryLake(ctx, "eventCountsRanges", stmt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed querying duckdb for event counts by range: %w", err)
 	}
@@ -192,7 +192,7 @@ func (q *Queries) getEventSummariesLake(ctx context.Context, subject string) ([]
 	stmt := "SELECT name, CAST(count(*) AS UBIGINT) AS count, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM " + LakeEventsDeduped(subject) +
 		// All-time scan still prunes to one bucket: subject_bucket lives inside LakeEventsDeduped (B1).
 		" WHERE subject = ? GROUP BY name ORDER BY name"
-	return q.scanEventSummaries(ctx, stmt, subject)
+	return q.scanEventSummaries(ctx, "eventSummariesScan", stmt, subject)
 }
 
 // getEventSummariesRollup serves the summaries from lake.events_latest: each stored
@@ -204,15 +204,15 @@ func (q *Queries) getEventSummariesRollup(ctx context.Context, subject string) (
 		`SELECT name, CAST(count AS UBIGINT) AS count, first_seen, last_seen
 		 FROM lake.events_latest WHERE subject = ? AND %s ORDER BY name`,
 		subjectBucketPredicate("", subject))
-	return q.scanEventSummaries(ctx, stmt, subject)
+	return q.scanEventSummaries(ctx, "eventSummariesRollup", stmt, subject)
 }
 
 // scanEventSummaries runs an event-summary query (name, count, first_seen, last_seen)
 // and scans the rows, normalizing timestamps to UTC. The column order is shared by
 // the lake and rollup queries, so it lives in one place.
-func (q *Queries) scanEventSummaries(ctx context.Context, stmt, subject string) ([]*qtypes.EventSummary, error) {
+func (q *Queries) scanEventSummaries(ctx context.Context, op, stmt, subject string) ([]*qtypes.EventSummary, error) {
 	var result []*qtypes.EventSummary
-	rows, err := q.svc.db.QueryContext(ctx, stmt, subject)
+	rows, err := q.svc.queryLake(ctx, op, stmt, subject)
 	if err != nil {
 		return nil, fmt.Errorf("failed querying duckdb for event summaries: %w", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"strings"
+	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
 )
@@ -19,6 +20,11 @@ type Service struct {
 	// poison is the driver-level poison recovery when Config.PoisonRecovery
 	// is set (nil otherwise); kept for tests to observe/override escalation.
 	poison *poisonRecovery
+	// profileReads / slowRead configure the read probe (read_probe.go): whether
+	// lake reads run on a checked-out connection with DuckDB profiling enabled,
+	// and the threshold above which one logs a slow-read line.
+	profileReads bool
+	slowRead     time.Duration
 }
 
 // NewService opens an in-memory DuckDB database and applies the bootstrap
@@ -76,7 +82,7 @@ func NewService(cfg Config) (*Service, error) {
 	}
 	poolStats.track(label, db)
 
-	return &Service{db: db, poison: rec}, nil
+	return &Service{db: db, poison: rec, profileReads: cfg.ProfileReads, slowRead: cfg.SlowReadThreshold}, nil
 }
 
 // DB returns the underlying *sql.DB.
@@ -162,6 +168,16 @@ func bootstrapQueries(cfg Config) []string {
 	// per-connection bootstrap statement (not session-global) for that reason.
 	// Do not remove, and do not rely on TIMESTAMP being zone-less anywhere.
 	queries = append(queries, "SET TimeZone = 'UTC'")
+	if cfg.ProfileReads {
+		// Per-connection because the read probe reads the profiling tree back
+		// off whichever pooled connection ran the query. 'no_output' keeps the
+		// tree in memory for duckdb.GetProfilingInfo instead of writing a file.
+		// The settings list is explicit: the defaults omit OPERATOR_ROWS_SCANNED
+		// and EXTRA_INFO, which are precisely the two the probe reports.
+		queries = append(queries,
+			"PRAGMA enable_profiling = 'no_output'",
+			`PRAGMA custom_profiling_settings = '{"OPERATOR_ROWS_SCANNED":"true","EXTRA_INFO":"true","OPERATOR_NAME":"true","OPERATOR_TIMING":"true"}'`)
+	}
 
 	// extension_directory must be set before INSTALL/LOAD so pre-baked
 	// extensions (see Dockerfile) are found.

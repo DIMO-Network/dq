@@ -27,6 +27,23 @@ func appLogger() zerolog.Logger {
 	return zerolog.Nop()
 }
 
+// parseSlowReadThreshold reads DUCKDB_SLOW_READ_THRESHOLD. An unset or
+// unparseable value yields 0, which duck.Service reads as "use the default" —
+// a typo must not silence the slow-read log, and must not fail startup over a
+// diagnostic knob.
+func parseSlowReadThreshold(v string) time.Duration {
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		l := appLogger()
+		l.Warn().Str("value", v).Msg("invalid DUCKDB_SLOW_READ_THRESHOLD; using the default")
+		return 0
+	}
+	return d
+}
+
 // duckConfigFromSettings maps the app settings into the DuckDB query-engine
 // config, reusing the shared S3/bucket settings.
 func duckConfigFromSettings(settings *config.Settings) duck.Config {
@@ -37,6 +54,8 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		DuckDBExtensionDir:   settings.DuckDBExtensionDir,
 		TempDirectory:        settings.DuckDBTempDirectory,
 		MaxConns:             settings.DuckDBMaxConns,
+		ProfileReads:         settings.DuckDBProfileReads,
+		SlowReadThreshold:    parseSlowReadThreshold(settings.DuckDBSlowReadThreshold),
 		S3Enabled:            !isLocalBucket(bucket),
 		S3AWSRegion:          settings.S3AWSRegion,
 		S3AWSAccessKeyID:     settings.S3AWSAccessKeyID,
