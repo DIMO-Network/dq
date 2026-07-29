@@ -224,10 +224,15 @@ func (s *Service) slowReadThreshold() time.Duration {
 // Under ProfileReads the query runs on a connection checked out for its
 // lifetime so DuckDB's profiling info can be read back against it; otherwise it
 // goes through the pool exactly as before.
+//
+// rowserrcheck is suppressed on both query calls: the linter tracks a *sql.Rows
+// only within the function that opened it, and this function's whole job is to
+// hand it back. Err() is checked by the caller that drains it — every call site
+// already ends its scan loop with `return ..., rows.Err()` or an explicit check.
 func (s *Service) queryLake(ctx context.Context, op, stmt string, args ...any) (*lakeRows, error) {
 	start := time.Now()
 	if !s.profileReads {
-		rows, err := s.db.QueryContext(ctx, stmt, args...)
+		rows, err := s.db.QueryContext(ctx, stmt, args...) //nolint:rowserrcheck // returned to the caller, which checks Err
 		if err != nil {
 			return nil, err
 		}
@@ -238,7 +243,7 @@ func (s *Service) queryLake(ctx context.Context, op, stmt string, args ...any) (
 	if err != nil {
 		return nil, err
 	}
-	rows, err := conn.QueryContext(ctx, stmt, args...)
+	rows, err := conn.QueryContext(ctx, stmt, args...) //nolint:rowserrcheck // returned to the caller, which checks Err
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
