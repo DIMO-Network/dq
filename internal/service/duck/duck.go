@@ -9,6 +9,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
@@ -25,6 +26,9 @@ type Service struct {
 	// and the threshold above which one logs a slow-read line.
 	profileReads bool
 	slowRead     time.Duration
+	// profileBroken latches once DuckDB profiling panics, so the pinned-connection
+	// path is abandoned for the life of the process. See lakeRows.observeProfile.
+	profileBroken atomic.Bool
 }
 
 // NewService opens an in-memory DuckDB database and applies the bootstrap
