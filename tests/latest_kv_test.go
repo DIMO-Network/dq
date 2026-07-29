@@ -62,7 +62,7 @@ func TestLatestKV_PublishedAtDecode_MatchesRollup(t *testing.T) {
 
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
-	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, zerolog.Nop()))
+	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, nil, zerolog.Nop()))
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 2, drainRunner(t, ctx, runner))

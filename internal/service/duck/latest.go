@@ -28,12 +28,21 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 	// nothing-to-do answer.
 	kvEligible := rollup && q.kvStore != nil &&
 		(len(latestArgs.SignalNames) > 0 || len(latestArgs.LocationSignalNames) > 0 || latestArgs.IncludeLastSeen)
+	// shadowNegative survives the KV block so the rollup result below can be
+	// checked against the answer negative-serving WOULD have given.
+	var shadowNegative bool
 	if kvEligible && q.kvMode == KVReadServe {
 		kvStart := time.Now()
-		if signals, ok := q.getLatestSignalsKV(ctx, subject, latestArgs); ok {
+		att := q.attemptLatestSignalsKV(ctx, subject, latestArgs)
+		shadowNegative = att.shadowNegative
+		if att.served {
+			// An authoritative miss is served under path="kv" like any other cache
+			// answer: from the caller's side it IS a cache hit — the same sub-ms
+			// answer off the same Get. The hit/no-data split lives in
+			// dq_lake_latest_kv_read_total, where it belongs.
 			lakeLatestServedTotal.WithLabelValues("kv").Inc()
 			lakeLatestQuerySeconds.WithLabelValues("kv", "signalsLatest").Observe(time.Since(kvStart).Seconds())
-			return signals, nil
+			return att.signals, nil
 		}
 		// miss/error/version: counted in kvReadTotal; serve from the rollup. Time the
 		// FAILED attempt too, under its own path. Charging it nowhere (the rollup
@@ -50,6 +59,9 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 		signals, err := q.getLatestSignalsRollup(ctx, subject, latestArgs)
 		if err == nil && kvEligible && q.kvMode == KVReadShadow {
 			q.shadowCompareLatest(ctx, subject, latestArgs, signals)
+		}
+		if err == nil && shadowNegative {
+			q.observeShadowNegative(subject, signals)
 		}
 		return signals, err
 	}

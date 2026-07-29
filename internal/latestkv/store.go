@@ -36,6 +36,10 @@ type Store struct {
 	conn *nats.Conn
 	kv   jetstream.KeyValue
 	log  zerolog.Logger
+	// bucketTTL is the bucket's configured MaxAge, read once at open. Nonzero
+	// means entries expire, which invalidates the coverage contract's premise
+	// that a missing key proves the subject never had data (see coverage.go).
+	bucketTTL time.Duration
 }
 
 // Open connects to NATS and ensures the bucket exists. The connection retries
@@ -80,7 +84,19 @@ func NewWithConn(ctx context.Context, conn *nats.Conn, bucket string, log zerolo
 	if err != nil {
 		return nil, err
 	}
-	return &Store{conn: conn, kv: kv, log: log.With().Str("component", "latestkv").Logger()}, nil
+	s := &Store{conn: conn, kv: kv, log: log.With().Str("component", "latestkv").Logger()}
+	// Read the TTL once here rather than per read: it is bucket config, it
+	// changes only by operator action, and the coverage watcher needs it to
+	// decide whether negative serving is admissible at all. A status read that
+	// fails leaves it zero — the same as "no TTL" — so this can never be the
+	// reason the cache stops working; the watcher's own staleness check still
+	// gates everything.
+	if status, err := kv.Status(ctx); err != nil {
+		s.log.Warn().Err(err).Msg("could not read KV bucket status; assuming no TTL")
+	} else {
+		s.bucketTTL = status.TTL()
+	}
+	return s, nil
 }
 
 // lookupOrCreateBucket returns the bucket, creating it only when absent —
@@ -182,6 +198,21 @@ func (s *Store) GetEntry(ctx context.Context, subject string) (*Entry, error) {
 	return entry, nil
 }
 
+// DeleteSubject removes a subject's entry. Nothing on the serving or publish
+// path calls it — it exists so a coverage gap can be reproduced deliberately
+// (a lost publish leaves the lake holding a subject the bucket does not), which
+// is the only way to test the false-negative detection that gates
+// LATEST_KV_NEGATIVE=serve. Deleting a live subject's entry costs a rollup
+// fallback until its next reading, and revokes nothing on its own: coverage
+// stays asserted, so do not use this against a bucket in negative-serve mode
+// without forcing a reconcile after.
+func (s *Store) DeleteSubject(ctx context.Context, subject string) error {
+	if err := s.kv.Delete(ctx, KeyForSubject(subject)); err != nil {
+		return fmt.Errorf("kv delete %s: %w", subject, err)
+	}
+	return nil
+}
+
 // getEntry loads and decodes the subject entry; a missing key or an
 // undecodable value (schema damage) yields a fresh entry — the fold+Put then
 // self-heals the key.
@@ -230,6 +261,44 @@ func (s *Store) BootstrapFromRollup(ctx context.Context, db *sql.DB, force bool)
 			return fmt.Errorf("checking bootstrap marker: %w", err)
 		}
 	}
+	subjects, err := s.mergeFromRollup(ctx, db)
+	if err != nil {
+		return err
+	}
+	if _, err := s.kv.Put(ctx, bootstrapMarkerKey, []byte(time.Now().UTC().Format(time.RFC3339))); err != nil {
+		return fmt.Errorf("writing bootstrap marker: %w", err)
+	}
+	bootstrapTimestamp.SetToCurrentTime()
+	s.log.Info().Int("subjects", subjects).Msg("latest-kv bootstrap from lake.signals_latest complete")
+	return nil
+}
+
+// ReconcileFromRollup runs the same merge pass without the marker, as the
+// coverage contract's proof of completeness (coverage.go): after it returns
+// successfully, every subject in lake.signals_latest has a key in the bucket,
+// which is exactly what a reader needs before it may treat a missing key as
+// "this subject has no data".
+//
+// This is the recovery path, NOT a periodic job. lake.signals_latest is
+// PARTITIONED BY (subject_bucket) across 256 buckets, so a full pass opens on
+// the order of 256 parquet files at ~69ms each (dq#40's cost model) — running
+// it on a timer would spend ~18s of S3 round trips per pass, forever, to
+// re-confirm what the live publisher already knows. The heartbeat asserts that
+// for free; this runs only at boot after an unclean exit, or to recover from a
+// publish failure.
+func (s *Store) ReconcileFromRollup(ctx context.Context, db *sql.DB) error {
+	subjects, err := s.mergeFromRollup(ctx, db)
+	if err != nil {
+		return err
+	}
+	s.log.Debug().Int("subjects", subjects).Msg("latest-kv reconcile from lake.signals_latest complete")
+	return nil
+}
+
+// mergeFromRollup folds every lake.signals_latest row into the bucket and
+// returns the number of subjects visited. Merge-only via FoldValue, so it can
+// only advance entries and is safe to run against a live bucket.
+func (s *Store) mergeFromRollup(ctx context.Context, db *sql.DB) (int, error) {
 	start := time.Now()
 	// The rollup is one row per (subject, name) — already the fold's output
 	// shape. ORDER BY subject lets one pass group rows into per-subject
@@ -241,7 +310,7 @@ func (s *Store) BootstrapFromRollup(ctx context.Context, db *sql.DB, force bool)
 		       loc_lat, loc_lon, loc_hdop, loc_heading, coalesce(loc_ts, make_timestamp(0)) AS loc_ts
 		FROM lake.signals_latest ORDER BY subject`)
 	if err != nil {
-		return fmt.Errorf("scanning lake.signals_latest: %w", err)
+		return 0, fmt.Errorf("scanning lake.signals_latest: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
 
@@ -275,11 +344,11 @@ func (s *Store) BootstrapFromRollup(ctx context.Context, db *sql.DB, force bool)
 		var ts, locTS time.Time
 		var num, lat, lon, hdop, heading float64
 		if err := rows.Scan(&subject, &name, &ts, &num, &str, &lat, &lon, &hdop, &heading, &locTS); err != nil {
-			return fmt.Errorf("scanning rollup row: %w", err)
+			return 0, fmt.Errorf("scanning rollup row: %w", err)
 		}
 		if subject != curSubject {
 			if err := flush(); err != nil {
-				return fmt.Errorf("bootstrap subject %s: %w", curSubject, err)
+				return 0, fmt.Errorf("merging subject %s: %w", curSubject, err)
 			}
 			curSubject = subject
 		}
@@ -290,16 +359,12 @@ func (s *Store) BootstrapFromRollup(ctx context.Context, db *sql.DB, force bool)
 		pending[name] = sv
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rollup scan: %w", err)
+		return 0, fmt.Errorf("rollup scan: %w", err)
 	}
 	if err := flush(); err != nil {
-		return fmt.Errorf("bootstrap subject %s: %w", curSubject, err)
+		return 0, fmt.Errorf("merging subject %s: %w", curSubject, err)
 	}
-	if _, err := s.kv.Put(ctx, bootstrapMarkerKey, []byte(time.Now().UTC().Format(time.RFC3339))); err != nil {
-		return fmt.Errorf("writing bootstrap marker: %w", err)
-	}
-	bootstrapTimestamp.SetToCurrentTime()
-	s.log.Info().Int("subjects", subjects).Dur("took", time.Since(start)).
-		Msg("latest-kv bootstrap from lake.signals_latest complete")
-	return nil
+	s.log.Debug().Int("subjects", subjects).Dur("took", time.Since(start)).
+		Msg("latest-kv merge pass over lake.signals_latest complete")
+	return subjects, nil
 }

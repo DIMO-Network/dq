@@ -44,7 +44,7 @@ func TestLatestKV_ServeMatchesRollupAndFallsBack(t *testing.T) {
 
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
-	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, zerolog.Nop()))
+	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, nil, zerolog.Nop()))
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 2, drainRunner(t, ctx, runner))
@@ -102,7 +102,7 @@ func TestLatestKV_ShadowServesRollupResult(t *testing.T) {
 	seedRawStatus(t, db, "kvs-1", subject, t1, speedAt(t1, 40))
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
-	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, zerolog.Nop()))
+	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, nil, zerolog.Nop()))
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 1, drainRunner(t, ctx, runner))
@@ -140,7 +140,7 @@ func TestLatestKV_FallbackTimeIsCharged(t *testing.T) {
 	seedRawStatus(t, db, "kvf-1", seeded, ts, speedAt(ts, 55))
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
-	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, zerolog.Nop()))
+	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, nil, zerolog.Nop()))
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 1, drainRunner(t, ctx, runner))

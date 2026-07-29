@@ -132,6 +132,34 @@ var kvReadTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "signals-latest KV cache reads by outcome (hit|miss|error|version); non-hits fall back to the rollup path.",
 }, []string{"outcome"})
 
+// kvFalseNegativeTotal / kvTrueNegativeTotal are the dark launch for
+// authoritative-miss serving (LATEST_KV_NEGATIVE=shadow, dq#42): of the misses
+// the reader would have answered "no data", how many did the rollup actually
+// have rows for. false_negative must be flat at ZERO before flipping to serve —
+// it is the invariant "every subject in lake.signals_latest has a key in the
+// bucket" failing on real traffic, and each one would be a user-visible wrong
+// answer. The true-negative counter is the denominator; without it a zero
+// numerator could just mean the path never ran.
+var kvFalseNegativeTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "dq_lake_latest_kv_false_negative_total",
+	Help: "Shadow misses the cache would have answered 'no data' for but the rollup had rows for. MUST be zero before LATEST_KV_NEGATIVE=serve.",
+})
+
+var kvTrueNegativeTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "dq_lake_latest_kv_true_negative_total",
+	Help: "Shadow misses the rollup confirmed empty — the denominator for dq_lake_latest_kv_false_negative_total.",
+})
+
+// kvCoverageTrusted is the reader's live view of the writer's coverage
+// assertion: 1 while misses may be answered as "no data", 0 while they fall
+// back to the rollup. Set on each eligible query rather than exported as a
+// GaugeFunc so it reflects what queries actually observed, including a watcher
+// that silently stopped receiving heartbeats.
+var kvCoverageTrusted = promauto.NewGauge(prometheus.GaugeOpts{
+	Name: "dq_lake_latest_kv_coverage_trusted",
+	Help: "1 when this query pod trusts the signals-latest coverage assertion (misses answered as 'no data'), 0 when misses fall back to the rollup.",
+})
+
 // kvShadowTotal classifies shadow-mode comparisons (KVReadShadow): match,
 // kv_newer (the benign pre-commit-fold freshness race), kv_miss (coverage
 // gap), and mismatch — the one class that must stay at zero before flipping
