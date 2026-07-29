@@ -3,8 +3,10 @@ package duck
 import (
 	"database/sql"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/DIMO-Network/dq/internal/latestkv"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -150,15 +152,41 @@ var kvTrueNegativeTotal = promauto.NewCounter(prometheus.CounterOpts{
 	Help: "Shadow misses the rollup confirmed empty — the denominator for dq_lake_latest_kv_false_negative_total.",
 })
 
+// activeCoverageWatcher is the watcher the kvCoverageTrusted GaugeFunc reads.
+// An atomic indirection because the gauge is a package-level singleton while the
+// watcher arrives later, at WithLatestKVNegative time.
+var activeCoverageWatcher atomic.Pointer[latestkv.CoverageWatcher]
+
 // kvCoverageTrusted is the reader's live view of the writer's coverage
-// assertion: 1 while misses may be answered as "no data", 0 while they fall
-// back to the rollup. Set on each eligible query rather than exported as a
-// GaugeFunc so it reflects what queries actually observed, including a watcher
-// that silently stopped receiving heartbeats.
-var kvCoverageTrusted = promauto.NewGauge(prometheus.GaugeOpts{
+// assertion: 1 while a cache miss may be answered as "no data", 0 while misses
+// fall back to the rollup.
+//
+// A GaugeFunc, evaluated at scrape time, NOT a gauge set on each query. It was
+// the latter first, on the reasoning that a per-query write reflects what
+// queries actually observed — but that conflates two very different states into
+// the same 0: "coverage is not trusted" and "no eligible query has run yet". On
+// a node whose load is mirrored from a partner oracle, the second is the normal
+// state for most of the day, so the series carried no information exactly when
+// you most wanted to check it — after a deploy, before traffic. Scrape-time
+// evaluation asks the watcher directly and is correct with zero traffic.
+//
+// Registered lazily (registerCoverageTrusted) rather than by promauto: a fleet
+// with LATEST_KV_NEGATIVE=off would otherwise export a permanent 0, which reads
+// as "untrusted" to any alert on it. Absent is the honest answer there.
+var kvCoverageTrusted = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 	Name: "dq_lake_latest_kv_coverage_trusted",
-	Help: "1 when this query pod trusts the signals-latest coverage assertion (misses answered as 'no data'), 0 when misses fall back to the rollup.",
+	Help: "1 when this query pod trusts the signals-latest coverage assertion (cache misses answered as 'no data'), 0 when misses fall back to the rollup.",
+}, func() float64 {
+	return boolToFloat(activeCoverageWatcher.Load().Trusted())
 })
+
+var registerCoverageTrustedOnce sync.Once
+
+// registerCoverageTrusted exports the trust gauge, once, for a pod that actually
+// has authoritative-miss serving configured.
+func registerCoverageTrusted() {
+	registerCoverageTrustedOnce.Do(func() { prometheus.MustRegister(kvCoverageTrusted) })
+}
 
 // kvShadowTotal classifies shadow-mode comparisons (KVReadShadow): match,
 // kv_newer (the benign pre-commit-fold freshness race), kv_miss (coverage

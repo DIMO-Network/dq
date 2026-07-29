@@ -221,6 +221,8 @@ func (w *CoverageWatcher) consume(ctx context.Context, watcher jetstream.KeyWatc
 }
 
 // Trusted reports whether the reader may answer a KV miss with "no data".
+// Nil-safe: a nil watcher (negative serving unconfigured, or a scrape landing
+// before the watcher is wired) is untrusted, not a panic.
 func (w *CoverageWatcher) Trusted() bool { return w.TrustedAt(time.Now()) }
 
 // TrustedAt is Trusted at an explicit instant (tests pin the clock).

@@ -220,6 +220,50 @@ func TestLatestKVNegative_ShadowServesRollupResult(t *testing.T) {
 		"a subject the lake has and the cache lost must be counted as a false negative")
 }
 
+// TestLatestKVNegative_TrustGaugeReadableWithoutTraffic is the regression this
+// gauge was reshaped for. It used to be written by the read path, so a pod that
+// had served no eligible query reported 0 — indistinguishable from "coverage is
+// not trusted". On a node whose load is mirrored from a partner oracle that is
+// the normal state for most of the day, so the series was uninformative exactly
+// when it was most wanted: after a deploy, before traffic arrives.
+func TestLatestKVNegative_TrustGaugeReadableWithoutTraffic(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeService(t, t.TempDir())
+	store := newLatestKVStore(t, "neg-gauge")
+
+	// Live assertion, and NOT ONE query served against it.
+	negativeQueries(t, svc, store, duck.KVNegativeShadow)
+	assert.Equal(t, 1.0, gaugeValue(t, "dq_lake_latest_kv_coverage_trusted"),
+		"trust must be observable with zero traffic")
+
+	// Let the assertion lapse: the scrape must follow it down without a query
+	// having to notice first.
+	require.NoError(t, store.PutCoverage(ctx, latestkv.Coverage{
+		VerifiedThrough: time.Now().Add(-2 * latestkv.CoverageMaxStaleness),
+	}))
+	require.Eventually(t, func() bool {
+		return gaugeValue(t, "dq_lake_latest_kv_coverage_trusted") == 0
+	}, 5*time.Second, 20*time.Millisecond, "a stale assertion must show as untrusted at scrape time")
+}
+
+// gaugeValue reads a registered gauge's current value by name. Returns -1 when
+// the series is absent, which is distinct from a present 0 — the whole point of
+// registering the trust gauge lazily.
+func gaugeValue(t *testing.T, name string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			return m.GetGauge().GetValue()
+		}
+	}
+	return -1
+}
+
 // counterValue reads a registered counter's current value by name.
 func counterValue(t *testing.T, name string) float64 {
 	t.Helper()
