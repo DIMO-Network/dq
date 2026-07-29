@@ -124,3 +124,44 @@ func TestSlowReadThreshold_Default(t *testing.T) {
 	require.Equal(t, DefaultSlowReadThreshold, (&Service{}).slowReadThreshold())
 	require.Equal(t, 5*time.Second, (&Service{slowRead: 5 * time.Second}).slowReadThreshold())
 }
+
+// TestQueryLake_ProfilingWithPoisonRecoveryDoesNotPanic reproduces the exact
+// production config that broke: ProfileReads AND PoisonRecovery together.
+// duckdb-go's GetProfilingInfo type-asserts the raw driver connection to its own
+// *Conn without the comma-ok form, so dq's recoveringConn wrapper panics it —
+// and that panic unwound out of Close(), past the row-count observation, into
+// the GraphQL request's recovery middleware, failing live queries.
+//
+// The original test only covered ProfileReads alone, which is the one
+// combination prod does NOT run.
+func TestQueryLake_ProfilingWithPoisonRecoveryDoesNotPanic(t *testing.T) {
+	svc, err := NewService(Config{ProfileReads: true, PoisonRecovery: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = svc.Close() })
+
+	before := histCount(t, lakeRowsReturned, "probePoison")
+
+	require.NotPanics(t, func() {
+		rows, err := svc.queryLake(context.Background(), "probePoison", "SELECT * FROM range(3)")
+		require.NoError(t, err)
+		for rows.Next() {
+			var v int64
+			require.NoError(t, rows.Scan(&v))
+		}
+		require.NoError(t, rows.Close())
+	})
+
+	// The row count — the metric that pays for itself — must still be recorded.
+	// It was lost before, because the panic fired ahead of the observation.
+	require.Equal(t, before+1, histCount(t, lakeRowsReturned, "probePoison"),
+		"a profiling failure must not cost us the row-count observation")
+
+	// And profiling must latch off rather than panic once per read forever.
+	require.True(t, svc.profileBroken.Load(), "profiling should be disabled after it panics")
+
+	// Subsequent reads take the plain pooled path.
+	rows, err := svc.queryLake(context.Background(), "probePoison", "SELECT 1")
+	require.NoError(t, err)
+	require.Nil(t, rows.conn, "profiling is latched off; must not pin a connection")
+	require.NoError(t, rows.Close())
+}

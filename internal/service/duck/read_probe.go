@@ -161,7 +161,29 @@ func (r *lakeRows) Close() error {
 // this connection and records the scan-volume metrics. Best-effort throughout:
 // profiling is a diagnostic, and a malformed or missing tree must never fail a
 // read that already produced correct rows.
+//
+// The recover() is load-bearing, not defensive boilerplate. duckdb-go's
+// GetProfilingInfo type-asserts the raw driver connection to its own *Conn
+// WITHOUT the comma-ok form (profiling.go:25), so any wrapper around the
+// connection panics it. dq wraps every query-backend connection in
+// recoveringConn for poison recovery — which took down live GraphQL requests
+// the first time this shipped, because the panic unwound out of Close() past
+// the row-count observation and into the request's recovery middleware. A
+// diagnostic must never be able to do that, whatever the next incompatibility
+// turns out to be.
 func (r *lakeRows) observeProfile() {
+	defer func() {
+		if p := recover(); p != nil {
+			// Stop trying for the life of the process: the causes are structural
+			// (driver/wrapper shape), not transient, so retrying just burns a
+			// panic per read.
+			if r.svc.profileBroken.CompareAndSwap(false, true) {
+				profileDisabledTotal.Inc()
+				zlog.Error().Interface("panic", p).
+					Msg("DuckDB profiling panicked; disabling dq_lake_files_read/rows_scanned for this process (reads are unaffected)")
+			}
+		}
+	}()
 	info, err := duckdb.GetProfilingInfo(r.conn)
 	if err != nil {
 		return
@@ -208,6 +230,15 @@ func summarizeProfile(info duckdb.ProfilingInfo) (scanned, files int64, ok bool)
 	return scanned, files, ok
 }
 
+// profileDisabledTotal counts processes that turned profiling off after it
+// panicked. Non-zero means dq_lake_files_read / dq_lake_rows_scanned are
+// silently absent rather than simply unobserved — the distinction a missing
+// series cannot express on its own.
+var profileDisabledTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "dq_lake_profile_disabled_total",
+	Help: "Processes that disabled DuckDB read profiling after it panicked; the scan-volume metrics are absent, not merely unobserved.",
+})
+
 // slowReadThreshold is the configured slow-read log threshold, or the default.
 func (s *Service) slowReadThreshold() time.Duration {
 	if s.slowRead > 0 {
@@ -231,7 +262,7 @@ func (s *Service) slowReadThreshold() time.Duration {
 // already ends its scan loop with `return ..., rows.Err()` or an explicit check.
 func (s *Service) queryLake(ctx context.Context, op, stmt string, args ...any) (*lakeRows, error) {
 	start := time.Now()
-	if !s.profileReads {
+	if !s.profileReads || s.profileBroken.Load() {
 		rows, err := s.db.QueryContext(ctx, stmt, args...) //nolint:rowserrcheck // returned to the caller, which checks Err
 		if err != nil {
 			return nil, err
