@@ -26,6 +26,9 @@ type Service struct {
 	// and the threshold above which one logs a slow-read line.
 	profileReads bool
 	slowRead     time.Duration
+	// tempDir is DUCKDB_TEMP_DIRECTORY, reused as the scratch location for
+	// per-read profiling JSON (see Service.profilePath).
+	tempDir string
 	// profileBroken latches once DuckDB profiling panics, so the pinned-connection
 	// path is abandoned for the life of the process. See lakeRows.observeProfile.
 	profileBroken atomic.Bool
@@ -86,7 +89,7 @@ func NewService(cfg Config) (*Service, error) {
 	}
 	poolStats.track(label, db)
 
-	return &Service{db: db, poison: rec, profileReads: cfg.ProfileReads, slowRead: cfg.SlowReadThreshold}, nil
+	return &Service{db: db, poison: rec, profileReads: cfg.ProfileReads, slowRead: cfg.SlowReadThreshold, tempDir: cfg.TempDirectory}, nil
 }
 
 // DB returns the underlying *sql.DB.
@@ -179,8 +182,13 @@ func bootstrapQueries(cfg Config) []string {
 		// The settings list is explicit: the defaults omit OPERATOR_ROWS_SCANNED
 		// and EXTRA_INFO, which are precisely the two the probe reports.
 		queries = append(queries,
-			"PRAGMA enable_profiling = 'no_output'",
-			`PRAGMA custom_profiling_settings = '{"OPERATOR_ROWS_SCANNED":"true","EXTRA_INFO":"true","OPERATOR_NAME":"true","OPERATOR_TIMING":"true"}'`)
+			// 'json' (not 'no_output'): the probe reads the tree back as a FILE
+			// over SQL, deliberately avoiding duckdb-go's GetProfilingInfo, whose
+			// unchecked type assertion panics on dq's wrapped connections.
+			// profiling_output is set per read, not here — it must be unique per
+			// query so concurrent reads cannot overwrite each other's plan.
+			"PRAGMA enable_profiling = 'json'",
+			`PRAGMA custom_profiling_settings = '{"EXTRA_INFO":"true","OPERATOR_NAME":"true","OPERATOR_TIMING":"true"}'`)
 	}
 
 	// extension_directory must be set before INSTALL/LOAD so pre-baked
