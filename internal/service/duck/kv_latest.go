@@ -116,6 +116,12 @@ func (q *Queries) WithLatestKV(store *latestkv.Store, mode KVReadMode, log zerol
 func (q *Queries) WithLatestKVNegative(watcher *latestkv.CoverageWatcher, mode KVNegativeMode) *Queries {
 	q.kvCoverage = watcher
 	q.kvNegMode = mode
+	if mode != KVNegativeOff && watcher != nil {
+		// Publish the trust gauge only where the mode makes it meaningful, and
+		// point it at this watcher (metrics.go explains both).
+		activeCoverageWatcher.Store(watcher)
+		registerCoverageTrusted()
+	}
 	return q
 }
 
@@ -193,9 +199,7 @@ func (q *Queries) negativeDisposition() negativeDisposition {
 	if q.kvNegMode == KVNegativeOff || q.kvCoverage == nil {
 		return negativeFallback
 	}
-	trusted := q.kvCoverage.Trusted()
-	kvCoverageTrusted.Set(boolToFloat(trusted))
-	if !trusted {
+	if !q.kvCoverage.Trusted() {
 		return negativeFallback
 	}
 	if q.kvNegMode == KVNegativeServe {
