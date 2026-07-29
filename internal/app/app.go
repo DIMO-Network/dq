@@ -288,6 +288,9 @@ func newServer(es graphql.ExecutableSchema) *handler.Server {
 	srv.Use(extension.FixedComplexityLimit(100))
 	srv.Use(extension.Introspection{})
 	srv.Use(gqlmetrics.Tracer{})
+	// Per-root-field counts and latency; the shared Tracer above is not labelled
+	// by field, so it cannot say which query is slow or how often it runs.
+	srv.Use(rootFieldMetrics{})
 	srv.SetErrorPresenter(errorhandler.ErrorPresenter)
 
 	return srv

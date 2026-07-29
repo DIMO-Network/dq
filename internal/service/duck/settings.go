@@ -37,6 +37,16 @@ type Config struct {
 	TempDirectory string `yaml:"DUCKDB_TEMP_DIRECTORY"`
 	// MaxConns caps sql.DB open connections. Zero means DefaultMaxConns.
 	MaxConns int `yaml:"DUCKDB_MAX_CONNS"`
+	// ProfileReads turns on DuckDB per-query profiling for lake reads, which
+	// backs dq_lake_rows_scanned / dq_lake_files_read (see read_probe.go). It
+	// costs a connection checkout held for each read's lifetime plus DuckDB's
+	// own profiling overhead, so it is an investigation switch to flip for a
+	// window — not steady-state instrumentation. Default off.
+	ProfileReads bool `yaml:"DUCKDB_PROFILE_READS"`
+	// SlowReadThreshold is the duration above which a lake read emits a
+	// slow-read log line. Zero means DefaultSlowReadThreshold; negative
+	// disables the log.
+	SlowReadThreshold time.Duration `yaml:"DUCKDB_SLOW_READ_THRESHOLD"`
 	// MetricsPoolLabel names this service's connection pool in the
 	// dq_db_pool_* stats (H4). A materializer pod runs two services (query
 	// backend + decode loop), so pools are labeled, not separate metric

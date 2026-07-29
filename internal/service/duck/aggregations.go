@@ -96,7 +96,7 @@ func (q *Queries) GetAggregatedSignals(ctx context.Context, subject string, aggA
 		" GROUP BY group_timestamp, signal_type, signal_index" +
 		" ORDER BY group_timestamp ASC, signal_type ASC, signal_index ASC"
 
-	rows, err := q.svc.db.QueryContext(ctx, stmt, args...)
+	rows, err := q.svc.queryLake(ctx, "signalsRange", stmt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed querying duckdb for aggregated signals: %w", err)
 	}
@@ -159,7 +159,7 @@ func (q *Queries) GetAggregatedSignalsForRanges(ctx context.Context, subject str
 		" GROUP BY seg_idx, signal_type, signal_index" +
 		" ORDER BY seg_idx ASC, signal_type ASC, signal_index ASC"
 
-	rows, err := q.svc.db.QueryContext(ctx, stmt, subject)
+	rows, err := q.svc.queryLake(ctx, "signalsRanges", stmt, subject)
 	if err != nil {
 		return nil, fmt.Errorf("failed querying duckdb for batch agg: %w", err)
 	}

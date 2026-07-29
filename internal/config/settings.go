@@ -92,6 +92,15 @@ type Settings struct {
 	DuckDBExtensionDir  string `yaml:"DUCKDB_EXTENSION_DIR"`
 	DuckDBTempDirectory string `yaml:"DUCKDB_TEMP_DIRECTORY"`
 	DuckDBMaxConns      int    `yaml:"DUCKDB_MAX_CONNS"`
+	// DuckDBProfileReads turns on DuckDB per-query profiling for lake reads,
+	// which backs dq_lake_rows_scanned / dq_lake_files_read. It pins a pooled
+	// connection for each read's lifetime, so it is an investigation switch to
+	// flip for a window rather than steady-state instrumentation. Default off.
+	DuckDBProfileReads bool `yaml:"DUCKDB_PROFILE_READS"`
+	// DuckDBSlowReadThreshold is a Go duration above which a lake read logs a
+	// slow-read line (op, duration, rows returned, statement shape). Empty uses
+	// duck.DefaultSlowReadThreshold; a negative value disables the log.
+	DuckDBSlowReadThreshold string `yaml:"DUCKDB_SLOW_READ_THRESHOLD"`
 	// DuckDBS3Endpoint overrides the S3 endpoint DuckDB's httpfs uses for the lake
 	// data path (DUCKLAKE_DATA_PATH). Empty falls back to S3Endpoint (see
 	// LakeS3Endpoint) — set it only when the lake store differs from the blob store.

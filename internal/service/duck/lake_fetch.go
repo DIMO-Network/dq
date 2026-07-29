@@ -166,7 +166,7 @@ func (l *LakeEventService) queryLakeRawCols(ctx context.Context, filter RawFilte
 			"ORDER BY e.time %s LIMIT %d",
 		cols, lakeRawEvents, where, voiding, order, limit)
 
-	rows, err := l.svc.DB().QueryContext(ctx, q, args...)
+	rows, err := l.svc.queryLake(ctx, op, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying lake raw_events: %w", err)
 	}
@@ -271,7 +271,7 @@ func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Contex
 	q := fmt.Sprintf(`SELECT type, count(*) AS cnt, min(time) AS first_seen, max(time) AS last_seen`+
 		` FROM (%s) GROUP BY type ORDER BY type`, deduped)
 
-	rows, err := l.svc.DB().QueryContext(ctx, q, args...)
+	rows, err := l.svc.queryLake(ctx, "fetchTypeSummary", q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("lake type summaries: %w", err)
 	}
