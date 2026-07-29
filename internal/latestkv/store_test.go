@@ -56,7 +56,7 @@ func TestStore_PublishAndMerge(t *testing.T) {
 		{Subject: subject, Name: "speed", Timestamp: t0.Add(time.Minute), CloudEventID: "b", ValueNumber: 65},
 	}))
 
-	entry, err := s.getEntry(ctx, KeyForSubject(subject))
+	entry, _, err := s.getEntry(ctx, KeyForSubject(subject))
 	require.NoError(t, err)
 	assert.Equal(t, EntryVersion, entry.V)
 	assert.Equal(t, 65.0, entry.Signals["speed"].Num)
@@ -96,7 +96,7 @@ func TestStore_CorruptEntrySelfHeals(t *testing.T) {
 	require.NoError(t, s.PublishSignals(ctx, []Row{
 		{Subject: subject, Name: "speed", Timestamp: t0, CloudEventID: "a", ValueNumber: 40},
 	}))
-	entry, err := s.getEntry(ctx, key)
+	entry, _, err := s.getEntry(ctx, key)
 	require.NoError(t, err)
 	assert.Equal(t, 40.0, entry.Signals["speed"].Num)
 }
@@ -114,7 +114,7 @@ func TestStore_ReopenExistingBucket(t *testing.T) {
 
 	s2, err := NewWithConn(ctx, conn, "t-reopen", zerolog.Nop())
 	require.NoError(t, err)
-	entry, err := s2.getEntry(ctx, KeyForSubject(subject))
+	entry, _, err := s2.getEntry(ctx, KeyForSubject(subject))
 	require.NoError(t, err)
 	assert.Equal(t, 40.0, entry.Signals["speed"].Num, "second open sees the first open's data")
 }

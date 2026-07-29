@@ -171,6 +171,38 @@ func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (reposito
 			store.Close()
 			inner()
 		}
+
+		// Authoritative-miss serving (dq#42). The watcher runs for the process
+		// lifetime, so it takes a cancellable context of its own rather than a
+		// request context.
+		negMode, valid := duck.ParseKVNegativeMode(settings.LatestKVNegative)
+		if !valid {
+			cleanup()
+			return nil, nil, nil, fmt.Errorf("invalid LATEST_KV_NEGATIVE %q (want off, shadow, or serve)", settings.LatestKVNegative)
+		}
+		if negMode != duck.KVNegativeOff {
+			if mode != duck.KVReadServe {
+				// Under read mode shadow/off every query reads the rollup anyway, so
+				// a negative could never save the read it exists to save. Refuse the
+				// combination rather than accept a setting that silently does nothing.
+				cleanup()
+				return nil, nil, nil, fmt.Errorf("LATEST_KV_NEGATIVE=%s requires LATEST_KV_READ_MODE=serve (got %q)", negMode, mode)
+			}
+			watchCtx, cancelWatch := context.WithCancel(context.Background())
+			watcher, err := store.WatchCoverage(watchCtx)
+			if err != nil {
+				cancelWatch()
+				cleanup()
+				return nil, nil, nil, fmt.Errorf("watching signals-latest coverage: %w", err)
+			}
+			queries = queries.WithLatestKVNegative(watcher, negMode)
+			inner := cleanup
+			cleanup = func() {
+				cancelWatch()
+				inner()
+			}
+			logger.Info().Str("mode", string(negMode)).Msg("signals-latest authoritative-miss serving enabled")
+		}
 	}
 
 	// Reads and segment detection both come from the DuckLake catalog. Return
@@ -248,8 +280,19 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 		return nil, err
 	}
 	var bootstrapKV func(context.Context)
+	var coverage *latestkv.CoverageReporter
 	if kvStore != nil {
-		mat.WithLatestPublisher(NewLatestKVPublisher(kvStore, logger))
+		// The coverage reporter (dq#42) is the writer half of authoritative-miss
+		// serving: it re-proves and re-asserts that the bucket mirrors
+		// lake.signals_latest, and query pods answer a miss as "no data" only
+		// while that assertion is live. The publisher feeds it every batch
+		// outcome, so a publish failure drops the assertion at once.
+		if settings.LatestKVCoverage {
+			coverage = latestkv.NewCoverageReporter(kvStore, func(ctx context.Context) error {
+				return kvStore.ReconcileFromRollup(ctx, duckSvc.DB())
+			}, logger)
+		}
+		mat.WithLatestPublisher(NewLatestKVPublisher(kvStore, coverage, logger))
 		bootstrapKV = func(ctx context.Context) {
 			if err := kvStore.BootstrapFromRollup(ctx, duckSvc.DB(), settings.LatestKVForceBootstrap); err != nil {
 				// Non-fatal: live publishes heal active subjects; rerun with
@@ -267,8 +310,28 @@ func startDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	// and CrashLoop the pod; a failure is logged and the loop proceeds (the per-batch
 	// recompute still heals active vehicles).
 	stop := runMaterializerLoop(runner, mat, settings.LakeRebuildRollupOnBoot, bootstrapKV, logger)
+
+	// The reporter runs on its own goroutine, NOT the decode loop: proving
+	// coverage at boot is a full scan of lake.signals_latest, and the decode loop
+	// is the one place that must not wait on it. Stopped before the KV connection
+	// closes so the clean-shutdown mark still has a connection to go out on —
+	// that mark is what lets the next boot skip the reconcile.
+	stopCoverage := func() {}
+	if coverage != nil {
+		covCtx, cancelCov := context.WithCancel(context.Background())
+		covDone := make(chan struct{})
+		go func() {
+			defer close(covDone)
+			coverage.Run(covCtx)
+		}()
+		stopCoverage = func() {
+			cancelCov()
+			<-covDone
+		}
+	}
 	return func() {
 		stop()
+		stopCoverage()
 		if kvStore != nil {
 			kvStore.Close()
 		}
@@ -302,12 +365,18 @@ func openLatestKV(settings *config.Settings, logger zerolog.Logger) (*latestkv.S
 // log+metric per the LatestPublisher contract (best-effort, never block decode).
 type latestKVPublisher struct {
 	store *latestkv.Store
-	log   zerolog.Logger
+	// coverage, when set, learns every publish outcome. A failure means a
+	// subject may have reached the lake without reaching the bucket, which is
+	// precisely the case that must revoke authoritative-miss serving (dq#42).
+	// Nil disables the contract and leaves publishing exactly as it was.
+	coverage *latestkv.CoverageReporter
+	log      zerolog.Logger
 }
 
 // NewLatestKVPublisher wraps store as the materializer's LatestPublisher.
-func NewLatestKVPublisher(store *latestkv.Store, log zerolog.Logger) materializer.LatestPublisher {
-	return &latestKVPublisher{store: store, log: log}
+// coverage may be nil (LATEST_KV_COVERAGE unset, or a publish-only caller).
+func NewLatestKVPublisher(store *latestkv.Store, coverage *latestkv.CoverageReporter, log zerolog.Logger) materializer.LatestPublisher {
+	return &latestKVPublisher{store: store, coverage: coverage, log: log}
 }
 
 // latestKVPublishTimeout caps one batch's KV publish. The publish runs on the
@@ -338,8 +407,15 @@ func (p *latestKVPublisher) PublishLatest(parent context.Context, rows []materia
 	}
 	// Log unless the PARENT is done (shutdown): a publish-timeout expiry is
 	// exactly the outage this error line exists to surface.
-	if err := p.store.PublishSignals(ctx, kvRows); err != nil && parent.Err() == nil {
+	err := p.store.PublishSignals(ctx, kvRows)
+	if err != nil && parent.Err() == nil {
 		p.log.Error().Err(err).Msg("signals-latest KV publish failed; cache staler until those subjects' next readings (or a forced bootstrap)")
+	}
+	if p.coverage != nil {
+		// Report even during shutdown: a batch that failed on the way out still
+		// leaves the bucket possibly incomplete, and suppressing it here would let
+		// the clean-shutdown mark claim otherwise.
+		p.coverage.ObservePublish(err)
 	}
 }
 
@@ -449,7 +525,18 @@ func RunBackfill(settings config.Settings, from, to time.Time, logger zerolog.Lo
 	}
 	if kvStore != nil {
 		defer kvStore.Close()
-		mat.WithLatestPublisher(NewLatestKVPublisher(kvStore, logger))
+		// Publish-only coverage participant (nil reconcile, no heartbeat): the
+		// live materializer owns the assertion, but a backfill publish failure can
+		// leave a subject in the lake and not in the bucket just the same, so it
+		// must be able to revoke it. Flushed after the run, when NATS has had a
+		// chance to come back.
+		coverage := latestkv.NewCoverageReporter(kvStore, nil, logger)
+		mat.WithLatestPublisher(NewLatestKVPublisher(kvStore, coverage, logger))
+		defer func() {
+			if coverage.FlushDegraded(context.Background()) {
+				logger.Warn().Msg("backfill had signals-latest publish failures: coverage marked degraded, the materializer will re-prove it by reconcile")
+			}
+		}()
 	}
 
 	ctx := context.Background()

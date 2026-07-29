@@ -62,6 +62,18 @@ LATEST_KV_READ_MODE: off
 # Re-run the lake.signals_latest -> KV bootstrap even though its completion
 # marker is present (repair after a sustained publish outage). One boot, then unset.
 LATEST_KV_FORCE_BOOTSTRAP: false
+# Materializer: assert that the bucket mirrors lake.signals_latest completely,
+# so query pods may answer a cache MISS as "no data" instead of paying a rollup
+# read that returns nothing. One small heartbeat write every 30s, plus a full
+# rollup->KV reconcile at boot when the previous writer did not exit cleanly.
+# Required for LATEST_KV_NEGATIVE to do anything.
+LATEST_KV_COVERAGE: false
+# Query fleet: what a cache MISS means. off | shadow (still read the rollup, but
+# count what answering "no data" would have gotten wrong —
+# dq_lake_latest_kv_false_negative_total must be zero before serve) | serve
+# (answer the miss directly). Requires LATEST_KV_READ_MODE=serve, and only takes
+# effect while the materializer's coverage assertion is live.
+LATEST_KV_NEGATIVE: off
 
 # Require a valid DIMO JWT on the fetch gRPC port. False admits a missing token
 # (invalid tokens are always rejected); pair with a NetworkPolicy until true.

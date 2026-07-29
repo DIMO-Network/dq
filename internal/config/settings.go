@@ -89,9 +89,9 @@ type Settings struct {
 	// budget. Ignored on a query pod (MATERIALIZER_ENABLED=false).
 	DuckDBQueryMemoryLimit string `yaml:"DUCKDB_QUERY_MEMORY_LIMIT"`
 	DuckDBThreads          int    `yaml:"DUCKDB_THREADS"`
-	DuckDBExtensionDir  string `yaml:"DUCKDB_EXTENSION_DIR"`
-	DuckDBTempDirectory string `yaml:"DUCKDB_TEMP_DIRECTORY"`
-	DuckDBMaxConns      int    `yaml:"DUCKDB_MAX_CONNS"`
+	DuckDBExtensionDir     string `yaml:"DUCKDB_EXTENSION_DIR"`
+	DuckDBTempDirectory    string `yaml:"DUCKDB_TEMP_DIRECTORY"`
+	DuckDBMaxConns         int    `yaml:"DUCKDB_MAX_CONNS"`
 	// DuckDBProfileReads turns on DuckDB per-query profiling for lake reads,
 	// which backs dq_lake_rows_scanned / dq_lake_files_read. It pins a pooled
 	// connection for each read's lifetime, so it is an investigation switch to
@@ -149,6 +149,21 @@ type Settings struct {
 	// any miss/error. Requires NATS_URL when not off. Meaningless on the
 	// materializer release.
 	LatestKVReadMode string `yaml:"LATEST_KV_READ_MODE"`
+	// LatestKVNegative is the query fleet's use of a cache MISS (dq#42): "off"
+	// (default) falls back to the rollup as before; "shadow" still falls back but
+	// counts what answering "no data" from the miss WOULD have gotten wrong
+	// (dq_lake_latest_kv_false_negative_total — must be zero before serve);
+	// "serve" answers a miss directly, skipping the ~795ms rollup read that
+	// returns nothing. Requires LATEST_KV_READ_MODE=serve, and only takes effect
+	// while the materializer's coverage assertion is live
+	// (LATEST_KV_COVERAGE; internal/latestkv/coverage.go).
+	LatestKVNegative string `yaml:"LATEST_KV_NEGATIVE"`
+	// LatestKVCoverage makes the materializer assert that the bucket mirrors
+	// lake.signals_latest completely — the writer half of dq#42, without which
+	// LATEST_KV_NEGATIVE does nothing. Costs one small heartbeat write every
+	// CoverageHeartbeatInterval, plus a full rollup→KV reconcile at boot when
+	// the previous writer did not shut down cleanly. Materializer-only.
+	LatestKVCoverage bool `yaml:"LATEST_KV_COVERAGE"`
 	// LatestKVForceBootstrap re-runs the lake.signals_latest → KV bootstrap on
 	// boot even though the completion marker is present — the repair for a
 	// sustained publish outage (entries otherwise heal only per-subject as new

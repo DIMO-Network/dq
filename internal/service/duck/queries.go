@@ -37,6 +37,12 @@ type Queries struct {
 	kvStore *latestkv.Store
 	kvMode  KVReadMode
 	kvLog   zerolog.Logger
+
+	// kvCoverage/kvNegMode gate answering a cache MISS as an authoritative "no
+	// data" instead of falling back to the rollup (WithLatestKVNegative; dq#42).
+	// A nil watcher or mode off keeps every miss on the DuckLake fallback.
+	kvCoverage *latestkv.CoverageWatcher
+	kvNegMode  KVNegativeMode
 }
 
 // NewLakeQueries creates a query layer that reads the DuckLake catalog tables
