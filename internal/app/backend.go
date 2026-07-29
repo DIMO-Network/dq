@@ -46,6 +46,16 @@ func parseSlowReadThreshold(v string) time.Duration {
 
 // duckConfigFromSettings maps the app settings into the DuckDB query-engine
 // config, reusing the shared S3/bucket settings.
+//
+// DUCKDB_PROFILE_READS is deliberately NOT read here. This is the base config for
+// the materializer's decode instance as well as the query backend, and enabling
+// profiling adds per-connection PRAGMAs whose cost lands on every query the
+// connection runs — including the decode loop, which is the hot path and never
+// reads a profiling tree back (it does not route through Service.queryLake). The
+// flag is applied in queryDuckConfig instead, so it fails safe: a future
+// duck.Service that forgets to opt in loses a diagnostic rather than silently
+// paying for one. SlowReadThreshold stays here because it sets no PRAGMA and is
+// inert for a service that issues no queryLake reads.
 func duckConfigFromSettings(settings *config.Settings) duck.Config {
 	bucket := settings.BlobBucket
 	return duck.Config{
@@ -54,7 +64,6 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		DuckDBExtensionDir:   settings.DuckDBExtensionDir,
 		TempDirectory:        settings.DuckDBTempDirectory,
 		MaxConns:             settings.DuckDBMaxConns,
-		ProfileReads:         settings.DuckDBProfileReads,
 		SlowReadThreshold:    parseSlowReadThreshold(settings.DuckDBSlowReadThreshold),
 		S3Enabled:            !isLocalBucket(bucket),
 		S3AWSRegion:          settings.S3AWSRegion,
@@ -100,6 +109,11 @@ func queryDuckConfig(settings *config.Settings) duck.Config {
 	if settings.MaterializerEnabled && settings.DuckDBQueryMemoryLimit != "" {
 		cfg.DuckDBMemoryLimit = settings.DuckDBQueryMemoryLimit
 	}
+	// Read-profiling is a query-path diagnostic: only Service.queryLake reads the
+	// tree back, and only the query backend calls it. Enabling it on the base
+	// config would charge the materializer's decode loop for profiling it never
+	// consumes — see duckConfigFromSettings.
+	cfg.ProfileReads = settings.DuckDBProfileReads
 	return cfg
 }
 
