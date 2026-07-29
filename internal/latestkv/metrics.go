@@ -29,6 +29,15 @@ var (
 		// Sub-ms per-subject round trips at batch fan-out: 1ms..~16s.
 		Buckets: prometheus.ExponentialBuckets(0.001, 2, 15),
 	})
+	// casRetriesTotal counts entry writes that lost a compare-and-swap and were
+	// re-folded. A low rate is normal whenever two writers touch the same subject
+	// at once (a coverage reconcile alongside live publishing, or a RunBackfill);
+	// a sustained high rate means they are contending hard enough to be worth
+	// separating in time.
+	casRetriesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "dq_latest_kv_cas_retries_total",
+		Help: "Entry writes that lost a compare-and-swap and were retried against the newer value.",
+	})
 	bootstrapTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "dq_latest_kv_bootstrap_timestamp_seconds",
 		Help: "Unix time of the last completed BootstrapFromRollup on this process; 0 when none ran (normal after the first-ever bootstrap wrote its marker).",
@@ -66,7 +75,7 @@ var registerMetricsOnce sync.Once
 
 func registerMetrics() {
 	registerMetricsOnce.Do(func() {
-		prometheus.MustRegister(publishErrorsTotal, subjectsPublishedTotal, publishSeconds, bootstrapTimestamp)
+		prometheus.MustRegister(publishErrorsTotal, subjectsPublishedTotal, publishSeconds, bootstrapTimestamp, casRetriesTotal)
 	})
 }
 

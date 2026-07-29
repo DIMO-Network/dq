@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -159,25 +160,98 @@ func (s *Store) PublishSignals(ctx context.Context, rows []Row) error {
 	return err
 }
 
-// publishSubject folds rows into the subject's entry and Puts it back —
-// skipping the Put when nothing changed (a replayed window folds to no-ops).
-// Single writer, so plain Put: there is no concurrent updater to CAS against.
+// publishSubject folds rows into the subject's entry and writes it back —
+// skipping the write when nothing changed (a replayed window folds to no-ops).
 func (s *Store) publishSubject(ctx context.Context, subject string, rows []Row) error {
-	key := KeyForSubject(subject)
-	entry, err := s.getEntry(ctx, key)
-	if err != nil {
-		return err
-	}
-	changed := false
-	for _, r := range rows {
-		if entry.Fold(r) {
-			changed = true
+	return s.updateEntry(ctx, KeyForSubject(subject), func(entry *Entry) bool {
+		changed := false
+		for _, r := range rows {
+			if entry.Fold(r) {
+				changed = true
+			}
+		}
+		return changed
+	})
+}
+
+// casAttempts bounds one entry's read-modify-write retries, and casRetryBase
+// spaces them out.
+//
+// The backoff is not politeness, it is what makes contention converge:
+// unspaced retries all re-read at the same instant and collide again, so under
+// real contention a bare retry loop starves some writers however high the
+// attempt bound is. Exhausting the attempts is reported as a publish failure —
+// correct, since the update really was lost — but that also revokes coverage
+// and buys an ~18s reconcile, so it must be reserved for genuine trouble rather
+// than a burst of ordinary contention.
+const (
+	casAttempts  = 8
+	casRetryBase = 2 * time.Millisecond
+)
+
+// updateEntry runs a read-modify-write against one subject's entry under
+// compare-and-swap, retrying on a lost race. mutate reports whether it changed
+// anything; false skips the write.
+//
+// CAS rather than a blind Put because this bucket has more than one writer, in
+// two ways that both matter:
+//
+//   - the coverage reconcile (coverage.go) folds lake.signals_latest into the
+//     bucket from its own goroutine while the decode loop keeps publishing;
+//   - RunBackfill publishes into the same bucket and is documented as safe to
+//     run while the live materializer is up.
+//
+// Under a blind Put either of those interleavings silently drops the other's
+// update — a Get, then someone else's Put, then our Put built on the stale
+// value. The dropped reading would not come back until that signal's next
+// reading, so signalsLatest would serve a stale value with nothing anywhere
+// indicating why. The fold itself is last-write-wins and idempotent, so a
+// retried attempt converges on the same result.
+func (s *Store) updateEntry(ctx context.Context, key string, mutate func(*Entry) bool) error {
+	for attempt := range casAttempts {
+		entry, rev, err := s.getEntry(ctx, key)
+		if err != nil {
+			return err
+		}
+		if !mutate(entry) {
+			return nil
+		}
+		err = s.putEntry(ctx, key, entry, rev)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errCASConflict) {
+			return err
+		}
+		casRetriesTotal.Inc()
+		if attempt == casAttempts-1 {
+			return fmt.Errorf("entry %s: %w after %d attempts", key, err, casAttempts)
+		}
+		if err := sleepCtx(ctx, casBackoff(attempt)); err != nil {
+			return err
 		}
 	}
-	if !changed {
+	return nil
+}
+
+// casBackoff grows linearly with jitter. Jitter matters more than the growth
+// curve: it is what breaks the lockstep that makes colliding writers collide
+// again on the retry.
+func casBackoff(attempt int) time.Duration {
+	base := time.Duration(attempt+1) * casRetryBase
+	return base + time.Duration(rand.Int64N(int64(base)))
+}
+
+// sleepCtx waits for d, or returns ctx's error if it ends first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
 		return nil
 	}
-	return s.putEntry(ctx, key, entry)
 }
 
 // GetEntry returns the subject's entry, or nil when the subject has none. An
@@ -213,33 +287,52 @@ func (s *Store) DeleteSubject(ctx context.Context, subject string) error {
 	return nil
 }
 
-// getEntry loads and decodes the subject entry; a missing key or an
-// undecodable value (schema damage) yields a fresh entry — the fold+Put then
-// self-heals the key.
-func (s *Store) getEntry(ctx context.Context, key string) (*Entry, error) {
+// getEntry loads and decodes the subject entry along with the revision to
+// compare against on write; a missing key or an undecodable value (schema
+// damage) yields a fresh entry — the fold+write then self-heals the key.
+// Revision 0 means "no key", which putEntry turns into a create-if-absent.
+func (s *Store) getEntry(ctx context.Context, key string) (*Entry, uint64, error) {
 	entry := &Entry{V: EntryVersion}
 	kve, err := s.kv.Get(ctx, key)
 	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		return entry, nil
+		return entry, 0, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("kv get: %w", err)
+		return nil, 0, fmt.Errorf("kv get: %w", err)
 	}
 	if err := json.Unmarshal(kve.Value(), entry); err != nil {
 		s.log.Warn().Err(err).Str("key", key).Msg("undecodable latest-kv entry; rebuilding it from this batch")
-		return &Entry{V: EntryVersion}, nil
+		// Keep the revision: the rebuild must still CAS against the damaged
+		// value it is replacing, or it could clobber a concurrent good write.
+		return &Entry{V: EntryVersion}, kve.Revision(), nil
 	}
-	return entry, nil
+	return entry, kve.Revision(), nil
 }
 
-func (s *Store) putEntry(ctx context.Context, key string, entry *Entry) error {
+// errCASConflict marks a lost compare-and-swap: the key moved under us between
+// the read and the write, so the caller must re-read and re-fold.
+var errCASConflict = errors.New("entry changed concurrently")
+
+// putEntry writes the entry only if the key is still at rev — create-if-absent
+// when rev is 0. jetstream reports both flavors of conflict with the same API
+// error code (JSErrCodeStreamWrongLastSequence, surfaced as ErrKeyExists), so
+// one check covers "someone created it" and "someone updated it".
+func (s *Store) putEntry(ctx context.Context, key string, entry *Entry, rev uint64) error {
 	entry.V = EntryVersion
 	b, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshal entry: %w", err)
 	}
-	if _, err := s.kv.Put(ctx, key, b); err != nil {
-		return fmt.Errorf("kv put: %w", err)
+	if rev == 0 {
+		_, err = s.kv.Create(ctx, key, b)
+	} else {
+		_, err = s.kv.Update(ctx, key, b, rev)
+	}
+	if errors.Is(err, jetstream.ErrKeyExists) {
+		return errCASConflict
+	}
+	if err != nil {
+		return fmt.Errorf("kv write: %w", err)
 	}
 	return nil
 }
@@ -321,23 +414,22 @@ func (s *Store) mergeFromRollup(ctx context.Context, db *sql.DB) (int, error) {
 		if len(pending) == 0 {
 			return nil
 		}
-		key := KeyForSubject(curSubject)
-		entry, err := s.getEntry(ctx, key)
-		if err != nil {
-			return err
-		}
-		changed := false
-		for name, sv := range pending {
-			if entry.FoldValue(name, sv) {
-				changed = true
-			}
-		}
+		rows := pending
 		pending = map[string]SignalValue{}
 		subjects++
-		if !changed {
-			return nil
-		}
-		return s.putEntry(ctx, key, entry)
+		// Under CAS, because this pass runs CONCURRENTLY with the live publisher
+		// when it is the coverage reconcile: a blind write here would drop a
+		// reading that landed between this subject's read and write, and the lost
+		// value would not reappear until that signal reported again.
+		return s.updateEntry(ctx, KeyForSubject(curSubject), func(entry *Entry) bool {
+			changed := false
+			for name, sv := range rows {
+				if entry.FoldValue(name, sv) {
+					changed = true
+				}
+			}
+			return changed
+		})
 	}
 	for rows.Next() {
 		var subject, name, str string

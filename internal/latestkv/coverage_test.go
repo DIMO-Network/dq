@@ -3,6 +3,7 @@ package latestkv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -236,6 +237,51 @@ func TestCoverageReporter_UnprovenShutdownIsNotClean(t *testing.T) {
 	cur, err := s.GetCoverage(ctx)
 	require.NoError(t, err)
 	assert.Nil(t, cur, "an unproven writer writes no clean mark at all")
+}
+
+// TestStore_ConcurrentWritersDoNotLoseUpdates is the reason entry writes are
+// compare-and-swap rather than a plain Put. The coverage reconcile folds
+// lake.signals_latest into the bucket from its own goroutine while the decode
+// loop keeps publishing, and RunBackfill publishes alongside the live
+// materializer — so "single writer" no longer holds. Under a blind Put, a
+// reading that lands between another writer's read and write is dropped, and
+// does not reappear until that signal reports again.
+func TestStore_ConcurrentWritersDoNotLoseUpdates(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, startNATS(t), "t-cas")
+	subject := "did:erc721:137:0xAB:7"
+
+	// Many writers advancing DIFFERENT names on the SAME subject: every one of
+	// them read-modify-writes the same key, so a lost update loses a whole name.
+	const writers = 12
+	errs := make(chan error, writers)
+	start := make(chan struct{})
+	for i := range writers {
+		go func() {
+			<-start
+			errs <- s.PublishSignals(ctx, []Row{{
+				Subject:      subject,
+				Name:         fmt.Sprintf("signal%02d", i),
+				Timestamp:    t0.Add(time.Duration(i) * time.Second),
+				CloudEventID: fmt.Sprintf("ce%02d", i),
+				ValueNumber:  float64(i),
+			}})
+		}()
+	}
+	close(start)
+	for range writers {
+		require.NoError(t, <-errs)
+	}
+
+	entry, _, err := s.getEntry(ctx, KeyForSubject(subject))
+	require.NoError(t, err)
+	assert.Len(t, entry.Signals, writers, "every concurrent writer's name must survive")
+	for i := range writers {
+		name := fmt.Sprintf("signal%02d", i)
+		sv, ok := entry.Signals[name]
+		require.True(t, ok, "%s was lost to a concurrent write", name)
+		assert.Equal(t, float64(i), sv.Num, name)
+	}
 }
 
 func requireEventually(t *testing.T, cond func() bool, msg string) {
