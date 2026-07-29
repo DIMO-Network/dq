@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"github.com/DIMO-Network/dq/internal/config"
 	"github.com/stretchr/testify/assert"
@@ -45,4 +46,40 @@ func TestQueryDuckConfig_MaterializerMemoryCap(t *testing.T) {
 		assert.Equal(t, "6GiB", queryDuckConfig(&s).DuckDBMemoryLimit,
 			"no override set → unchanged (opt-in)")
 	})
+}
+
+// TestProfileReads_QueryPathOnly pins where DUCKDB_PROFILE_READS is applied. The
+// materializer builds its decode instance from duckConfigFromSettings and then
+// switches off the query-path features that do not apply to it (LoadSpatial,
+// PoisonRecovery). Read-profiling must never be on in that base: it adds
+// per-connection PRAGMAs whose cost lands on every decode-loop query, and the
+// loop never reads a profiling tree back — it does not route through
+// Service.queryLake. Applying the flag in queryDuckConfig instead fails safe: a
+// future duck.Service that forgets to opt in loses a diagnostic rather than
+// silently paying for one.
+func TestProfileReads_QueryPathOnly(t *testing.T) {
+	t.Parallel()
+	on := config.Settings{DuckDBProfileReads: true}
+
+	assert.False(t, duckConfigFromSettings(&on).ProfileReads,
+		"the materializer's base config must never enable read profiling")
+	assert.True(t, queryDuckConfig(&on).ProfileReads,
+		"the query backend must honor DUCKDB_PROFILE_READS")
+	assert.False(t, queryDuckConfig(&config.Settings{}).ProfileReads,
+		"profiling must stay off by default")
+}
+
+// SlowReadThreshold stays on the BASE config, unlike ProfileReads: it sets no
+// PRAGMA and is inert for a service that issues no queryLake reads, so there is
+// nothing to fail safe against.
+func TestSlowReadThreshold_ParsedOnBaseConfig(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, 3*time.Second,
+		duckConfigFromSettings(&config.Settings{DuckDBSlowReadThreshold: "3s"}).SlowReadThreshold)
+
+	// An unparseable value must neither fail startup nor silence the log: zero
+	// means "use duck.DefaultSlowReadThreshold".
+	assert.Zero(t,
+		duckConfigFromSettings(&config.Settings{DuckDBSlowReadThreshold: "nope"}).SlowReadThreshold,
+		"a typo falls back to the default rather than disabling the slow-read log")
 }
