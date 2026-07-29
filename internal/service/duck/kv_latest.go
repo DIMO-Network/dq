@@ -80,11 +80,20 @@ func ParseKVNegativeMode(s string) (KVNegativeMode, bool) {
 	return KVNegativeOff, false
 }
 
-// kvReadTimeout bounds one cache Get so a NATS outage costs a query at most
-// this before the rollup fallback (serve) or the comparison is skipped
-// (shadow). Generous next to the sub-ms happy path; small next to the ~1s
-// rollup read it fronts.
-const kvReadTimeout = 1500 * time.Millisecond
+// kvReadTimeout bounds one cache Get before the rollup fallback (serve) or
+// before the comparison is skipped (shadow).
+//
+// Sized BELOW the rollup read it fronts, not above it. A Get still outstanding
+// once the fallback would already have answered cannot win, so every further
+// millisecond of waiting is pure loss added to the request's total cost. The
+// previous 1500ms was set against an estimated "~1s rollup"; the rollup path
+// measures 795ms (GCP node, 2026-07-29), so a NATS stall cost the full 1.5s
+// timeout PLUS the 795ms fallback — ~2.3s, three times worse than having no
+// cache at all. dq_lake_latest_query_seconds{path="kv_fallback"} was added in
+// dq#31 to make exactly that visible, and it caught it (dq#41).
+//
+// 200ms is still ~75x the observed 2.6ms happy-path Get.
+const kvReadTimeout = 200 * time.Millisecond
 
 // epochTime is the Go value of the SQL epochLiteral (make_timestamp(0)): what
 // the rollup emits as the timestamp of a location row that has never had a
