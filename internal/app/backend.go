@@ -48,14 +48,14 @@ func parseSlowReadThreshold(v string) time.Duration {
 // config, reusing the shared S3/bucket settings.
 //
 // DUCKDB_PROFILE_READS is deliberately NOT read here. This is the base config for
-// the materializer's decode instance as well as the query backend, and enabling
-// profiling adds per-connection PRAGMAs whose cost lands on every query the
-// connection runs — including the decode loop, which is the hot path and never
-// reads a profiling tree back (it does not route through Service.queryLake). The
-// flag is applied in queryDuckConfig instead, so it fails safe: a future
-// duck.Service that forgets to opt in loses a diagnostic rather than silently
-// paying for one. SlowReadThreshold stays here because it sets no PRAGMA and is
-// inert for a service that issues no queryLake reads.
+// the materializer's decode instance as well as the query backend, and profiling
+// only ever pays for itself on reads that route through Service.queryLake — the
+// decode loop issues none, so for it the flag is pure cost (a pinned connection
+// checkout and a scratch file per read) for a tree nothing reads back. The flag
+// is applied in queryDuckConfig instead, so it fails safe: a future duck.Service
+// that forgets to opt in loses a diagnostic rather than silently paying for one.
+// SlowReadThreshold stays here because it sets no PRAGMA and is inert for a
+// service that issues no queryLake reads.
 func duckConfigFromSettings(settings *config.Settings) duck.Config {
 	bucket := settings.BlobBucket
 	return duck.Config{

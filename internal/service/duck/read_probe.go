@@ -3,6 +3,7 @@ package duck
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -107,9 +108,11 @@ type lakeRows struct {
 	stmt  string
 	start time.Time
 	svc   *Service
-	// conn is non-nil only under ProfileReads: the connection checked out for
-	// this read's lifetime, so its profiling output cannot be overwritten by a
-	// concurrent query. Released on Close.
+	// conn is non-nil ONLY for a successfully armed profiled read — armedConn
+	// either hands back a connection with profiling on and its output pinned, or
+	// nothing at all (queryLake then falls back to the pool). So conn != nil is
+	// exactly the set of reads that must disarm on release, and profilePath is
+	// non-empty whenever it is set.
 	conn *sql.Conn
 	// profilePath is where DuckDB wrote this query's profiling JSON. Read and
 	// removed by observeProfile.
@@ -142,7 +145,10 @@ func (r *lakeRows) Close() error {
 	err := r.Rows.Close()
 	if r.conn != nil {
 		r.observeProfile()
-		_ = r.conn.Close() // return it to the pool
+		// Disarms, then returns the connection to the pool — see
+		// Service.releaseArmed for why an armed pooled connection would print later
+		// plans (and the subject DIDs in them) to stdout.
+		r.svc.releaseArmed(r.conn)
 	}
 
 	lakeRowsReturned.WithLabelValues(r.op).Observe(float64(r.n))
@@ -267,41 +273,126 @@ func (s *Service) slowReadThreshold() time.Duration {
 func (s *Service) queryLake(ctx context.Context, op, stmt string, args ...any) (*lakeRows, error) {
 	start := time.Now()
 	if !s.profileReads || s.profileBroken.Load() {
-		rows, err := s.db.QueryContext(ctx, stmt, args...) //nolint:rowserrcheck // returned to the caller, which checks Err
-		if err != nil {
-			return nil, err
-		}
-		return &lakeRows{Rows: rows, op: op, stmt: stmt, start: start, svc: s}, nil
+		return s.queryUnprofiled(ctx, op, stmt, start, args...)
 	}
 
-	// The connection is held for the read's lifetime so nothing else can
-	// overwrite profiling_output between the query and the file read.
-	conn, err := s.db.Conn(ctx)
+	conn, path, err := s.armedConn(ctx)
 	if err != nil {
-		return nil, err
-	}
-	path := s.profilePath()
-	// profiling_output is per-connection and must be set before the query runs.
-	// A failure here degrades to an unprofiled read rather than a failed one:
-	// the metric is a diagnostic, the query is the product.
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET profiling_output = %s", sqlString(path))); err != nil {
-		zlog.Warn().Err(err).Msg("could not set profiling_output; serving this read unprofiled")
-		path = ""
+		// No trustworthy profiled connection. Serve the read the ordinary way
+		// rather than failing it: the metric is a diagnostic, the query is the
+		// product.
+		zlog.Warn().Err(err).Msg("could not arm DuckDB read profiling; serving this read unprofiled")
+		return s.queryUnprofiled(ctx, op, stmt, start, args...)
 	}
 	rows, err := conn.QueryContext(ctx, stmt, args...) //nolint:rowserrcheck // returned to the caller, which checks Err
 	if err != nil {
-		if path != "" {
-			_ = os.Remove(path)
-		}
-		_ = conn.Close()
+		_ = os.Remove(path)
+		s.releaseArmed(conn)
 		return nil, err
 	}
-	if path == "" {
-		// Unprofiled: release the connection with the rows rather than pinning
-		// it for a file that will never be written.
-		return &lakeRows{Rows: rows, op: op, stmt: stmt, start: start, svc: s, conn: conn}, nil
-	}
 	return &lakeRows{Rows: rows, op: op, stmt: stmt, start: start, svc: s, conn: conn, profilePath: path}, nil
+}
+
+// queryUnprofiled runs stmt through the pool with no profiling state whatsoever,
+// which is both the ProfileReads=false path and the fallback whenever profiling
+// could not be armed safely.
+func (s *Service) queryUnprofiled(ctx context.Context, op, stmt string, start time.Time, args ...any) (*lakeRows, error) {
+	rows, err := s.db.QueryContext(ctx, stmt, args...) //nolint:rowserrcheck // returned to the caller, which checks Err
+	if err != nil {
+		return nil, err
+	}
+	return &lakeRows{Rows: rows, op: op, stmt: stmt, start: start, svc: s}, nil
+}
+
+// customProfilingSettings names the profiling fields the probe reports. Explicit
+// because DuckDB's defaults omit EXTRA_INFO, which is the one parseProfileFilesRead
+// reads the file count out of.
+const customProfilingSettings = `PRAGMA custom_profiling_settings = ` +
+	`'{"EXTRA_INFO":"true","OPERATOR_NAME":"true","OPERATOR_TIMING":"true"}'`
+
+// armedConn checks out a connection with profiling armed and its output pinned to
+// a fresh scratch path, and returns that path. On any error it leaves nothing
+// armed — the connection is disarmed and released, or discarded outright — so a
+// caller that gets an error can safely fall back to the ordinary pool.
+//
+// The two statements must run in THIS order, and it is DuckDB that forces it:
+// `SET profiling_output` validates the file extension against the ACTIVE profiling
+// type, so pinning a .json path before arming is rejected outright ("Profiler file
+// type … must either have the same file extension as the profiling output type").
+//
+// That ordering opens a window where profiling is armed with profiling_output
+// still empty — and empty means "print the plan to stdout", which is exactly how
+// the bootstrap-armed version leaked subject DIDs into the container log. The
+// window is safe here for one reason only: nothing that produces a plan runs
+// inside it. DuckDB does not profile SET/PRAGMA statements (verified against
+// duckdb-go v2 on 2026-07-29: stdout stayed empty across the pair), and the
+// connection is pinned to this goroutine, so no query can interleave. Do not put
+// a query between these two statements.
+func (s *Service) armedConn(ctx context.Context) (*sql.Conn, string, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	// 'json' (not 'no_output'): the probe reads the tree back as a FILE over SQL,
+	// deliberately avoiding duckdb-go's GetProfilingInfo, whose unchecked type
+	// assertion panics on dq's wrapped connections.
+	if _, err := conn.ExecContext(ctx, "PRAGMA enable_profiling = 'json'"); err != nil {
+		_ = conn.Close()
+		return nil, "", fmt.Errorf("arming profiling: %w", err)
+	}
+	path := s.profilePath()
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET profiling_output = %s", sqlString(path))); err != nil {
+		// Armed-but-unpinned is the one state that must never reach a query: its
+		// plan would go to stdout. releaseArmed guarantees the connection does not
+		// return to the pool in it.
+		s.releaseArmed(conn)
+		return nil, "", fmt.Errorf("pinning profiling_output: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, customProfilingSettings); err != nil {
+		// No EXTRA_INFO means no file count to parse. The connection is armed AND
+		// pinned, so the read is still safe to serve — just possibly without
+		// dq_lake_files_read.
+		zlog.Warn().Err(err).Msg("could not set custom_profiling_settings; dq_lake_files_read may be absent for this read")
+	}
+	return conn, path, nil
+}
+
+// profileDisarmTimeout bounds the disarm PRAGMA. Close carries no context, and a
+// hung disarm would pin a connection from a pool sized in single digits.
+const profileDisarmTimeout = 5 * time.Second
+
+// releaseArmed disarms profiling and returns conn to the pool. This is the other
+// half of the invariant armedConn establishes: a pooled connection left armed
+// profiles whatever query runs on it next, and the reads that do not route through
+// queryLake (lake_latest.go, lake_rollup.go, latest.go, segments_source.go) never
+// pin a profiling_output — so DuckDB would print their plans, filter literals and
+// all, to the container log.
+//
+// If the disarm fails the connection is DISCARDED rather than returned, because
+// there is no third option that keeps the invariant: the pool must never hold an
+// armed connection. Losing one connection is recoverable; leaking subject DIDs
+// into logs is not.
+//
+// profiling_output is deliberately NOT reset to ”. Leaving it pointing at the
+// (already removed) scratch path means that even if profiling were somehow
+// re-armed on this connection, the plan lands in one overwritten scratch file
+// instead of on stdout.
+func (s *Service) releaseArmed(conn *sql.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), profileDisarmTimeout)
+	defer cancel()
+	if _, err := conn.ExecContext(ctx, "PRAGMA disable_profiling"); err != nil {
+		// Latch so no further read arms a connection, and make the degradation
+		// visible rather than silent.
+		if s.profileBroken.CompareAndSwap(false, true) {
+			profileDisabledTotal.Inc()
+			zlog.Error().Err(err).
+				Msg("could not disarm DuckDB profiling; discarding the connection and disabling dq_lake_files_read for this process (reads are unaffected)")
+		}
+		// Raw returning ErrBadConn marks the connection bad, so database/sql
+		// destroys it on Close instead of handing it to the next query.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	_ = conn.Close()
 }
 
 // profileSeq makes each profiled read's output path unique. Per-connection

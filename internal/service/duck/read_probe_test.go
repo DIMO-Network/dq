@@ -2,6 +2,7 @@ package duck
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"strings"
 	"testing"
@@ -92,6 +93,99 @@ func TestQueryLake_ProfilingWritesAndCleansUp(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, entries, "the profiling file must not outlive the read")
 	require.False(t, svc.profileBroken.Load(), "SQL profiling must not trip the panic latch")
+}
+
+// TestProfiling_NeverArmsThePool is the regression test for the 2026-07-29 stdout
+// leak. Profiling used to be armed in the per-connection bootstrap, so EVERY query
+// the pool ran was profiled — and the reads that do not route through queryLake
+// (lake_latest.go, lake_rollup.go, latest.go, segments_source.go) never pin a
+// profiling_output. DuckDB's default profiling_output is the empty string, which
+// means "print the plan to stdout", so those plans went to the container log with
+// their filter literals — subject DIDs included.
+//
+// Two halves of the same invariant: the bootstrap must not arm the pool, and a
+// profiled read must disarm its connection before returning it.
+func TestProfiling_NeverArmsThePool(t *testing.T) {
+	for _, q := range bootstrapQueries(Config{ProfileReads: true}) {
+		require.NotContains(t, strings.ToLower(q), "profiling",
+			"the bootstrap must never arm profiling: it would profile every pooled query, "+
+				"and the ones that pin no profiling_output print their plan to stdout")
+	}
+
+	// MaxConns=1 so every query below lands on the same connection — the only way
+	// to observe a missed disarm.
+	dir := t.TempDir()
+	svc, err := NewService(Config{ProfileReads: true, TempDirectory: dir, MaxConns: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = svc.Close() })
+
+	// A connection straight out of the pool must be unarmed. This is the assertion
+	// the bootstrap version failed: it handed out connections already set to
+	// 'json', so the first non-queryLake read on each one printed its plan.
+	require.False(t, profilingArmed(t, svc),
+		"a pooled connection must not arrive armed; the first read on it that pins "+
+			"no profiling_output would print its plan to stdout")
+
+	rows, err := svc.queryLake(context.Background(), "probeDisarm", "SELECT 1")
+	require.NoError(t, err)
+	require.NotNil(t, rows.conn, "a profiled read must pin and arm its connection")
+	for rows.Next() {
+		var v int64
+		require.NoError(t, rows.Scan(&v))
+	}
+	require.NoError(t, rows.Close())
+	require.Empty(t, dirNames(t, dir), "the profiled read's plan file must not outlive it")
+
+	// And it must go back unarmed, so the next non-queryLake read on it is not
+	// profiled either.
+	require.False(t, profilingArmed(t, svc),
+		"a profiled read must disarm its connection before returning it to the pool")
+
+	// The non-queryLake path, verbatim: straight to the pool, no profiling_output
+	// pinned. Were the connection still armed, this plan would be written — to the
+	// stale scratch path here, and to stdout in production.
+	drainPooled(t, svc, "SELECT 2")
+
+	require.Empty(t, dirNames(t, dir),
+		"a query that does not route through queryLake must not be profiled")
+	require.False(t, svc.profileBroken.Load(), "the disarm must not trip the latch")
+}
+
+// drainPooled runs stmt straight through the pool — the non-queryLake read path,
+// verbatim — and drains it.
+func drainPooled(t *testing.T, svc *Service, stmt string) {
+	t.Helper()
+	rows, err := svc.db.QueryContext(context.Background(), stmt)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, rows.Close()) }()
+	for rows.Next() {
+		var v int64
+		require.NoError(t, rows.Scan(&v))
+	}
+	require.NoError(t, rows.Err())
+}
+
+// profilingArmed reports whether a connection from svc's pool has profiling on.
+// DuckDB reports enable_profiling as NULL when off and 'json'/'query_tree' when
+// armed, so NULL is the unarmed state this asserts against.
+func profilingArmed(t *testing.T, svc *Service) bool {
+	t.Helper()
+	var mode sql.NullString
+	require.NoError(t, svc.db.QueryRowContext(context.Background(),
+		"SELECT current_setting('enable_profiling')").Scan(&mode))
+	return mode.Valid && mode.String != ""
+}
+
+// dirNames lists dir's entries, for asserting no profiling artifact was written.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // The parser is pinned against a real DuckLake plan rather than a hand-written
