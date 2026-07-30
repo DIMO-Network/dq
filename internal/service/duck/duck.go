@@ -175,21 +175,17 @@ func bootstrapQueries(cfg Config) []string {
 	// per-connection bootstrap statement (not session-global) for that reason.
 	// Do not remove, and do not rely on TIMESTAMP being zone-less anywhere.
 	queries = append(queries, "SET TimeZone = 'UTC'")
-	if cfg.ProfileReads {
-		// Per-connection because the read probe reads the profiling tree back
-		// off whichever pooled connection ran the query. 'no_output' keeps the
-		// tree in memory for duckdb.GetProfilingInfo instead of writing a file.
-		// The settings list is explicit: the defaults omit OPERATOR_ROWS_SCANNED
-		// and EXTRA_INFO, which are precisely the two the probe reports.
-		queries = append(queries,
-			// 'json' (not 'no_output'): the probe reads the tree back as a FILE
-			// over SQL, deliberately avoiding duckdb-go's GetProfilingInfo, whose
-			// unchecked type assertion panics on dq's wrapped connections.
-			// profiling_output is set per read, not here — it must be unique per
-			// query so concurrent reads cannot overwrite each other's plan.
-			"PRAGMA enable_profiling = 'json'",
-			`PRAGMA custom_profiling_settings = '{"EXTRA_INFO":"true","OPERATOR_NAME":"true","OPERATOR_TIMING":"true"}'`)
-	}
+	// ProfileReads deliberately adds NOTHING here. Profiling is armed per read on
+	// a pinned connection (Service.queryLake) and disarmed before that connection
+	// returns to the pool, because DuckDB's default profiling_output is the empty
+	// string and that means "print the plan to stdout". Arming the whole pool at
+	// bootstrap profiled every query the pool ran, and the many reads that do not
+	// route through queryLake (lake_latest.go, lake_rollup.go, latest.go,
+	// segments_source.go) never pin a profiling_output — so DuckDB wrote their
+	// plans, filter literals and all, to the container log. That put subject DIDs
+	// in Cloud Logging and made 100% of dq's log volume plan fragments
+	// (~168 lines/min at idle) until it was found on 2026-07-29. Keep profiling
+	// out of the bootstrap: the arm/disarm pair must stay on one owned connection.
 
 	// extension_directory must be set before INSTALL/LOAD so pre-baked
 	// extensions (see Dockerfile) are found.
