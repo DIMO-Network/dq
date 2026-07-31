@@ -11,6 +11,14 @@ import "context"
 // (last-write-wins by (timestamp, cloud_event_id)).
 type LatestPublisher interface {
 	PublishLatest(ctx context.Context, rows []SignalRow)
+	// BatchSettled is called once per PublishLatest, after that batch's catalog
+	// transaction has committed OR rolled back. It exists because publishing
+	// happens before the transaction (see publishLatest): anything downstream
+	// that needs to reason about "is this batch in the lake yet?" — the coverage
+	// contract's reconcile, today — cannot answer without knowing the
+	// transaction finished. Like PublishLatest it must return promptly and never
+	// fail decode.
+	BatchSettled()
 }
 
 // WithLatestPublisher wires p to receive every decoded signal batch. nil (the
@@ -34,9 +42,18 @@ func (m *DuckLakeMaterializer) WithLatestPublisher(p LatestPublisher) *DuckLakeM
 // The transient cost is a cache momentarily AHEAD of the lake when the commit
 // then fails — harmless for a latest-value read, and the retried span
 // converges the lake to the published values.
-func (m *DuckLakeMaterializer) publishLatest(ctx context.Context, dec *decodedBatch) {
+//
+// Returns the batch's settle func, which callers MUST defer: it closes the
+// window this ordering opens by telling the publisher when the transaction
+// finished. A batch that publishes and never settles looks permanently
+// in-flight (see CoverageReporter.settleBarrierMet), so the pairing is by defer
+// and not by a call at the happy-path end — every error return settles too.
+// The no-op return when there is nothing to publish keeps callers from having
+// to care which case they are in.
+func (m *DuckLakeMaterializer) publishLatest(ctx context.Context, dec *decodedBatch) func() {
 	if m.latestPub == nil || len(dec.signals) == 0 {
-		return
+		return func() {}
 	}
 	m.latestPub.PublishLatest(ctx, dec.signals)
+	return m.latestPub.BatchSettled
 }
