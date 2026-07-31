@@ -63,6 +63,18 @@ var (
 		Name: "dq_latest_kv_reconcile_total",
 		Help: "Coverage reconcile passes over lake.signals_latest by result (ok|error). Expected to be rare: boot after an unclean exit, or recovery from a publish failure.",
 	}, []string{"result"})
+	// reconcileDeferredTotal counts reconciles held back by the settle barrier:
+	// the failing batch had not finished its catalog transaction yet, so a proof
+	// taken now could assert completeness over a subject that is about to appear
+	// in the lake and never appeared in the bucket. Deferring costs nothing but
+	// latency (readers stay on the rollup fallback meanwhile), so a small steady
+	// trickle here is the barrier working. A LARGE number means reconciles are
+	// repeatedly losing the race with a slow commit — worth looking at, since
+	// each deferral is another heartbeat of degraded read latency.
+	reconcileDeferredTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "dq_latest_kv_reconcile_deferred_total",
+		Help: "Coverage reconciles deferred to a later tick because the batch whose publish failed had not settled its catalog transaction yet.",
+	})
 	reconcileSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name: "dq_latest_kv_reconcile_seconds",
 		Help: "Wall-clock of one coverage reconcile pass (full lake.signals_latest scan plus per-subject folds).",
@@ -89,6 +101,6 @@ var registerCoverageMetricsOnce sync.Once
 // materializer — asserts coverage, so only it exports these.
 func registerCoverageMetrics() {
 	registerCoverageMetricsOnce.Do(func() {
-		prometheus.MustRegister(coverageProven, coverageVerifiedTimestamp, reconcileTotal, reconcileSeconds)
+		prometheus.MustRegister(coverageProven, coverageVerifiedTimestamp, reconcileTotal, reconcileSeconds, reconcileDeferredTotal)
 	})
 }

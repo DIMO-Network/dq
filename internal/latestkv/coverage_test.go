@@ -120,6 +120,10 @@ func TestCoverageReporter_PublishFailureRevokesThenRecovers(t *testing.T) {
 	// yet, which is exactly the case the reader's staleness check covers.
 	require.NotNil(t, cur)
 
+	// Settle the batch, as the decode loop does once its transaction finishes.
+	// Without this the reconcile is held at the barrier — see
+	// TestCoverageReporter_ReconcileWaitsForTheFailingBatchToCommit.
+	r.ObserveBatchSettled()
 	r.tick(ctx)
 	assert.Equal(t, 2, reconciled, "recovery re-proves coverage from the lake")
 	assert.True(t, r.isProven())
@@ -128,6 +132,113 @@ func TestCoverageReporter_PublishFailureRevokesThenRecovers(t *testing.T) {
 	require.NotNil(t, cur)
 	assert.False(t, cur.Degraded, "a successful reconcile clears the degraded flag")
 	assert.True(t, cur.trusted(time.Now(), CoverageMaxStaleness))
+}
+
+// TestCoverageReporter_ReconcileWaitsForTheFailingBatchToCommit is the
+// injection this contract could never get from soaking: the ONE case shadow
+// mode structurally cannot measure, because it is correlated with the NATS
+// outages that make readers lapse to the rollup anyway.
+//
+// The hazard, in order: publish runs before the catalog transaction, so a batch
+// whose publish failed is in neither the bucket nor the lake until its commit
+// lands. A reconcile that scans in that window sees nothing to merge for it and
+// then certifies the bucket complete — and the subject's first-ever reading is
+// a key that will never exist, which LATEST_KV_NEGATIVE=serve turns into "no
+// data" for a vehicle that has data.
+//
+// The scan here asserts what the real mergeFromRollup would find: it must not
+// run at all until the batch has settled.
+func TestCoverageReporter_ReconcileWaitsForTheFailingBatchToCommit(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, startNATS(t), "t-cov-barrier")
+
+	// Stands in for lake.signals_latest: the failing batch's subject appears only
+	// once its transaction commits, exactly as the rollup fold makes it visible.
+	committed := false
+	scanSawSubject := []bool{}
+	r := newReporter(t, s, func(context.Context) error {
+		scanSawSubject = append(scanSawSubject, committed)
+		return nil
+	})
+	r.tick(ctx)
+	require.Len(t, scanSawSubject, 1, "the boot reconcile runs with nothing pending")
+
+	// Batch B publishes, fails, and is still in flight.
+	r.ObservePublish(errors.New("kv put: context deadline exceeded"))
+	require.False(t, r.isProven())
+
+	r.tick(ctx)
+	assert.Len(t, scanSawSubject, 1, "no proof may be taken while the failing batch is uncommitted")
+	assert.False(t, r.isProven(), "and coverage stays revoked, so readers stay on the rollup")
+
+	r.tick(ctx)
+	assert.Len(t, scanSawSubject, 1, "still held — the barrier is not a one-tick delay")
+
+	// B's transaction commits and the decode loop settles it.
+	committed = true
+	r.ObserveBatchSettled()
+
+	r.tick(ctx)
+	require.Len(t, scanSawSubject, 2, "the reconcile runs once the batch has settled")
+	assert.True(t, scanSawSubject[1], "and it scans a lake that now contains the batch — the whole point")
+	assert.True(t, r.isProven(), "coverage is re-proven, this time over a lake the scan could actually see")
+}
+
+// TestCoverageReporter_SettleBarrierIsPerFailureNotSticky: the barrier must
+// clear once satisfied. A reporter that stayed armed would never re-prove after
+// its second publish failure, silently pinning every reader to the rollup for
+// the life of the process.
+func TestCoverageReporter_SettleBarrierIsPerFailureNotSticky(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, startNATS(t), "t-cov-barrier-clear")
+	reconciled := 0
+	r := newReporter(t, s, func(context.Context) error { reconciled++; return nil })
+	r.tick(ctx)
+	require.Equal(t, 1, reconciled)
+
+	for i := range 3 {
+		r.ObservePublish(fmt.Errorf("publish %d failed", i))
+		r.tick(ctx)
+		require.Equal(t, i+1, reconciled, "held while batch %d is in flight", i)
+		r.ObserveBatchSettled()
+		r.tick(ctx)
+		require.Equal(t, i+2, reconciled, "released once batch %d settles", i)
+		require.True(t, r.isProven())
+	}
+}
+
+// TestCoverageReporter_FailureDuringScanIsNotCertifiedAway is the same hazard
+// one window later. A publish that fails WHILE the reconcile is scanning is
+// just as unprovable — its batch may commit after the scan's snapshot — so the
+// proof that scan produces must not clear the revocation it never accounted
+// for. Before the failSeq check this reconcile asserted "proven, not degraded"
+// unconditionally and swallowed the failure.
+func TestCoverageReporter_FailureDuringScanIsNotCertifiedAway(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, startNATS(t), "t-cov-midscan")
+	reconciled := 0
+	var r *CoverageReporter
+	r = newReporter(t, s, func(context.Context) error {
+		reconciled++
+		if reconciled == 1 {
+			// A batch publishes and fails while this scan is in flight.
+			r.ObservePublish(errors.New("kv put: connection reset"))
+		}
+		return nil
+	})
+
+	r.tick(ctx)
+	require.Equal(t, 1, reconciled)
+	assert.False(t, r.isProven(), "a scan cannot certify a failure that arrived while it ran")
+
+	// The barrier now governs the newer batch, so the proof waits for it too.
+	r.tick(ctx)
+	assert.Equal(t, 1, reconciled, "and the retry waits for that batch to commit")
+
+	r.ObserveBatchSettled()
+	r.tick(ctx)
+	assert.Equal(t, 2, reconciled)
+	assert.True(t, r.isProven(), "re-proved only after the mid-scan failure's batch settled")
 }
 
 // TestCoverageReporter_FailedReconcileBacksOff: a reconcile fails because NATS

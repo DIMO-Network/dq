@@ -261,6 +261,18 @@ type CoverageReporter struct {
 	// timeout — retrying every tick would pile those up for the whole outage.
 	retryAfter time.Time
 	backoff    time.Duration
+	// settledBatches counts batches whose write function has RETURNED — i.e.
+	// whose catalog transaction committed or rolled back. Advanced by
+	// ObserveBatchSettled from the decode goroutine.
+	settledBatches uint64
+	// awaitBatch is the settledBatches value a reconcile must see before its lake
+	// snapshot may be trusted as a proof; 0 when nothing is pending. See
+	// settleBarrierMet for why the proof is invalid without it.
+	awaitBatch uint64
+	// failSeq counts publish failures. runReconcile samples it around the scan so
+	// a failure that arrives mid-scan cannot be certified away by the proof that
+	// scan produces.
+	failSeq uint64
 }
 
 const (
@@ -300,7 +312,62 @@ func (r *CoverageReporter) ObservePublish(err error) {
 	r.proven = false
 	r.degraded = true
 	r.reason = err.Error()
+	// Arm the settle barrier for the batch currently in flight — the one whose
+	// publish just failed. Its rows are not in the bucket and not yet in the
+	// lake; a reconcile that snapshots before its commit would see neither and
+	// wrongly certify completeness (settleBarrierMet).
+	r.awaitBatch = r.settledBatches + 1
+	r.failSeq++
 	coverageProven.Set(0)
+}
+
+// ObserveBatchSettled records that a batch's write function returned, so its
+// catalog transaction has either committed or rolled back. Called from the
+// DECODE goroutine, paired with the PublishLatest that opened the batch.
+//
+// Rolled back counts as settled: the rows never reach the lake, so there is
+// nothing for a proof to miss. Only "still in flight" is unsafe.
+//
+// This pairing is a precondition for the barrier, not an optimization. A
+// reporter that reconciles (the live materializer's) MUST be fed by a publisher
+// that calls this, or a publish failure arms a barrier nothing can clear and
+// coverage never re-proves — safe (readers stay on the rollup) but permanently
+// degraded. Publish-only participants (RunBackfill) are built with a nil
+// reconcile and never reach the barrier at all.
+func (r *CoverageReporter) ObserveBatchSettled() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.settledBatches++
+}
+
+// settleBarrierMet reports whether a reconcile may take its lake snapshot now.
+//
+// The hazard it closes: the publish runs BEFORE the catalog transaction
+// (materializer.publishLatest explains why), and the reconcile runs on this
+// reporter's goroutine, not the decode loop's. So the two can interleave as:
+//
+//	decode:  publish batch B  ->  FAILS  ->  ... commit B ...
+//	reporter:                      revoke -> reconcile (snapshot) -> assert
+//
+// with the snapshot landing before B commits. B's subject is then in neither
+// the bucket (the publish failed) nor lake.signals_latest (the commit had not
+// landed when the scan ran), so mergeFromRollup never visits it and the
+// assertion that follows certifies a bucket with a real hole. For a subject
+// whose FIRST-EVER reading was in B, that hole is a missing key with no other
+// reading to heal it, and a reader in LATEST_KV_NEGATIVE=serve answers "no
+// data" for a vehicle that has data.
+//
+// Waiting for B to settle removes the interleaving: after it, whatever is in
+// the lake is either in the bucket already or visible to the scan.
+//
+// Concurrent commits during the scan are NOT a hazard and are deliberately not
+// waited on: a batch that commits mid-scan either published successfully (its
+// key is there) or failed (which arms the barrier again and forces another
+// reconcile). The proof is only ever wrong about a failure it already knew of.
+func (r *CoverageReporter) settleBarrierMet() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.awaitBatch == 0 || r.settledBatches >= r.awaitBatch
 }
 
 // FlushDegraded persists a known gap, if one was observed. It exists for
@@ -380,6 +447,16 @@ func (r *CoverageReporter) establish(ctx context.Context) bool {
 	if degraded {
 		r.persistDegraded(ctx, reason)
 	}
+	// Hold the proof until the failing batch has settled. Deferring to the next
+	// tick rather than blocking here is deliberate: this goroutine also drives
+	// the heartbeat, and the wait is normally over in milliseconds (the commit
+	// follows the publish immediately), so a tick of extra fallback beats a
+	// timeout to tune and a goroutine to park.
+	if !r.settleBarrierMet() {
+		reconcileDeferredTotal.Inc()
+		r.log.Info().Msg("coverage reconcile deferred: the batch whose publish failed has not committed yet")
+		return false
+	}
 	return r.runReconcile(ctx)
 }
 
@@ -422,6 +499,15 @@ func (r *CoverageReporter) runReconcile(ctx context.Context) bool {
 	if r.reconcile == nil {
 		return false
 	}
+	// A publish can fail WHILE the scan runs, and that failure is exactly as
+	// unprovable as the one the settle barrier guards: its batch may commit after
+	// this scan's snapshot. Capture the failure counter first and refuse to
+	// assert if it moved — otherwise the unconditional "proven, not degraded"
+	// below would swallow a revocation that arrived mid-scan, which is the same
+	// hole one window later.
+	r.mu.Lock()
+	failsAtStart := r.failSeq
+	r.mu.Unlock()
 	start := time.Now()
 	err := r.reconcile(ctx)
 	reconcileSeconds.Observe(time.Since(start).Seconds())
@@ -436,6 +522,17 @@ func (r *CoverageReporter) runReconcile(ctx context.Context) bool {
 		return false
 	}
 	reconcileTotal.WithLabelValues("ok").Inc()
+	r.mu.Lock()
+	raced := r.failSeq != failsAtStart
+	r.mu.Unlock()
+	if raced {
+		// Leave proven false and degraded set: the next tick re-establishes, and
+		// the barrier (re-armed by that failure) now holds it until the newer
+		// batch commits. No backoff — this is not a failure, just a lost race.
+		reconcileDeferredTotal.Inc()
+		r.log.Info().Msg("coverage reconcile superseded: a publish failed while it ran; re-proving after that batch commits")
+		return false
+	}
 	// Retract the degraded flag the revocation left in the bucket BEFORE the
 	// heartbeat runs. Without this the heartbeat reads back this process's own
 	// revocation, cannot tell it from another publisher's, and drops the proof
@@ -456,6 +553,10 @@ func (r *CoverageReporter) runReconcile(ctx context.Context) bool {
 	defer r.mu.Unlock()
 	r.proven, r.degraded, r.reason = true, false, ""
 	r.backoff, r.retryAfter = 0, time.Time{}
+	// The barrier this proof cleared is spent. Safe to disarm only because the
+	// raced check above already refused to get here if a newer failure re-armed
+	// it while the scan ran.
+	r.awaitBatch = 0
 	coverageProven.Set(1)
 	r.log.Info().Dur("took", time.Since(start)).Msg("coverage proven by reconcile from lake.signals_latest")
 	return true

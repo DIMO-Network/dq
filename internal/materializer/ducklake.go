@@ -1204,7 +1204,8 @@ func (m *DuckLakeMaterializer) backfillWrite(ctx context.Context, dec *decodedBa
 	// Backfilled (arbitrarily-old) rows publish too: the fold discards anything
 	// older than the cache, and a backfill of a permanently-skipped range (#1a)
 	// may well carry a dormant subject's genuinely-latest reading.
-	m.publishLatest(ctx, dec)
+	settled := m.publishLatest(ctx, dec)
+	defer settled()
 	var cleanup []string
 	defer func() {
 		for _, f := range cleanup {
@@ -1453,7 +1454,8 @@ func scanRawEvent(rows *sql.Rows) (cloudevent.RawEvent, string, error) {
 // commit writes the decoded rows and advances the snapshot cursor in one
 // transaction: the inserts and the cursor move atomically.
 func (m *DuckLakeMaterializer) commit(ctx context.Context, dec *decodedBatch, from, to int64) error {
-	m.publishLatest(ctx, dec)
+	settled := m.publishLatest(ctx, dec)
+	defer settled()
 	var cleanup []string
 	defer func() {
 		for _, f := range cleanup {
@@ -1707,7 +1709,8 @@ func (m *DuckLakeMaterializer) writeWindow(ctx context.Context, dec *decodedBatc
 	if len(dec.signals) == 0 && len(dec.events) == 0 {
 		return nil
 	}
-	m.publishLatest(ctx, dec)
+	settled := m.publishLatest(ctx, dec)
+	defer settled()
 	var cleanup []string
 	defer func() {
 		for _, f := range cleanup {

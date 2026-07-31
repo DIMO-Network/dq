@@ -419,6 +419,15 @@ func (p *latestKVPublisher) PublishLatest(parent context.Context, rows []materia
 	}
 }
 
+// BatchSettled forwards the end of the batch's catalog transaction to the
+// coverage reporter, which cannot take a valid proof from the lake while a
+// batch whose publish failed is still in flight (latestkv.settleBarrierMet).
+func (p *latestKVPublisher) BatchSettled() {
+	if p.coverage != nil {
+		p.coverage.ObserveBatchSettled()
+	}
+}
+
 // buildDuckLakeMaterializer constructs the materializer's DuckDB service, the
 // DuckLakeMaterializer (blob store + cipher + temp dir), and the Runner (the decode
 // surface) — the shared setup behind both the live decode loop (startDuckLakeMaterializer)
