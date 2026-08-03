@@ -231,6 +231,16 @@ var fetchBlobMissingTotal = promauto.NewCounter(prometheus.CounterOpts{
 	Help: "Fetch reads whose externalized blob payload was permanently missing (returned empty, not errored).",
 })
 
+// fetchByIDTruncatedTotal counts by-id batch fetches whose result filled its
+// LIMIT, meaning the requested ids expanded to at least idRowExpansion rows each
+// and rows may have been cut past the sort. A non-zero rate means the expansion
+// budget no longer covers what din writes; left unwatched it resurfaces as
+// user-facing "cloud event not found" errors on whole pages (#50).
+var fetchByIDTruncatedTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "dq_fetch_by_id_truncated_total",
+	Help: "By-id batch fetches that returned a full page, so requested ids may have been truncated out of the result.",
+})
+
 // fetchMalformedRowTotal makes a poisoned raw_events row (one whose extras panic
 // cloudevent.RestoreNonColumnFields) alertable instead of silently dropped on the
 // read path. See restoreNonColumnFieldsSafe.

@@ -158,12 +158,19 @@ func (l *LakeEventService) queryLakeRawCols(ctx context.Context, filter RawFilte
 	// the old "fetch limit*2, dedup in a Go map, truncate to limit" pattern,
 	// which silently returned a short page when over half the window was
 	// duplicates and materialized a dedup map per query (SR-11).
+	// The ORDER BY carries id/type tiebreakers because e.time alone is not a
+	// total order: din emits one upload as several typed rows sharing a second
+	// (and an id), so a bare `ORDER BY time` leaves ties that DuckDB may break
+	// differently between identical executions of the same query on the same
+	// data. That nondeterminism made paging unstable and made the by-id batch
+	// fetch drop a different id's rows on each run (#50). The tiebreakers follow
+	// the requested direction so a reversed page reads back as the exact mirror.
 	q := fmt.Sprintf(
 		"SELECT %s FROM %s e WHERE %s%s "+
 			"QUALIFY ROW_NUMBER() OVER ("+
 			"PARTITION BY e.subject, date_trunc('second', e.time), e.type, e.source, e.id "+
 			"ORDER BY e.time) = 1 "+
-			"ORDER BY e.time %s LIMIT %d",
+			"ORDER BY e.time %[5]s, e.id %[5]s, e.type %[5]s LIMIT %d",
 		cols, lakeRawEvents, where, voiding, order, limit)
 
 	rows, err := l.svc.queryLake(ctx, op, q, args...)
@@ -301,19 +308,36 @@ func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Contex
 // downloaded from S3 so the gRPC fetch path returns a non-empty payload. The
 // GraphQL path presigns blobs via PresignBlobURL instead and never reaches the
 // download here.
+//
+// The re-read asks for idRowExpansion rows rather than 1 because (subject, id)
+// selects more than one row; with LIMIT 1 the payload row was whichever type
+// variant the tie-broken sort happened to surface, which need not be the variant
+// the index header names (#50). The header key picks the right one out of the
+// returned set.
 func (l *LakeEventService) GetCloudEventFromIndex(ctx context.Context, index *cloudevent.CloudEvent[eventrepo.ObjectInfo]) (cloudevent.RawEvent, error) {
 	evs, err := l.queryLakeRaw(ctx, RawFilter{
 		Subject:       index.Subject,
 		IDs:           []string{index.ID},
 		ExcludeVoided: true,
-	}, 1, "fetchByID")
+	}, idRowExpansion, "fetchByID")
 	if err != nil {
 		return cloudevent.RawEvent{}, err
 	}
 	if len(evs) == 0 {
 		return cloudevent.RawEvent{}, ErrNotFound
 	}
-	return l.resolvePayload(ctx, evs[0])
+	// Prefer the row the index header names; fall back to the newest row for the
+	// id when the caller supplied only a partial header (the gRPC index path
+	// allows subject+id alone).
+	ev := evs[0]
+	want := index.Key()
+	for i := range evs {
+		if evs[i].Key() == want {
+			ev = evs[i]
+			break
+		}
+	}
+	return l.resolvePayload(ctx, ev)
 }
 
 // resolvePayload returns ev's payload, downloading the blob bytes from S3 when
@@ -385,6 +409,28 @@ const maxListPayloadBytes = 256 << 20
 // The gRPC layer maps it to ResourceExhausted.
 var ErrPayloadBudgetExceeded = fmt.Errorf("total payload size exceeds the %d MiB per-call budget: request fewer indexes per call", maxListPayloadBytes>>20)
 
+// idRowExpansion is how many raw_events rows one (subject, id) is budgeted to
+// expand to on the by-id fetch path. (subject, id) is NOT unique: din emits a
+// single upload as several rows sharing one cloudevent id under different types
+// (a dimo.status and a dimo.fingerprint at the same instant), and the dedup
+// QUALIFY keeps all of them because it partitions on type too. ~28% of
+// raw_events rows shared an id with another row when this was measured, with
+// two type variants the observed shape (#50).
+//
+// It is a budget, not an invariant: it sizes the query LIMIT so an IN-list of N
+// ids cannot be truncated below its own row expansion. Under-budgeting is what
+// broke the batch path — an id whose rows all fell past the LIMIT vanished and
+// failed the whole batch — so fetchByIDTruncatedTotal counts any query that
+// comes back full, which is the signal that the budget no longer covers reality.
+const idRowExpansion = 8
+
+// idsPerFetchBatch is the ids-per-query chunk on the by-id fetch path, sized so
+// idsPerFetchBatch × idRowExpansion stays within maxLakeQueryLimit. The absolute
+// row cap per query — the DoS guard the old len(ids) bound was doubling as — is
+// therefore unchanged; only the id count per query shrinks to make room for the
+// expansion.
+const idsPerFetchBatch = maxLakeQueryLimit / idRowExpansion
+
 // ListCloudEventsFromIndexes fetches the payload for each index entry, in input
 // order. It groups the requested ids by subject and issues one query per
 // subject instead of one per index (SR-4) — a list of N indexes for one vehicle
@@ -395,34 +441,62 @@ func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, index
 	if len(indexes) == 0 {
 		return nil, nil
 	}
+	// (subject, id) pairs repeat within one page whenever an upload's type
+	// variants are both listed, so dedup before building the IN-lists: 50
+	// requested indexes routinely carry far fewer distinct ids, and every
+	// duplicate id would otherwise spend budget in the LIMIT below.
+	type key struct{ subject, id string }
 	idsBySubject := make(map[string][]string)
+	requested := make(map[key]struct{}, len(indexes))
 	for i := range indexes {
-		s := indexes[i].Subject
-		idsBySubject[s] = append(idsBySubject[s], indexes[i].ID)
+		k := key{indexes[i].Subject, indexes[i].ID}
+		if _, dup := requested[k]; dup {
+			continue
+		}
+		requested[k] = struct{}{}
+		idsBySubject[k.subject] = append(idsBySubject[k.subject], k.id)
 	}
 
-	// Keyed (subject, id) on the assumption that (subject, id) is unique — true because
-	// din's id is a content hash. The cloudevent contract only guarantees (id, source)
-	// uniqueness, so if a subject ever held two rows sharing an id (distinct sources),
-	// this map would collapse them to the last and the len(ids) bound below could
-	// truncate a *different* id out, turning the batch into ErrNotFound. Key on the full
-	// header Key() and drop the len(ids) bound if that assumption ever stops holding.
-	type key struct{ subject, id string }
-	found := make(map[key]cloudevent.StoredEvent, len(indexes))
+	// Keyed on the full cloudevent header Key() — (subject, second-truncated
+	// time, type, source, id) — which is the same tuple the dedup QUALIFY
+	// partitions by, so the two cannot disagree about what one event is. Keying
+	// on (subject, id) collapsed an upload's type variants onto whichever row
+	// came last, and paired the index header from the list query with an
+	// arbitrary payload row from this one.
+	found := make(map[string]cloudevent.StoredEvent, len(indexes))
+	// bySubjectID resolves indexes that carry only a partial header: the gRPC
+	// ListCloudEventsFromIndex path lets a caller hand in subject+id with no
+	// time/type/source, and Key() cannot match those. First write wins, and the
+	// query is newest-first with a total order, so the fallback is deterministic.
+	bySubjectID := make(map[key]cloudevent.StoredEvent, len(indexes))
 	for subject, ids := range idsBySubject {
 		// Chunk per subject so the IN-list and the LIMIT stay within
 		// maxLakeQueryLimit. This method is on the exported EventService and is
 		// callable from the gRPC fetch path with an arbitrarily large index batch,
 		// where an uncapped len(ids) would build a giant IN-list and an unbounded
 		// LIMIT.
-		for start := 0; start < len(ids); start += maxLakeQueryLimit {
-			batch := ids[start:min(start+maxLakeQueryLimit, len(ids))]
-			evs, err := l.queryLakeRaw(ctx, RawFilter{Subject: subject, IDs: batch, ExcludeVoided: true}, len(batch), "fetchByIDBatch")
+		for start := 0; start < len(ids); start += idsPerFetchBatch {
+			batch := ids[start:min(start+idsPerFetchBatch, len(ids))]
+			limit := len(batch) * idRowExpansion
+			evs, err := l.queryLakeRaw(ctx, RawFilter{Subject: subject, IDs: batch, ExcludeVoided: true}, limit, "fetchByIDBatch")
 			if err != nil {
 				return nil, err
 			}
+			if len(evs) == limit {
+				// The result filled its LIMIT, so rows may have been cut past the
+				// sort — the exact condition that used to drop an id and fail the
+				// batch. Alert on this rather than rediscovering it from user-facing
+				// "cloud event not found" errors.
+				fetchByIDTruncatedTotal.Inc()
+				zlog.Warn().Str("subject", subject).Int("ids", len(batch)).Int("rows", len(evs)).
+					Msgf("by-id fetch returned a full page of %d rows; ids may expand past the %d-rows-per-id budget", limit, idRowExpansion)
+			}
 			for _, ev := range evs {
-				found[key{ev.Subject, ev.ID}] = ev
+				found[ev.Key()] = ev
+				k := key{ev.Subject, ev.ID}
+				if _, ok := bySubjectID[k]; !ok {
+					bySubjectID[k] = ev
+				}
 			}
 		}
 	}
@@ -431,7 +505,10 @@ func (l *LakeEventService) ListCloudEventsFromIndexes(ctx context.Context, index
 	// resolution, so no goroutine leaks on the error path).
 	evs := make([]cloudevent.StoredEvent, len(indexes))
 	for i := range indexes {
-		ev, ok := found[key{indexes[i].Subject, indexes[i].ID}]
+		ev, ok := found[indexes[i].Key()]
+		if !ok {
+			ev, ok = bySubjectID[key{indexes[i].Subject, indexes[i].ID}]
+		}
 		if !ok {
 			return nil, ErrNotFound
 		}
