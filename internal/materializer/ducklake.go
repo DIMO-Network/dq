@@ -127,6 +127,21 @@ type DuckLakeMaterializer struct {
 	// batch before its catalog transaction — see publishLatest for the ordering
 	// rationale. Best-effort by contract; nil disables it.
 	latestPub LatestPublisher
+
+	// Daily rollup refresh state (dq#55; daily_rollup.go). Single-writer like
+	// the dirty sets: mutated only on the decode-loop goroutine.
+	//
+	// dailyMode/dailyDelay come from WithDailyRollup; dailyWatermark is the
+	// loaded UTC-midnight boundary (zero until LoadDailyRollupState, or when no
+	// refresh has ever run — the seed case); dailyStateLoaded gates the hot
+	// path so late-subject marking never runs against an unloaded watermark.
+	// dailyLateSeen dedups late-subject INSERTs between refreshes (bounded by
+	// maxDirtySubjects; overflow only costs duplicate rows in the late table).
+	dailyMode        DailyRollupMode
+	dailyDelay       time.Duration
+	dailyWatermark   time.Time
+	dailyStateLoaded bool
+	dailyLateSeen    map[string]struct{}
 }
 
 // WithBackfillMode toggles backfill tuning (skip the cross-batch dedup anti-join;
@@ -1560,6 +1575,19 @@ func (m *DuckLakeMaterializer) insertDecodedSteady(ctx context.Context, tx *sql.
 				return cleanup, err
 			}
 		}
+		// Record late arrivals for the daily rollup refresh (dq#55): a row
+		// stamped before the daily watermark is invisible to every future
+		// constant-predicate fold, so its subject must be marked for the
+		// refresh's bounded recompute. In THIS transaction, so the mark is
+		// crash-atomic with the rows it marks. Normally zero rows and skipped
+		// entirely; a no-op unless MATERIALIZER_DAILY_ROLLUP_MODE is set.
+		if m.dailyActive() {
+			if stmt, args := m.lateDailyInsert(dec.signals); stmt != "" {
+				if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
+					return cleanup, fmt.Errorf("record daily-rollup late subjects: %w", err)
+				}
+			}
+		}
 	}
 	if len(dec.events) > 0 {
 		tmp, err := writeTempParquet(m.tempDir, writeEventParquet, dec.events)
@@ -1598,6 +1626,12 @@ func (m *DuckLakeMaterializer) markDirtyFromBatch(dec *decodedBatch) {
 	if len(m.dirtyEventSubjects) > m.maxDirtySubjects {
 		m.dirtyEventSubjects = map[string]struct{}{}
 		m.eventRollupFullRebuild = true
+	}
+	// Post-commit only (this function's contract): the late-subject rows this
+	// batch INSERTed (insertDecodedSteady) are durable, so they may now be
+	// dedup-skipped by future batches (daily_rollup.go).
+	if m.dailyActive() {
+		m.markLateDailySeen(dec.signals)
 	}
 }
 
@@ -1939,6 +1973,18 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 			SELECT 1 FROM lake.signals s
 			WHERE s.subject_bucket = sl.subject_bucket AND s.subject = sl.subject AND s.name = sl.name)`, cutoff)); err != nil {
 		return total, fmt.Errorf("pruning orphaned rollup rows: %w", err)
+	}
+	// Same orphan cleanup for the daily rollup shadow table (dq#55): without it a
+	// retention prune strips live rollup rows the daily table still carries, and
+	// the shadow diff reads that drift as permanent missing_live noise.
+	if m.dailyStateLoaded {
+		if _, err := m.db.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM %s sd WHERE sd.last_seen < make_timestamp(%d) AND NOT EXISTS (
+				SELECT 1 FROM lake.signals s
+				WHERE s.subject_bucket = sd.subject_bucket AND s.subject = sd.subject AND s.name = sd.name)`,
+				dailyRollupTable, cutoff)); err != nil {
+			return total, fmt.Errorf("pruning orphaned daily rollup rows: %w", err)
+		}
 	}
 	// Same orphan cleanup for the events rollup (finding #5a): drop events_latest rows
 	// whose base events were all pruned away, bounded to last_seen < cutoff so the

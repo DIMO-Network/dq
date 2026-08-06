@@ -103,6 +103,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	// anti-join). The flush-cadence half of backfill mode lives in this loop.
 	r.lake.WithBackfillMode(r.cfg.BackfillMode)
 
+	// Load the daily-rollup watermark BEFORE the first pass (dq#55): the hot
+	// path's late-subject marking is gated on it, and batches committed before
+	// the load would silently skip their marks. A failure is retried lazily by
+	// MaybeDailyRollupRefresh; refusing to decode over it would be backwards.
+	if err := r.lake.LoadDailyRollupState(ctx); err != nil && ctx.Err() == nil {
+		r.log.Error().Err(err).Msg("could not load daily rollup state; will retry at the next caught-up pass")
+	}
+
 	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
 	lastPrune := time.Now()
@@ -179,6 +187,14 @@ func (r *Runner) Run(ctx context.Context) error {
 			// the steady-state cadence (signals_latest stays fresh either way — it is
 			// folded incrementally at commit, so this flush is a no-op for it).
 			r.maybeFlushRollup(ctx, &lastRollup)
+			// The daily rollup refresh (dq#55) runs only from the caught-up
+			// branch: "caught up" is the settled-cursor condition its boundary
+			// math assumes (everything that has arrived is committed), and it
+			// keeps the O(day-partition) fold off the mid-drain path. Due at
+			// most once per UTC day; a no-op otherwise.
+			if err := r.lake.MaybeDailyRollupRefresh(ctx); err != nil && ctx.Err() == nil {
+				r.log.Error().Err(err).Msg("daily rollup refresh failed; will retry next caught-up pass")
+			}
 		}
 		// The decoded tables (lake.signals/events) are merged + expired by din's
 		// catalog-wide maintenance (one maintenance process per catalog), so dq
