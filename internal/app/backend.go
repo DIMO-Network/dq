@@ -474,6 +474,12 @@ func buildDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	mat = mat.WithBlobStore(s3ClientFromSettings(settings), settings.BlobBucket).
 		WithBlobCipher(blobCipher).
 		WithTempDir(settings.DuckDBTempDirectory) // stage batch parquet on the sized spill volume, not the root fs
+	// Only positive overrides: WithMaxSnapshotSpan treats non-positive as
+	// UNBOUNDED, which must not be reachable from config (memory bound — see
+	// the settings field doc).
+	if settings.MaterializerMaxSnapshotSpan > 0 {
+		mat = mat.WithMaxSnapshotSpan(int64(settings.MaterializerMaxSnapshotSpan))
+	}
 
 	var decodedRetention time.Duration
 	if settings.LakeDecodedRetention != "" {

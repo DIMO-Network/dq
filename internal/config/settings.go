@@ -120,6 +120,17 @@ type Settings struct {
 	// anti-join and flushes signals_latest once on catch-up instead of mid-drain.
 	// Default false (steady state). Set it for the initial backfill, then unset.
 	MaterializerBackfillMode bool `yaml:"MATERIALIZER_BACKFILL_MODE"`
+	// MaterializerMaxSnapshotSpan overrides how many raw snapshots one
+	// materializer pass drains (materializer.defaultMaxSnapshotSpan, 16, when
+	// unset or non-positive). Pass cost is dominated by per-pass fixed work
+	// (the rollup upkeep rescans the day's partition), so a bigger span raises
+	// backlog drain rate almost linearly — the lever for business-hours peaks
+	// that outrun the default. The bound exists for memory: worst case one
+	// span holds span × 128MiB (din's max bundle flush) of inline payload, so
+	// size it against the pod's memory limit (32 ≈ 4GiB worst case, defensible
+	// under a 6Gi limit; higher is not). Unbounded is deliberately not
+	// reachable from config.
+	MaterializerMaxSnapshotSpan int `yaml:"MATERIALIZER_MAX_SNAPSHOT_SPAN"`
 	// LakeDecodedRetention is a Go duration (e.g. "8760h"); decoded rows older
 	// than this are pruned from lake.signals/events (CHD-38). Empty disables it.
 	LakeDecodedRetention string `yaml:"LAKE_DECODED_RETENTION"`
