@@ -480,6 +480,20 @@ func buildDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	if settings.MaterializerMaxSnapshotSpan > 0 {
 		mat = mat.WithMaxSnapshotSpan(int64(settings.MaterializerMaxSnapshotSpan))
 	}
+	dailyMode, ok := materializer.ParseDailyRollupMode(settings.MaterializerDailyRollupMode)
+	if !ok {
+		_ = duckSvc.Close()
+		return nil, nil, nil, fmt.Errorf("invalid MATERIALIZER_DAILY_ROLLUP_MODE %q (off|shadow)", settings.MaterializerDailyRollupMode)
+	}
+	var dailyDelay time.Duration
+	if settings.MaterializerDailyRollupDelay != "" {
+		dailyDelay, err = time.ParseDuration(settings.MaterializerDailyRollupDelay)
+		if err != nil {
+			_ = duckSvc.Close()
+			return nil, nil, nil, fmt.Errorf("invalid MATERIALIZER_DAILY_ROLLUP_DELAY %q: %w", settings.MaterializerDailyRollupDelay, err)
+		}
+	}
+	mat = mat.WithDailyRollup(dailyMode, dailyDelay)
 
 	var decodedRetention time.Duration
 	if settings.LakeDecodedRetention != "" {
@@ -559,6 +573,13 @@ func RunBackfill(settings config.Settings, from, to time.Time, logger zerolog.Lo
 	n, err := mat.BackfillTimeRange(ctx, runner, from, to)
 	if err != nil {
 		return fmt.Errorf("backfill decode: %w", err)
+	}
+	// Backfilled rows rewrite history behind the daily rollup watermark (dq#55),
+	// so hand the touched subjects to the daily refresh's late set BEFORE the
+	// flush drains the dirty set. No-op unless MATERIALIZER_DAILY_ROLLUP_MODE
+	// is configured for this process.
+	if ferr := mat.PersistDailyLateSubjects(ctx); ferr != nil {
+		logger.Error().Err(ferr).Msg("backfill: recording daily-rollup late subjects failed; drop the daily watermark row to force a reseed")
 	}
 	// Refresh the rollups for the subjects the backfill touched (dirtied above).
 	if ferr := runner.FlushRollup(ctx); ferr != nil {

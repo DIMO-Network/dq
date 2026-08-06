@@ -42,6 +42,13 @@ MATERIALIZER_ROLLUP_INTERVAL: ''
 MATERIALIZER_BACKFILL_MODE: false
 # Read only to REJECT sharding (> 1 is refused — single writer only).
 MATERIALIZER_SHARD_COUNT: 1
+# Daily signals_latest refresh (dq#55): off | shadow. shadow maintains
+# lake.signals_latest_daily by a once-daily watermarked fold and diffs it
+# against the incrementally-folded rollup (the evidence gating the flip).
+MATERIALIZER_DAILY_ROLLUP_MODE: 'off'
+# How long after UTC midnight the daily refresh waits (cursor settle +
+# straggler margin). Empty = 3h30m, the traffic trough.
+MATERIALIZER_DAILY_ROLLUP_DELAY: ''
 # Decoded-row retention (Go duration, e.g. 8760h); empty disables pruning.
 LAKE_DECODED_RETENTION: ""
 # Rebuild signals_latest from full base on boot (disaster recovery only; O(history)).

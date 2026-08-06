@@ -159,6 +159,30 @@ var (
 		Help:    "Wall-clock of one decode-pass phase call (see code for phase meanings; read_delta includes resolve_blobs).",
 		Buckets: prometheus.ExponentialBuckets(0.01, 2, 16), // 10ms..~5.5m
 	}, []string{"phase"})
+	// Daily rollup refresh metrics (dq#55; daily_rollup.go). The watermark gauge
+	// is the liveness signal: it must advance once per UTC day — alert on it
+	// falling more than ~2 days behind now. The diff gauges are the shadow-mode
+	// differential evidence; any sustained non-zero blocks the step-4 flip.
+	dailyRollupRefreshSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "dq_materializer_daily_rollup_refresh_seconds",
+		Help: "Wall-clock of the most recent daily signals_latest refresh (seed or fold + late-set recompute).",
+	})
+	dailyRollupRefreshTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dq_materializer_daily_rollup_refresh_total",
+		Help: "Daily rollup refresh passes by result (ok|error).",
+	}, []string{"result"})
+	dailyRollupWatermark = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "dq_materializer_daily_rollup_watermark_timestamp_seconds",
+		Help: "The daily rollup watermark (UTC-midnight boundary the daily table is exact through), as a unix timestamp. Advances once per day; alert if it falls >2 days behind.",
+	})
+	dailyRollupDiffRows = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "dq_materializer_daily_rollup_diff_rows",
+		Help: "Shadow-mode diff between the daily table and the incremental rollup over the settled window, by class (missing_daily|missing_live|mismatch). Must hold at zero to gate the dq#55 flip.",
+	}, []string{"class"})
+	dailyRollupLateSubjects = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "dq_materializer_daily_rollup_late_subjects",
+		Help: "Late-arrival subjects (rows stamped before the watermark) recomputed by the most recent daily refresh.",
+	})
 	// progressReportErrorsTotal counts failures writing dq's snapshot floor to
 	// meta.din_consumer_progress. Decode keeps succeeding (a separate txn) so dq's own
 	// lag/cursor gauges stay healthy — without this counter the only signal is din's
@@ -186,6 +210,8 @@ func registerMetrics() {
 			cursorResetsTotal, cursorSnapshotID,
 			headSnapshotID, cursorResetGap, blobMissingTotal, blobPoisonTotal,
 			phaseSeconds, progressReportErrorsTotal,
+			dailyRollupRefreshSeconds, dailyRollupRefreshTotal, dailyRollupWatermark,
+			dailyRollupDiffRows, dailyRollupLateSubjects,
 		)
 	})
 }

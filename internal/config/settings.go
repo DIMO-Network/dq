@@ -131,6 +131,18 @@ type Settings struct {
 	// under a 6Gi limit; higher is not). Unbounded is deliberately not
 	// reachable from config.
 	MaterializerMaxSnapshotSpan int `yaml:"MATERIALIZER_MAX_SNAPSHOT_SPAN"`
+	// MaterializerDailyRollupMode gates the daily signals_latest refresh (dq#55):
+	// "off" (default) does nothing; "shadow" maintains lake.signals_latest_daily
+	// by a once-daily watermarked fold while the per-pass fold keeps maintaining
+	// lake.signals_latest, and diffs the two after each refresh
+	// (dq_materializer_daily_rollup_diff_rows must hold at zero to gate the
+	// flip). Serving is untouched in shadow. Materializer-only.
+	MaterializerDailyRollupMode string `yaml:"MATERIALIZER_DAILY_ROLLUP_MODE"`
+	// MaterializerDailyRollupDelay is a Go duration: how long after the
+	// UTC-midnight partition rollover the daily refresh waits before folding the
+	// settled partition (cursor settle + straggler margin; the default 3h30m
+	// lands in the traffic trough). Empty uses the default.
+	MaterializerDailyRollupDelay string `yaml:"MATERIALIZER_DAILY_ROLLUP_DELAY"`
 	// LakeDecodedRetention is a Go duration (e.g. "8760h"); decoded rows older
 	// than this are pruned from lake.signals/events (CHD-38). Empty disables it.
 	LakeDecodedRetention string `yaml:"LAKE_DECODED_RETENTION"`
