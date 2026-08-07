@@ -136,21 +136,13 @@ func (m *DuckLakeMaterializer) LoadDailyRollupState(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var stmts []string
 	if !daily {
-		// CTAS-from-empty copies signals_latest's exact column set/types; the
-		// partition ALTER must run only at first creation (re-ALTERing an already
-		// partitioned DuckLake table is a crash, not a no-op — see setupStatements).
-		stmts = append(stmts,
-			"CREATE TABLE IF NOT EXISTS "+dailyRollupTable+" AS SELECT * FROM lake.signals_latest WHERE false",
-			"ALTER TABLE "+dailyRollupTable+" SET PARTITIONED BY (subject_bucket)",
-		)
-	}
-	stmts = append(stmts, "CREATE TABLE IF NOT EXISTS "+lateSubjectsTable+" (subject VARCHAR)")
-	for _, s := range stmts {
-		if err := m.execRetryConflict(ctx, s); err != nil {
-			return fmt.Errorf("ensuring daily rollup objects: %w", err)
+		if err := m.createDailyTable(ctx); err != nil {
+			return err
 		}
+	}
+	if err := m.execRetryConflict(ctx, "CREATE TABLE IF NOT EXISTS "+lateSubjectsTable+" (subject VARCHAR)"); err != nil {
+		return fmt.Errorf("ensuring daily rollup objects: %w", err)
 	}
 	w, err := m.loadDailyWatermark(ctx)
 	if err != nil {
@@ -162,6 +154,37 @@ func (m *DuckLakeMaterializer) LoadDailyRollupState(ctx context.Context) error {
 	}
 	m.dailyLateSeen = map[string]struct{}{}
 	m.dailyStateLoaded = true
+	return nil
+}
+
+// createDailyTable creates the shadow table with EXPLICIT DDL — a column-level
+// copy of lake.signals_latest's creation statement (setupStatements), and
+// deliberately NOT a zero-row CTAS. The original `CREATE ... AS SELECT * FROM
+// lake.signals_latest WHERE false` left degenerate inlined-data state on the
+// production catalog (Postgres, din's data inlining on): the table's very
+// first scan — the seed's bucket-0 DELETE — died inside
+// DuckLakeInlinedDataReader::TryInitializeScan with "Attempted to access index
+// 0 within vector of size 0" (the ducklake#281 error family, still present at
+// v1.5.4), invalidating the embedded database and restart-looping the writer
+// (2026-08-07). Every other lake table is created with plain DDL and scans
+// fine under inlining; the shadow table now matches. The partition ALTER must
+// run only at first creation (re-ALTERing is a crash — see setupStatements).
+func (m *DuckLakeMaterializer) createDailyTable(ctx context.Context) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS ` + dailyRollupTable + ` (
+			subject VARCHAR, subject_bucket INTEGER, name VARCHAR,
+			"timestamp" TIMESTAMP WITH TIME ZONE,
+			value_number DOUBLE, value_string VARCHAR,
+			loc_lat DOUBLE, loc_lon DOUBLE, loc_hdop DOUBLE, loc_heading DOUBLE,
+			loc_ts TIMESTAMP WITH TIME ZONE,
+			count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
+		"ALTER TABLE " + dailyRollupTable + " SET PARTITIONED BY (subject_bucket)",
+	}
+	for _, s := range stmts {
+		if err := m.execRetryConflict(ctx, s); err != nil {
+			return fmt.Errorf("creating daily rollup table: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -294,15 +317,26 @@ func (m *DuckLakeMaterializer) RunDailyRollupRefresh(ctx context.Context, bounda
 }
 
 // seedDailyRollup establishes the induction base: the daily table becomes
-// exactly rollupSelectSQL over timestamp < boundary, bucket-chunked like
-// RecomputeRollup (one txn per bucket, memory-bounded over deep history). The
-// watermark is written only after every bucket committed, so a crash mid-seed
-// simply reseeds — each bucket's DELETE+INSERT is idempotent. This is the
-// RecomputeRollup cost class, run once at enable (and on operator reseed:
-// delete the watermark row).
+// exactly rollupSelectSQL over timestamp < boundary. The table is DROPPED and
+// recreated rather than per-bucket DELETEd — the seed must never scan the
+// table it is establishing (an empty or half-seeded table's scan is where the
+// inlined-reader crash lived, see createDailyTable; a drop is catalog-only),
+// and it makes the seed self-healing over ANY damaged prior state, including
+// the poisoned CTAS table the first rollout left behind. Then bucket-chunked
+// INSERTs like RecomputeRollup (one txn per bucket, memory-bounded over deep
+// history). The watermark is written only after every bucket committed, so a
+// crash mid-seed simply reseeds from the drop. This is the RecomputeRollup
+// cost class, run once at enable (and on operator reseed: delete the
+// watermark row).
 func (m *DuckLakeMaterializer) seedDailyRollup(ctx context.Context, boundary time.Time) error {
 	m.log.Info().Time("boundary", boundary).
 		Msg("seeding lake.signals_latest_daily (bounded full recompute; one-time, O(history))")
+	if err := m.execRetryConflict(ctx, "DROP TABLE IF EXISTS "+dailyRollupTable); err != nil {
+		return fmt.Errorf("daily seed drop: %w", err)
+	}
+	if err := m.createDailyTable(ctx); err != nil {
+		return err
+	}
 	bound := fmt.Sprintf(`"timestamp" < make_timestamp(%d)`, boundary.UnixMicro())
 	for b := 0; b < duck.NumLatestBuckets; b++ {
 		if err := ctx.Err(); err != nil {
@@ -312,10 +346,6 @@ func (m *DuckLakeMaterializer) seedDailyRollup(ctx context.Context, boundary tim
 		tx, err := m.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
-		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE subject_bucket = %d", dailyRollupTable, b)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("daily seed bucket %d delete: %w", b, err)
 		}
 		if _, err := tx.ExecContext(ctx, "INSERT INTO "+dailyRollupTable+signalsLatestColumns+rollupSelectSQL(where)); err != nil {
 			_ = tx.Rollback()
