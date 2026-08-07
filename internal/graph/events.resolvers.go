@@ -14,5 +14,10 @@ import (
 
 // Events is the resolver for the events field.
 func (r *queryResolver) Events(ctx context.Context, subject string, from time.Time, to time.Time, filter *model.EventFilter) ([]*model.Event, error) {
+	// Possession (both history permissions) is checked by the schema
+	// directive; this rejects ranges outside a scoped permission's window.
+	if err := eventsRangeAllowed(ctx, from, to); err != nil {
+		return nil, err
+	}
 	return r.SignalRepo.GetEvents(ctx, subject, from, to, filter)
 }

@@ -30,6 +30,16 @@ type LatestSignalsArgs struct {
 	LocationSignalNames map[string]struct{}
 	// IncludeLastSeen is a flag to include a new signal for the last seen signal.
 	IncludeLastSeen bool
+	// RowAllowed, when non-nil, is consulted for every fetched latest value; a
+	// value whose (name, timestamp) it rejects is omitted from the collection.
+	// Used to enforce scoped permissions' data windows: a latest value recorded
+	// outside the caller's window must not be shown.
+	RowAllowed func(name string, ts time.Time) bool
+	// ApproxLocationAllowed, when non-nil, gates the derived approximate
+	// location the same way. It is separate from RowAllowed because the
+	// approximate-location permission may allow a location row's timestamp
+	// that the raw-coordinates permission does not.
+	ApproxLocationAllowed func(ts time.Time) bool
 }
 
 // AggregatedSignalArgs is the arguments for querying aggregated signals.

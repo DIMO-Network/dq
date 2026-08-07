@@ -85,8 +85,13 @@ func bearerFromMetadata(ctx context.Context) string {
 	return tok
 }
 
-// grpcHasRawDataAccess mirrors graph.hasRawDataAccess: a token may read raw data
-// with the explicit get-raw-data permission, or with both history permissions.
+// grpcHasRawDataAccess reports raw-data access: the explicit get-raw-data
+// permission, or both history permissions.
+//
+// Deliberately reads only the flat permissions claim: a permission granted
+// under a data window (scoped_permissions) does NOT open this surface, because
+// the fetch RPCs have no window enforcement yet. The claim encoding makes that
+// fail-closed by construction — scoped grants are invisible here.
 func grpcHasRawDataAccess(perms []string) bool {
 	if slices.Contains(perms, tokenclaims.PermissionGetRawData) {
 		return true
