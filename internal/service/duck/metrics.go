@@ -197,6 +197,15 @@ var kvShadowTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "Shadow comparisons of the signals-latest KV cache against the rollup (match|kv_newer|kv_miss|mismatch).",
 }, []string{"result"})
 
+// kvExtShadowTotal is kvShadowTotal for the extended KV paths (dq#55 step 3:
+// allLatest, availableSignals), split by query so each move gates its own
+// serve flip. mismatch must stay at zero before LATEST_KV_READ_MODE_EXTENDED
+// flips to serve.
+var kvExtShadowTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "dq_lake_latest_kv_ext_shadow_total",
+	Help: "Shadow comparisons of the extended KV paths (allLatest|availableSignals) against the rollup (match|kv_newer|kv_miss|mismatch).",
+}, []string{"query", "result"})
+
 // lakeLatestQuerySeconds measures the wall-clock duration of latest/summary/
 // available reads, split by serving path (rollup vs scan) and operation. This
 // is the true single-read latency the pool-saturation symptom lacked: a

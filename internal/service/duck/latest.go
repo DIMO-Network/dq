@@ -74,10 +74,34 @@ func (q *Queries) GetLatestSignals(ctx context.Context, subject string, latestAr
 // columns.
 func (q *Queries) GetAllLatestSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]*vss.Signal, error) {
 	rollup := noSourceFilter(filter)
+	// The KV serves the no-source-filter case from the same Entry the
+	// signalsLatest path reads (dq#55 step 3) — allLatest is "every name in
+	// the entry" plus the virtual lastSeen row. Source-filtered queries bypass
+	// it exactly as they bypass the rollup.
+	kvEligible := rollup && q.kvStore != nil
+	var shadowNegative bool
+	if kvEligible && q.kvExtMode == KVReadServe {
+		kvStart := time.Now()
+		att := q.attemptAllLatestKV(ctx, subject)
+		shadowNegative = att.shadowNegative
+		if att.served {
+			lakeLatestServedTotal.WithLabelValues("kv").Inc()
+			lakeLatestQuerySeconds.WithLabelValues("kv", "allLatest").Observe(time.Since(kvStart).Seconds())
+			return att.signals, nil
+		}
+		lakeLatestQuerySeconds.WithLabelValues("kv_fallback", "allLatest").Observe(time.Since(kvStart).Seconds())
+	}
 	observeLakePath(rollup)
 	defer observeLakeQuery(rollup, "allLatest", time.Now())
 	if rollup {
-		return q.getAllLatestSignalsRollup(ctx, subject) // O(distinct-names) rollup (CHD-3)
+		signals, err := q.getAllLatestSignalsRollup(ctx, subject) // O(distinct-names) rollup (CHD-3)
+		if err == nil && kvEligible && q.kvExtMode == KVReadShadow {
+			q.shadowCompareAllLatest(ctx, subject, signals)
+		}
+		if err == nil && shadowNegative {
+			q.observeShadowNegative(subject, signals)
+		}
+		return signals, err
 	}
 	return q.getAllLatestSignalsLake(ctx, subject, filter)
 }
@@ -86,10 +110,31 @@ func (q *Queries) GetAllLatestSignals(ctx context.Context, subject string, filte
 // sorted ascending. Returns nil when none.
 func (q *Queries) GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
 	rollup := noSourceFilter(filter)
+	// KV: the entry's key set IS the available-names answer (dq#55 step 3).
+	kvEligible := rollup && q.kvStore != nil
+	var shadowNegative bool
+	if kvEligible && q.kvExtMode == KVReadServe {
+		kvStart := time.Now()
+		att := q.attemptAvailableSignalsKV(ctx, subject)
+		shadowNegative = att.shadowNegative
+		if att.served {
+			lakeLatestServedTotal.WithLabelValues("kv").Inc()
+			lakeLatestQuerySeconds.WithLabelValues("kv", "availableSignals").Observe(time.Since(kvStart).Seconds())
+			return att.names, nil
+		}
+		lakeLatestQuerySeconds.WithLabelValues("kv_fallback", "availableSignals").Observe(time.Since(kvStart).Seconds())
+	}
 	observeLakePath(rollup)
 	defer observeLakeQuery(rollup, "availableSignals", time.Now())
 	if rollup {
-		return q.getAvailableSignalsRollup(ctx, subject) // rollup (CHD-3)
+		names, err := q.getAvailableSignalsRollup(ctx, subject) // rollup (CHD-3)
+		if err == nil && kvEligible && q.kvExtMode == KVReadShadow {
+			q.shadowCompareAvailable(ctx, subject, names)
+		}
+		if err == nil && shadowNegative {
+			q.observeShadowNegativeNames(subject, names)
+		}
+		return names, err
 	}
 	return q.getAvailableSignalsLake(ctx, subject, filter)
 }
@@ -101,6 +146,19 @@ func (q *Queries) GetSignalSummaries(ctx context.Context, subject string, filter
 	observeLakePath(rollup)
 	defer observeLakeQuery(rollup, "signalSummaries", time.Now())
 	if rollup {
+		// Under the daily-refreshed rollup (dq#55 step 4), the exact answer is
+		// the (rollup ∪ tail-since-watermark) union — see lake_rollup_union.go.
+		// A zero watermark means no daily refresh has ever run; the plain
+		// rollup read is then exact as before.
+		if q.dailyServing {
+			w, err := q.cachedRollupWatermark(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if !w.IsZero() {
+				return q.getSignalSummariesUnion(ctx, subject, w)
+			}
+		}
 		return q.getSignalSummariesRollup(ctx, subject) // rollup (CHD-3)
 	}
 	return q.getSignalSummariesLake(ctx, subject, filter)

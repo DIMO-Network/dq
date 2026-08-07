@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,6 +44,22 @@ type Queries struct {
 	// A nil watcher or mode off keeps every miss on the DuckLake fallback.
 	kvCoverage *latestkv.CoverageWatcher
 	kvNegMode  KVNegativeMode
+
+	// kvExtMode extends KV serving to allLatest and availableSignals (dq#55
+	// step 3; WithLatestKVExtended). Independent of kvMode so the new paths get
+	// their own off → shadow → serve rollout ladder without touching the
+	// already-proven signalsLatest serving.
+	kvExtMode KVReadMode
+
+	// dailyServing marks that lake.signals_latest is maintained by the DAILY
+	// watermarked refresh (dq#55 step 4) rather than the per-pass fold, so
+	// summaries must union the rollup with the signals tail since the watermark
+	// to stay exact (WithDailyServingRollup; lake_rollup_union.go). The cached
+	// watermark refreshes on a short TTL — it changes once per UTC day.
+	dailyServing bool
+	wmMu         sync.Mutex
+	wmVal        time.Time
+	wmAt         time.Time
 }
 
 // NewLakeQueries creates a query layer that reads the DuckLake catalog tables

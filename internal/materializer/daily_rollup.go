@@ -57,8 +57,10 @@ const (
 	// rollup watermark — an RFC3339 UTC-midnight partition boundary. Stored
 	// beside the snapshot cursor because ingest_progress is already the
 	// catalog's (partition, cursor) progress table, and the same-transaction
-	// advance gives the refresh its exactly-once property.
-	dailyWatermarkPartition = "lake.signals_latest#daily_watermark"
+	// advance gives the refresh its exactly-once property. The canonical
+	// definition lives in duck (the query layer's summaries union reads it
+	// too); internal/latestkv carries a documented duplicate (import cycle).
+	dailyWatermarkPartition = duck.RollupDailyWatermarkPartition
 	// dailyRollupTable is the shadow rollup maintained by the daily refresh in
 	// step 1 (mode shadow). The step-4 flip promotes it to lake.signals_latest.
 	dailyRollupTable = "lake.signals_latest_daily"
