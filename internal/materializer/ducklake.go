@@ -1976,8 +1976,11 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 	}
 	// Same orphan cleanup for the daily rollup shadow table (dq#55): without it a
 	// retention prune strips live rollup rows the daily table still carries, and
-	// the shadow diff reads that drift as permanent missing_live noise.
-	if m.dailyStateLoaded {
+	// the shadow diff reads that drift as permanent missing_live noise. Gated on
+	// a NON-ZERO watermark, not just loaded state: pre-seed the table is empty
+	// (or damaged from an aborted seed) and must not be scanned — the seed
+	// itself never scans it for the same reason (see seedDailyRollup).
+	if m.dailyStateLoaded && !m.dailyWatermark.IsZero() {
 		if _, err := m.db.ExecContext(ctx,
 			fmt.Sprintf(`DELETE FROM %s sd WHERE sd.last_seen < make_timestamp(%d) AND NOT EXISTS (
 				SELECT 1 FROM lake.signals s
