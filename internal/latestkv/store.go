@@ -388,9 +388,54 @@ func (s *Store) ReconcileFromRollup(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// mergeFromRollup folds every lake.signals_latest row into the bucket and
+// rollupWatermarkPartition is the lake.ingest_progress key holding the daily
+// rollup watermark (dq#55). It MUST equal the materializer's
+// dailyWatermarkPartition — that package is deliberately not imported here
+// (see the package comment's dependency rule), so the coupling is by value,
+// and the watermark end-to-end test in tests/ breaks if the two ever diverge
+// (a reconcile that cannot find the writer's watermark row skips the tail).
+const rollupWatermarkPartition = "lake.signals_latest#daily_watermark"
+
+// rollupWatermark reads the daily rollup watermark; zero when the row is
+// absent (the rollup is then maintained per-pass and is continuously exact, so
+// there is no tail to replay). A read/parse FAILURE is an error, not zero: the
+// caller is about to certify bucket completeness, and "I could not determine
+// how stale the rollup is" must fail toward re-proving, never toward
+// asserting over an unexamined tail.
+func rollupWatermark(ctx context.Context, db *sql.DB) (time.Time, error) {
+	var raw string
+	err := db.QueryRowContext(ctx,
+		"SELECT cursor FROM lake.ingest_progress WHERE partition = ?", rollupWatermarkPartition).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("reading rollup watermark: %w", err)
+	}
+	w, perr := time.Parse(time.RFC3339, raw)
+	if perr != nil {
+		return time.Time{}, fmt.Errorf("unparseable rollup watermark %q: %w", raw, perr)
+	}
+	return w.UTC(), nil
+}
+
+// mergeFromRollup folds every lake.signals_latest row into the bucket, then
+// replays the base-table tail since the daily rollup watermark (dq#55), and
 // returns the number of subjects visited. Merge-only via FoldValue, so it can
 // only advance entries and is safe to run against a live bucket.
+//
+// The tail replay is what keeps the COMPLETENESS PROOF honest once the rollup
+// is refreshed daily instead of per-pass: a successful reconcile certifies
+// "every subject in the lake has a key in the bucket", which is exactly what
+// lets a reader answer a MISS as authoritative "no data"
+// (LATEST_KV_NEGATIVE=serve). A subject whose first-ever reading landed after
+// the watermark exists in lake.signals but not in the day-stale rollup — a
+// rollup-only scan never visits it, and a reconcile after that subject's lost
+// publish would certify a bucket with a real hole: a confident wrong "no
+// data" for a vehicle that has data. The tail closes it with a
+// constant-literal bound (1–2 settled day partitions, minutes not history).
+// While the per-pass fold is still on (pre-flip), the tail is redundant by
+// construction and folds to no-ops — correct in both worlds, no flag needed.
 func (s *Store) mergeFromRollup(ctx context.Context, db *sql.DB) (int, error) {
 	start := time.Now()
 	// The rollup is one row per (subject, name) — already the fold's output
@@ -456,7 +501,106 @@ func (s *Store) mergeFromRollup(ctx context.Context, db *sql.DB) (int, error) {
 	if err := flush(); err != nil {
 		return 0, fmt.Errorf("merging subject %s: %w", curSubject, err)
 	}
-	s.log.Debug().Int("subjects", subjects).Dur("took", time.Since(start)).
+	tailSubjects, err := s.mergeTailSinceWatermark(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	s.log.Debug().Int("subjects", subjects).Int("tail_subjects", tailSubjects).Dur("took", time.Since(start)).
 		Msg("latest-kv merge pass over lake.signals_latest complete")
+	return subjects + tailSubjects, nil
+}
+
+// mergeTailSinceWatermark folds the per-(subject, name) latest of
+// lake.signals rows stamped at or after the daily rollup watermark into the
+// bucket (see mergeFromRollup for why). A zero watermark (no daily refresh has
+// ever run) means the rollup is per-pass fresh and there is no tail. Returns
+// the number of subjects the tail visited.
+func (s *Store) mergeTailSinceWatermark(ctx context.Context, db *sql.DB) (int, error) {
+	w, err := rollupWatermark(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	if w.IsZero() {
+		return 0, nil
+	}
+	// Recency semantics pinned to the rollup fold's recency/locrec CTEs and to
+	// Entry.newerThan: the value part wins by (timestamp DESC, cloud_event_id
+	// ASC); the location part wins independently among nonzero fixes. The
+	// constant make_timestamp bound is the whole point — it prunes the scan to
+	// the settled partitions after the watermark instead of history.
+	stmt := fmt.Sprintf(`
+		WITH tail AS (
+			SELECT subject, name, "timestamp" AS ts, cloud_event_id, value_number, value_string,
+			       loc_lat, loc_lon, loc_hdop, loc_heading
+			FROM lake.signals WHERE "timestamp" >= make_timestamp(%d)
+		),
+		val AS (
+			SELECT subject, name, ts, cloud_event_id, value_number, value_string FROM tail
+			QUALIFY row_number() OVER (PARTITION BY subject, name ORDER BY ts DESC, cloud_event_id ASC) = 1
+		),
+		loc AS (
+			SELECT subject, name, ts, cloud_event_id, loc_lat, loc_lon, loc_hdop, loc_heading FROM tail
+			WHERE loc_lat != 0 OR loc_lon != 0
+			QUALIFY row_number() OVER (PARTITION BY subject, name ORDER BY ts DESC, cloud_event_id ASC) = 1
+		)
+		SELECT v.subject, v.name, v.ts, v.cloud_event_id, v.value_number, v.value_string,
+		       l.ts, coalesce(l.cloud_event_id, ''), coalesce(l.loc_lat, 0), coalesce(l.loc_lon, 0),
+		       coalesce(l.loc_hdop, 0), coalesce(l.loc_heading, 0)
+		FROM val v
+		LEFT JOIN loc l ON l.subject = v.subject AND l.name = v.name
+		ORDER BY v.subject`, w.UnixMicro())
+	rows, err := db.QueryContext(ctx, stmt)
+	if err != nil {
+		return 0, fmt.Errorf("scanning signals tail since watermark: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	subjects := 0
+	var curSubject string
+	pending := map[string]SignalValue{}
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		batch := pending
+		pending = map[string]SignalValue{}
+		subjects++
+		return s.updateEntry(ctx, KeyForSubject(curSubject), func(entry *Entry) bool {
+			changed := false
+			for name, sv := range batch {
+				if entry.FoldValue(name, sv) {
+					changed = true
+				}
+			}
+			return changed
+		})
+	}
+	for rows.Next() {
+		var subject, name, ceid, locCEID, str string
+		var ts time.Time
+		var locTS sql.NullTime
+		var num, lat, lon, hdop, heading float64
+		if err := rows.Scan(&subject, &name, &ts, &ceid, &num, &str,
+			&locTS, &locCEID, &lat, &lon, &hdop, &heading); err != nil {
+			return 0, fmt.Errorf("scanning tail row: %w", err)
+		}
+		if subject != curSubject {
+			if err := flush(); err != nil {
+				return 0, fmt.Errorf("merging tail subject %s: %w", curSubject, err)
+			}
+			curSubject = subject
+		}
+		sv := SignalValue{TS: ts.UTC(), CEID: ceid, Num: num, Str: str}
+		if locTS.Valid && (lat != 0 || lon != 0) {
+			sv.Loc = &LocValue{TS: locTS.Time.UTC(), CEID: locCEID, Lat: lat, Lon: lon, HDOP: hdop, Heading: heading}
+		}
+		pending[name] = sv
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("tail scan: %w", err)
+	}
+	if err := flush(); err != nil {
+		return 0, fmt.Errorf("merging tail subject %s: %w", curSubject, err)
+	}
 	return subjects, nil
 }
