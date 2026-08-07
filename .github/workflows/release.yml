@@ -8,6 +8,12 @@ on:
       - main
     tags:
       - v*
+  # Manual rebuild of any ref. Exists because push events can be DROPPED, not
+  # queued, during a GitHub Actions outage (2026-08-06: the dq#56 merge never
+  # got its image, and a deploy pinned to that sha took the whole fleet to
+  # ImagePullBackOff). With this, a dropped build is one click instead of an
+  # empty commit to main.
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
