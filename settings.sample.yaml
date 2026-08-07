@@ -49,6 +49,13 @@ MATERIALIZER_DAILY_ROLLUP_MODE: 'off'
 # How long after UTC midnight the daily refresh waits (cursor settle +
 # straggler margin). Empty = 3h30m, the traffic trough.
 MATERIALIZER_DAILY_ROLLUP_DELAY: ''
+# Extended KV serving for allLatest + availableSignals (dq#55 step 3):
+# off | shadow | serve, dark-launched independently of LATEST_KV_READ_MODE
+# (which must not be off when this is set). Query fleet only.
+LATEST_KV_READ_MODE_EXTENDED: 'off'
+# Set true ONLY at the dq#55 step-4 flip (rollup maintained by the daily
+# refresh): summaries then serve the exact (rollup ∪ tail) union. Query fleet.
+LAKE_ROLLUP_DAILY_SERVING: false
 # Decoded-row retention (Go duration, e.g. 8760h); empty disables pruning.
 LAKE_DECODED_RETENTION: ""
 # Rebuild signals_latest from full base on boot (disaster recovery only; O(history)).

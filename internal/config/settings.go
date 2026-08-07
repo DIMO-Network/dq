@@ -187,6 +187,18 @@ type Settings struct {
 	// CoverageHeartbeatInterval, plus a full rollup→KV reconcile at boot when
 	// the previous writer did not shut down cleanly. Materializer-only.
 	LatestKVCoverage bool `yaml:"LATEST_KV_COVERAGE"`
+	// LatestKVReadModeExtended extends KV serving to allLatest and
+	// availableSignals (dq#55 step 3), with the same off/shadow/serve ladder as
+	// LATEST_KV_READ_MODE but gated independently so the new paths dark-launch
+	// without touching signalsLatest serving. Requires LATEST_KV_READ_MODE to
+	// not be off (the store connection rides on it). Query-fleet only.
+	LatestKVReadModeExtended string `yaml:"LATEST_KV_READ_MODE_EXTENDED"`
+	// LakeRollupDailyServing marks lake.signals_latest as maintained by the
+	// DAILY watermarked refresh (the dq#55 step-4 flip): summaries then serve
+	// the exact (rollup ∪ signals-since-watermark) union instead of the plain
+	// rollup read. MUST be false while the per-pass fold maintains the rollup
+	// (the union would double-count the tail). Query-fleet only; default false.
+	LakeRollupDailyServing bool `yaml:"LAKE_ROLLUP_DAILY_SERVING"`
 	// LatestKVForceBootstrap re-runs the lake.signals_latest → KV bootstrap on
 	// boot even though the completion marker is present — the repair for a
 	// sustained publish outage (entries otherwise heal only per-subject as new

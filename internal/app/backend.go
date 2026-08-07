@@ -151,6 +151,15 @@ func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (reposito
 		_ = duckSvc.Close()
 		return nil, nil, nil, fmt.Errorf("invalid LATEST_KV_READ_MODE %q (want off, shadow, or serve)", settings.LatestKVReadMode)
 	}
+	if extRaw := settings.LatestKVReadModeExtended; mode == duck.KVReadOff && extRaw != "" && extRaw != string(duck.KVReadOff) {
+		// The extended paths ride the base mode's store; without it the setting
+		// silently does nothing — refuse it like the negative-mode combination.
+		_ = duckSvc.Close()
+		return nil, nil, nil, fmt.Errorf("LATEST_KV_READ_MODE_EXTENDED=%s requires LATEST_KV_READ_MODE to not be off", extRaw)
+	}
+	// Daily-serving rollup (dq#55 step 4): summaries switch to the exact
+	// (rollup ∪ tail) union. Independent of the KV wiring.
+	queries = queries.WithDailyServingRollup(settings.LakeRollupDailyServing)
 	if mode != duck.KVReadOff {
 		if settings.NATSURL == "" {
 			_ = duckSvc.Close()
@@ -171,6 +180,16 @@ func newQueryBackend(settings *config.Settings, logger zerolog.Logger) (reposito
 			store.Close()
 			inner()
 		}
+
+		// Extended KV serving: allLatest + availableSignals (dq#55 step 3),
+		// dark-launched on its own ladder. Inside the mode != off block because
+		// it rides the same store; a bad value fails loudly like the base mode.
+		extMode, valid := duck.ParseKVReadMode(settings.LatestKVReadModeExtended)
+		if !valid {
+			cleanup()
+			return nil, nil, nil, fmt.Errorf("invalid LATEST_KV_READ_MODE_EXTENDED %q (want off, shadow, or serve)", settings.LatestKVReadModeExtended)
+		}
+		queries = queries.WithLatestKVExtended(extMode)
 
 		// Authoritative-miss serving (dq#42). The watcher runs for the process
 		// lifetime, so it takes a cancellable context of its own rather than a
