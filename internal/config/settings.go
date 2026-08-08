@@ -134,9 +134,12 @@ type Settings struct {
 	// MaterializerDailyRollupMode gates the daily signals_latest refresh (dq#55):
 	// "off" (default) does nothing; "shadow" maintains lake.signals_latest_daily
 	// by a once-daily watermarked fold while the per-pass fold keeps maintaining
-	// lake.signals_latest, and diffs the two after each refresh
-	// (dq_materializer_daily_rollup_diff_rows must hold at zero to gate the
-	// flip). Serving is untouched in shadow. Materializer-only.
+	// lake.signals_latest, and diffs the two after each refresh; "on" is the
+	// step-4 flip — the daily refresh maintains lake.signals_latest itself, the
+	// per-pass fold is off, and the first boot after shadow PROMOTES the
+	// validated shadow table (discarding the fold-era table, duplicate
+	// corruption included). Pair "on" with LAKE_ROLLUP_DAILY_SERVING=true on
+	// the query fleet. Materializer-only.
 	MaterializerDailyRollupMode string `yaml:"MATERIALIZER_DAILY_ROLLUP_MODE"`
 	// MaterializerDailyRollupDelay is a Go duration: how long after the
 	// UTC-midnight partition rollover the daily refresh waits before folding the

@@ -52,7 +52,7 @@ func TestParseDailyRollupMode(t *testing.T) {
 		{"", DailyRollupOff, true},
 		{"off", DailyRollupOff, true},
 		{"shadow", DailyRollupShadow, true},
-		{"on", DailyRollupOff, false}, // step 4; must not parse yet
+		{"on", DailyRollupOn, true}, // the step-4 flip
 		{"bogus", DailyRollupOff, false},
 	} {
 		got, ok := ParseDailyRollupMode(tc.in)

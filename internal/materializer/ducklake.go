@@ -1562,7 +1562,14 @@ func (m *DuckLakeMaterializer) insertDecodedSteady(ctx context.Context, tx *sql.
 		// the NOT-EXISTS probe finds them, yielding delta 0 (that is exactly what makes a
 		// replayed window idempotent). Backfill (bulk/arbitrarily-old) skips the fold and
 		// defers to the end-of-catch-up recompute (markDirtyFromBatch marks it dirty).
-		if !m.backfillMode {
+		//
+		// Under MATERIALIZER_DAILY_ROLLUP_MODE=on (dq#55 step 4) the fold is OFF:
+		// the daily refresh maintains lake.signals_latest, and these three
+		// lake.signals scans — the dominant, day-length-dependent term in span
+		// cost — leave the span transaction entirely. This is the flip #55 exists
+		// for; the fold code itself is removed in step 5.
+		foldOn := !m.backfillMode && m.dailyMode != DailyRollupOn
+		if foldOn {
 			if err := m.captureRollupDelta(ctx, tx, tmp); err != nil {
 				return cleanup, err
 			}
@@ -1570,7 +1577,7 @@ func (m *DuckLakeMaterializer) insertDecodedSteady(ctx context.Context, tx *sql.
 		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp, tsMin, tsMax, m.backfillMode)); err != nil {
 			return cleanup, fmt.Errorf("insert signals: %w", err)
 		}
-		if !m.backfillMode {
+		if foldOn {
 			if err := m.foldSignalsRollup(ctx, tx, tmp); err != nil {
 				return cleanup, err
 			}
@@ -1979,8 +1986,10 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 	// the shadow diff reads that drift as permanent missing_live noise. Gated on
 	// a NON-ZERO watermark, not just loaded state: pre-seed the table is empty
 	// (or damaged from an aborted seed) and must not be scanned — the seed
-	// itself never scans it for the same reason (see seedDailyRollup).
-	if m.dailyStateLoaded && !m.dailyWatermark.IsZero() {
+	// itself never scans it for the same reason (see seedDailyRollup). Shadow
+	// mode only: post-flip there is no second table (the live block above
+	// covers the daily-maintained lake.signals_latest).
+	if m.dailyMode == DailyRollupShadow && m.dailyStateLoaded && !m.dailyWatermark.IsZero() {
 		if _, err := m.db.ExecContext(ctx,
 			fmt.Sprintf(`DELETE FROM %s sd WHERE sd.last_seen < make_timestamp(%d) AND NOT EXISTS (
 				SELECT 1 FROM lake.signals s
@@ -2071,6 +2080,19 @@ const rollupSubjectChunk = 500
 // flushed chunks refreshed and the rest dirty for the next pass.
 // Single-writer: called only on the decode-loop goroutine.
 func (m *DuckLakeMaterializer) FlushRollup(ctx context.Context) error {
+	// Under the daily rollup (dq#55 step 4) lake.signals_latest is maintained
+	// EXCLUSIVELY by the watermarked refresh: an unbounded per-subject
+	// recompute here would fold rows with timestamp >= the watermark into the
+	// table and break the disjoint count split the summaries union relies on.
+	// Backfill-dirtied subjects are handed to the late set instead
+	// (PersistDailyLateSubjects, which RunBackfill calls BEFORE this) and
+	// healed bounded at the next refresh; an overflow already dropped the
+	// watermark there, forcing a reseed. Nothing is lost by clearing here.
+	if m.dailyMode == DailyRollupOn {
+		m.dirtySubjects = map[string]struct{}{}
+		m.rollupFullRebuild = false
+		return nil
+	}
 	if m.rollupFullRebuild {
 		// The dirty set overflowed maxDirtySubjects (fleet-wide catch-up):
 		// rebuild everything, bucket-chunked and memory-bounded. Clear the
@@ -2159,6 +2181,14 @@ func (m *DuckLakeMaterializer) recomputeSubjects(ctx context.Context, bucket int
 // instead of materializing the whole-table QUALIFY window at once. Safe to run
 // while the single-writer materializer is offline.
 func (m *DuckLakeMaterializer) RecomputeRollup(ctx context.Context) error {
+	// Under the daily rollup (dq#55) an UNBOUNDED rebuild would fold rows past
+	// the watermark into lake.signals_latest and break the disjoint count
+	// split. The equivalent recovery is a reseed: delete the watermark row
+	// (lake.ingest_progress, dailyWatermarkPartition) and the next refresh
+	// rebuilds bounded to a fresh boundary.
+	if m.dailyMode == DailyRollupOn {
+		return fmt.Errorf("RecomputeRollup is disabled under MATERIALIZER_DAILY_ROLLUP_MODE=on: drop the daily watermark row to force a bounded reseed instead")
+	}
 	buckets := make([]int, duck.NumLatestBuckets)
 	for i := range buckets {
 		buckets[i] = i
