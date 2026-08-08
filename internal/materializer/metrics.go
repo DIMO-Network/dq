@@ -183,6 +183,13 @@ var (
 		Name: "dq_materializer_daily_rollup_late_subjects",
 		Help: "Late-arrival subjects (rows stamped before the watermark) recomputed by the most recent daily refresh.",
 	})
+	// dailyRollupSideRows is the rollup-cardinality probe (one row per
+	// (subject,name) is the contract; dup_* > 0 on the live side means
+	// serving-visible duplicate rows — see observeRollupCardinality).
+	dailyRollupSideRows = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "dq_materializer_daily_rollup_table_rows",
+		Help: "Rollup table cardinality by side (live|daily) and kind (keys|rows|dup_keys|dup_rows), measured at each daily refresh. rows > keys means visible duplicate rows.",
+	}, []string{"side", "kind"})
 	// progressReportErrorsTotal counts failures writing dq's snapshot floor to
 	// meta.din_consumer_progress. Decode keeps succeeding (a separate txn) so dq's own
 	// lag/cursor gauges stay healthy — without this counter the only signal is din's
@@ -211,7 +218,7 @@ func registerMetrics() {
 			headSnapshotID, cursorResetGap, blobMissingTotal, blobPoisonTotal,
 			phaseSeconds, progressReportErrorsTotal,
 			dailyRollupRefreshSeconds, dailyRollupRefreshTotal, dailyRollupWatermark,
-			dailyRollupDiffRows, dailyRollupLateSubjects,
+			dailyRollupDiffRows, dailyRollupLateSubjects, dailyRollupSideRows,
 		)
 	})
 }
