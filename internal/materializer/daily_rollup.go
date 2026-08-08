@@ -156,6 +156,11 @@ func (m *DuckLakeMaterializer) LoadDailyRollupState(ctx context.Context) error {
 	}
 	m.dailyLateSeen = map[string]struct{}{}
 	m.dailyStateLoaded = true
+	// Best-effort at boot so a deploy of this probe answers the cardinality
+	// question immediately instead of at the next daily refresh.
+	if err := m.observeRollupCardinality(ctx); err != nil {
+		m.log.Warn().Err(err).Msg("rollup cardinality probe failed at boot; next daily refresh retries")
+	}
 	return nil
 }
 
@@ -701,5 +706,47 @@ WHERE (l.subject IS NULL OR l.last_seen < make_timestamp(%d))
 	total := counts["missing_daily"] + counts["missing_live"] + counts["mismatch"]
 	m.log.Info().Int("diff_rows", total).Dur("took", time.Since(start)).
 		Msg("daily rollup shadow diff complete")
+	if err := m.observeRollupCardinality(ctx); err != nil {
+		m.log.Error().Err(err).Msg("rollup cardinality probe failed")
+	}
 	return counts, nil
+}
+
+// observeRollupCardinality measures, for each rollup table, how many physical
+// rows exist per (subject, name) key — the rollup contract is EXACTLY ONE.
+// Added when the 2026-08-08 shadow diff hit 300k all-mismatch rows over a
+// ≤39k-key fleet: a FULL OUTER JOIN can only exceed the key count if a side
+// holds duplicate keys, and this probe is what says which side and how badly.
+// The standing suspicion is the per-pass fold's DELETE racing din's
+// rewrite_data_files compaction (the delete lands on rows whose files were
+// just rewritten and removes nothing; din's 2026-08-06 flush conflict is the
+// same collision seen from the other side). Duplicate keys on the LIVE table
+// mean dataSummary/rollup-fallback reads are serving duplicated rows; the
+// dq#55 flip (one fold/day, promote the clean daily table) is the structural
+// fix, and this gauge is how we prove the corruption gone afterwards.
+func (m *DuckLakeMaterializer) observeRollupCardinality(ctx context.Context) error {
+	for _, side := range []struct{ label, table string }{
+		{"live", "lake.signals_latest"},
+		{"daily", dailyRollupTable},
+	} {
+		var keys, rows, dupKeys, dupRows int64
+		q := fmt.Sprintf(`SELECT count(*), coalesce(sum(n), 0),
+			count(*) FILTER (WHERE n > 1), coalesce(sum(n) FILTER (WHERE n > 1), 0)
+			FROM (SELECT count(*) AS n FROM %s GROUP BY subject, name)`, side.table)
+		if err := m.db.QueryRowContext(ctx, q).Scan(&keys, &rows, &dupKeys, &dupRows); err != nil {
+			return fmt.Errorf("cardinality of %s: %w", side.table, err)
+		}
+		dailyRollupSideRows.WithLabelValues(side.label, "keys").Set(float64(keys))
+		dailyRollupSideRows.WithLabelValues(side.label, "rows").Set(float64(rows))
+		dailyRollupSideRows.WithLabelValues(side.label, "dup_keys").Set(float64(dupKeys))
+		dailyRollupSideRows.WithLabelValues(side.label, "dup_rows").Set(float64(dupRows))
+		evt := m.log.Info()
+		if dupKeys > 0 {
+			evt = m.log.Warn()
+		}
+		evt.Str("table", side.table).Int64("keys", keys).Int64("rows", rows).
+			Int64("dup_keys", dupKeys).Int64("dup_rows", dupRows).
+			Msg("rollup cardinality (rows must equal keys; every excess row is a visible duplicate)")
+	}
+	return nil
 }
