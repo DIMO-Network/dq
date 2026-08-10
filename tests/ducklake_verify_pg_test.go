@@ -1,6 +1,7 @@
-// ducklake_verify_pg_test.go — verification loops 9-10: the #1c pagination + #5b
-// incremental rollup under real-Postgres concurrency with MORE than two writers and a
-// mid-span crash of one writer while the others drain. Gated on PG_CATALOG_DSN.
+// ducklake_verify_pg_test.go — verification loops 9-10: the #1c pagination
+// exactly-once path under real-Postgres concurrency with MORE than two writers and a
+// mid-span crash of one writer while the others drain, verified through a full
+// rollup recompute over the deduped base. Gated on PG_CATALOG_DSN.
 package tests
 
 import (
@@ -18,7 +19,7 @@ import (
 )
 
 // V9 — three independent materializers drain the same paginated fat snapshot; exactly-once
-// base rows AND an exact incremental rollup.
+// base rows AND an exact rollup recompute over them.
 func TestVerify09_PG_ThreeConcurrentPaginated(t *testing.T) {
 	dsn := pgCatalogDSN(t)
 	ctx := context.Background()
@@ -84,12 +85,12 @@ func TestVerify09_PG_ThreeConcurrentPaginated(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM (
 		SELECT cloud_event_id, name, timestamp FROM lake.signals GROUP BY cloud_event_id, name, timestamp HAVING count(*) > 1)`).Scan(&dupes))
 	assert.Zero(t, dupes)
-	assert.EqualValues(t, events, dumpRollupMap(t, ctx, db)[subject+"|speed"].count, "incremental rollup exact under three writers")
+	assert.EqualValues(t, events, oracleRecompute(t, ctx, db)[subject+"|speed"].count, "rollup recompute exact under three writers")
 }
 
 // V10 — one writer crashes mid-span (its intermediate window errors) while two others drain;
-// the idempotent windows + cursor-coupled final commit still yield exactly-once + an exact
-// rollup.
+// the idempotent windows + cursor-coupled final commit still yield exactly-once base rows
+// (and so an exact rollup recompute).
 func TestVerify10_PG_CrashOneWriterMidSpan(t *testing.T) {
 	dsn := pgCatalogDSN(t)
 	ctx := context.Background()
@@ -190,5 +191,5 @@ func TestVerify10_PG_CrashOneWriterMidSpan(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM (
 		SELECT cloud_event_id, name, timestamp FROM lake.signals GROUP BY cloud_event_id, name, timestamp HAVING count(*) > 1)`).Scan(&dupes))
 	assert.Zero(t, dupes)
-	assert.EqualValues(t, events, dumpRollupMap(t, ctx, db)[subject+"|speed"].count, "incremental rollup exact after a mid-span crash under concurrency")
+	assert.EqualValues(t, events, oracleRecompute(t, ctx, db)[subject+"|speed"].count, "rollup recompute exact after a mid-span crash under concurrency")
 }

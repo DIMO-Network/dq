@@ -37,9 +37,13 @@ func TestLatestKVExt_AllLatestAndAvailableServeMatchRollup(t *testing.T) {
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
 	mat.WithLatestPublisher(app.NewLatestKVPublisher(store, nil, zerolog.Nop()))
+	mat.WithDailyRollup(materializer.DailyRollupOn, 0)
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 3, drainRunner(t, ctx, runner))
+	// All readings are settled (< today's boundary), so the daily refresh
+	// leaves the rollup complete for this subject — the comparison baseline.
+	require.NoError(t, mat.RunDailyRollupRefresh(ctx, time.Now().UTC().Truncate(24*time.Hour)))
 
 	rollupQ := duck.NewLakeQueries(svc)
 	serveQ := duck.NewLakeQueries(svc).
@@ -112,11 +116,11 @@ func TestLatestKVExt_AllLatestAndAvailableServeMatchRollup(t *testing.T) {
 }
 
 // TestSignalSummaries_DailyServingUnionExact pins the (rollup ∪ tail) union:
-// against a day-stale rollup (simulated by swapping in the shadow table the
-// daily refresh maintains), summaries under LAKE_ROLLUP_DAILY_SERVING must
-// equal the answers the fresh rollup gave — counts, first/last seen, and a
-// name first seen only AFTER the watermark (which exists in no rollup row at
-// all and only the tail can count).
+// against the genuinely day-stale rollup mode on produces (exact as of the
+// watermark, blind to the tail), summaries under LAKE_ROLLUP_DAILY_SERVING
+// must equal the answers a full-recompute oracle gives — counts, first/last
+// seen, and a name first seen only AFTER the watermark (which exists in no
+// rollup row at all and only the tail can count).
 func TestSignalSummaries_DailyServingUnionExact(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeService(t, t.TempDir())
@@ -126,7 +130,7 @@ func TestSignalSummaries_DailyServingUnionExact(t *testing.T) {
 	watermark := day.AddDate(0, 0, 2)
 
 	runner, mat := incrRunner(t, ctx, db, func(m *materializer.DuckLakeMaterializer) {
-		m.WithDailyRollup(materializer.DailyRollupShadow, 0)
+		m.WithDailyRollup(materializer.DailyRollupOn, 0)
 	})
 	// Pre-watermark history: two names, multiple readings, a redelivery.
 	seedRawStatus(t, db, "su-1", subject, day.Add(1*time.Hour), speedAt(day.Add(1*time.Hour), 10))
@@ -135,32 +139,31 @@ func TestSignalSummaries_DailyServingUnionExact(t *testing.T) {
 	drainNoFlush(t, ctx, runner)
 	require.NoError(t, mat.RunDailyRollupRefresh(ctx, watermark))
 
-	// Post-watermark tail: more speed readings and a name BORN after W.
+	// Post-watermark tail: more speed readings and a name BORN after W. The
+	// rollup stays exact-as-of-W (nothing folds the tail until the next
+	// boundary) — the day-stale state daily serving exists for.
 	newTS := watermark.Add(30 * time.Minute)
 	seedRawStatus(t, db, "su-3", subject, newTS, speedAt(newTS, 30),
 		map[string]any{"name": "powertrainRange", "timestamp": newTS.Format(time.RFC3339Nano), "value": 250.0})
 	drainNoFlush(t, ctx, runner)
 
-	// Expected: the answers off the FRESH per-pass rollup (exact today).
-	expected, err := duck.NewLakeQueries(svc).GetSignalSummaries(ctx, subject, nil)
-	require.NoError(t, err)
-	require.NotEmpty(t, expected)
-
-	// Simulate the step-4 flip: signals_latest becomes the daily table's
-	// content — exact as of the watermark, blind to the tail.
-	_, err = db.ExecContext(ctx, "DELETE FROM lake.signals_latest")
-	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, "INSERT INTO lake.signals_latest SELECT * FROM lake.signals_latest_daily")
-	require.NoError(t, err)
-
-	// Sanity: the plain rollup read is now WRONG (missing the tail) — the
-	// union assertion below is not vacuous.
+	// Sanity: the plain rollup read is WRONG (missing the tail-born name) —
+	// the union assertion below is not vacuous.
 	stale, err := duck.NewLakeQueries(svc).GetSignalSummaries(ctx, subject, nil)
 	require.NoError(t, err)
-	require.NotEqual(t, len(expected), len(stale), "day-stale rollup must be missing the tail-born name")
+	require.NotEmpty(t, stale)
 
 	got, err := duck.NewLakeQueries(svc).WithDailyServingRollup(true).GetSignalSummaries(ctx, subject, nil)
 	require.NoError(t, err)
+
+	// Expected: the answers off a full-recompute oracle (rebuilds
+	// lake.signals_latest in place, so it runs AFTER the union was captured).
+	oracleRecompute(t, ctx, db)
+	expected, err := duck.NewLakeQueries(svc).GetSignalSummaries(ctx, subject, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, expected)
+	require.NotEqual(t, len(expected), len(stale), "day-stale rollup must be missing the tail-born name")
+
 	require.Len(t, got, len(expected))
 	for i := range expected {
 		assert.Equal(t, expected[i].Name, got[i].Name)

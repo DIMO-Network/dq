@@ -200,7 +200,9 @@ var kvShadowTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 // kvExtShadowTotal is kvShadowTotal for the extended KV paths (dq#55 step 3:
 // allLatest, availableSignals), split by query so each move gates its own
 // serve flip. mismatch must stay at zero before LATEST_KV_READ_MODE_EXTENDED
-// flips to serve.
+// flips to serve. Under the daily rollup (dq#55) the rollup baseline is
+// day-stale, so shadow comparisons mint kv_newer noise — shadow remains
+// useful only for gross-mismatch detection.
 var kvExtShadowTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "dq_lake_latest_kv_ext_shadow_total",
 	Help: "Shadow comparisons of the extended KV paths (allLatest|availableSignals) against the rollup (match|kv_newer|kv_miss|mismatch).",

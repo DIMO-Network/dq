@@ -132,14 +132,14 @@ type Settings struct {
 	// reachable from config.
 	MaterializerMaxSnapshotSpan int `yaml:"MATERIALIZER_MAX_SNAPSHOT_SPAN"`
 	// MaterializerDailyRollupMode gates the daily signals_latest refresh (dq#55):
-	// "off" (default) does nothing; "shadow" maintains lake.signals_latest_daily
-	// by a once-daily watermarked fold while the per-pass fold keeps maintaining
-	// lake.signals_latest, and diffs the two after each refresh; "on" is the
-	// step-4 flip — the daily refresh maintains lake.signals_latest itself, the
-	// per-pass fold is off, and the first boot after shadow PROMOTES the
-	// validated shadow table (discarding the fold-era table, duplicate
-	// corruption included). Pair "on" with LAKE_ROLLUP_DAILY_SERVING=true on
-	// the query fleet. Materializer-only.
+	// "on" (the default, also for empty) — the once-daily watermarked refresh is
+	// THE maintainer of lake.signals_latest (the per-pass fold was removed in
+	// step 5); "off" disables the refresh entirely and leaves the rollup
+	// UNMAINTAINED — tests/one-off ops only, warned at boot. The retired
+	// "shadow" value is now invalid: shadow-era configs must move to "on" (a
+	// leftover lake.signals_latest_daily table is promoted automatically at
+	// first boot). Pair "on" with LAKE_ROLLUP_DAILY_SERVING=true on the query
+	// fleet. Materializer-only.
 	MaterializerDailyRollupMode string `yaml:"MATERIALIZER_DAILY_ROLLUP_MODE"`
 	// MaterializerDailyRollupDelay is a Go duration: how long after the
 	// UTC-midnight partition rollover the daily refresh waits before folding the
@@ -197,10 +197,13 @@ type Settings struct {
 	// not be off (the store connection rides on it). Query-fleet only.
 	LatestKVReadModeExtended string `yaml:"LATEST_KV_READ_MODE_EXTENDED"`
 	// LakeRollupDailyServing marks lake.signals_latest as maintained by the
-	// DAILY watermarked refresh (the dq#55 step-4 flip): summaries then serve
-	// the exact (rollup ∪ signals-since-watermark) union instead of the plain
-	// rollup read. MUST be false while the per-pass fold maintains the rollup
-	// (the union would double-count the tail). Query-fleet only; default false.
+	// DAILY watermarked refresh: summaries then serve the exact (rollup ∪
+	// signals-since-watermark) union instead of the plain rollup read. With the
+	// per-pass fold removed (dq#55 step 5) the daily refresh is the rollup's
+	// only maintainer, so this belongs true on the query fleet whenever the
+	// materializer runs the default MATERIALIZER_DAILY_ROLLUP_MODE=on — a plain
+	// rollup read under-counts the post-watermark tail. Query-fleet only;
+	// default false only so a mode=off test/ops setup isn't unioned twice.
 	LakeRollupDailyServing bool `yaml:"LAKE_ROLLUP_DAILY_SERVING"`
 	// LatestKVForceBootstrap re-runs the lake.signals_latest → KV bootstrap on
 	// boot even though the completion marker is present — the repair for a

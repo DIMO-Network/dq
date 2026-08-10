@@ -197,14 +197,14 @@ func TestDuckLakePostgres_ConcurrentPaginatedFatSnapshot(t *testing.T) {
 		GROUP BY cloud_event_id, name, timestamp HAVING count(*) > 1)`).Scan(&dupes))
 	assert.Zero(t, dupes, "no duplicate decoded rows across paginated windows")
 
-	// The commit-time incremental rollup (#5b) must be exact even though it ran across
-	// intermediate windows under two racing writers: it equals a full RecomputeRollup.
-	incremental := dumpRollupMap(t, ctx, db)
-	assert.EqualValues(t, events, incremental[subject+"|speed"].count, "incremental rollup count is exact under concurrent paginated writers")
+	// The rollup recompute over the racing writers' output must be exact: every
+	// row present once, so count equals the seeded events and recency is the
+	// newest reading. (The commit-time incremental fold this once compared
+	// against was removed in dq#55 step 5.)
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, newPGLakeService(t, dsn, dataPath).DB(), zerolog.Nop())
 	require.NoError(t, err)
 	require.NoError(t, mat.RecomputeRollup(ctx))
 	recomputed := dumpRollupMap(t, ctx, db)
-	assert.Equal(t, recomputed[subject+"|speed"].count, incremental[subject+"|speed"].count, "incremental rollup == recompute (PG)")
-	assert.True(t, recomputed[subject+"|speed"].timestamp.Equal(incremental[subject+"|speed"].timestamp), "incremental recency == recompute (PG)")
+	assert.EqualValues(t, events, recomputed[subject+"|speed"].count, "rollup recompute count is exact under concurrent paginated writers")
+	assert.True(t, recomputed[subject+"|speed"].timestamp.Equal(base.Add(time.Duration(events-1)*time.Second).UTC()), "recency is the newest seeded reading (PG)")
 }

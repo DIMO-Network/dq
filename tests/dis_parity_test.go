@@ -173,6 +173,9 @@ func materializeRuptela(t *testing.T) *duck.Service {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Positive(t, drainRunner(t, ctx, runner))
+	// signalsLatest is rollup-served; make it current through tomorrow's UTC
+	// midnight (covers the fixture's timestamp wherever it falls before now).
+	refreshRollup(t, ctx, mat, time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, 1))
 	return svc
 }
 

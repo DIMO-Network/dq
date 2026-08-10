@@ -502,7 +502,7 @@ func buildDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 	dailyMode, ok := materializer.ParseDailyRollupMode(settings.MaterializerDailyRollupMode)
 	if !ok {
 		_ = duckSvc.Close()
-		return nil, nil, nil, fmt.Errorf("invalid MATERIALIZER_DAILY_ROLLUP_MODE %q (off|shadow)", settings.MaterializerDailyRollupMode)
+		return nil, nil, nil, fmt.Errorf("invalid MATERIALIZER_DAILY_ROLLUP_MODE %q (off|on; shadow retired in dq#55 step 5 — move to on)", settings.MaterializerDailyRollupMode)
 	}
 	var dailyDelay time.Duration
 	if settings.MaterializerDailyRollupDelay != "" {

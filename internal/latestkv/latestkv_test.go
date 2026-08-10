@@ -32,7 +32,7 @@ func TestFold_NewerTimestampWins(t *testing.T) {
 }
 
 // The rollup breaks exact-timestamp ties by cloud_event_id ASC
-// (foldSignalsRollup's QUALIFY ordering); the KV fold must pick the same
+// (rollupSelectSQL's QUALIFY ordering); the KV fold must pick the same
 // winner so the phase-2 rollup fallback can't flap between two values.
 func TestFold_EqualTimestampSmallerCEIDWins(t *testing.T) {
 	var e Entry

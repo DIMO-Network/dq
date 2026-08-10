@@ -49,10 +49,10 @@ func TestParseDailyRollupMode(t *testing.T) {
 		want DailyRollupMode
 		ok   bool
 	}{
-		{"", DailyRollupOff, true},
+		{"", DailyRollupOn, true}, // empty defaults ON: an unmaintained rollup must not be reachable by default
 		{"off", DailyRollupOff, true},
-		{"shadow", DailyRollupShadow, true},
-		{"on", DailyRollupOn, true}, // the step-4 flip
+		{"on", DailyRollupOn, true},
+		{"shadow", DailyRollupOff, false}, // retired in step 5: stale shadow-era configs must fail loud
 		{"bogus", DailyRollupOff, false},
 	} {
 		got, ok := ParseDailyRollupMode(tc.in)

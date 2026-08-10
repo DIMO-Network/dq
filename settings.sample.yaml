@@ -42,13 +42,14 @@ MATERIALIZER_ROLLUP_INTERVAL: ''
 MATERIALIZER_BACKFILL_MODE: false
 # Read only to REJECT sharding (> 1 is refused — single writer only).
 MATERIALIZER_SHARD_COUNT: 1
-# Daily signals_latest refresh (dq#55): off | shadow | on. shadow maintains
-# lake.signals_latest_daily by a once-daily watermarked fold and diffs it
-# against the incrementally-folded rollup (the evidence gating the flip); on
-# is the flip — the daily refresh maintains lake.signals_latest itself, the
-# per-pass fold is off, and the first boot after shadow promotes the shadow
-# table. Pair on with LAKE_ROLLUP_DAILY_SERVING=true on the query fleet.
-MATERIALIZER_DAILY_ROLLUP_MODE: 'off'
+# Daily signals_latest refresh (dq#55): off | on, default on (empty means on).
+# on: the once-daily watermarked refresh is THE maintainer of
+# lake.signals_latest (the per-pass fold was removed in step 5). off leaves
+# the rollup unmaintained — tests/one-off ops only, warned at boot. The
+# retired shadow mode is invalid; shadow-era configs must move to on (a
+# leftover lake.signals_latest_daily is promoted automatically at first
+# boot). Pair on with LAKE_ROLLUP_DAILY_SERVING=true on the query fleet.
+MATERIALIZER_DAILY_ROLLUP_MODE: 'on'
 # How long after UTC midnight the daily refresh waits (cursor settle +
 # straggler margin). Empty = 3h30m, the traffic trough.
 MATERIALIZER_DAILY_ROLLUP_DELAY: ''
@@ -56,9 +57,10 @@ MATERIALIZER_DAILY_ROLLUP_DELAY: ''
 # off | shadow | serve, dark-launched independently of LATEST_KV_READ_MODE
 # (which must not be off when this is set). Query fleet only.
 LATEST_KV_READ_MODE_EXTENDED: 'off'
-# Set true ONLY at the dq#55 step-4 flip (rollup maintained by the daily
-# refresh): summaries then serve the exact (rollup ∪ tail) union. Query fleet.
-LAKE_ROLLUP_DAILY_SERVING: false
+# True whenever the materializer runs MATERIALIZER_DAILY_ROLLUP_MODE=on (the
+# default): summaries then serve the exact (rollup ∪ tail) union — a plain
+# rollup read under-counts the post-watermark tail. Query fleet.
+LAKE_ROLLUP_DAILY_SERVING: true
 # Decoded-row retention (Go duration, e.g. 8760h); empty disables pruning.
 LAKE_DECODED_RETENTION: ""
 # Rebuild signals_latest from full base on boot (disaster recovery only; O(history)).

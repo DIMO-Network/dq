@@ -8,7 +8,7 @@
 // The bucket is a CACHE of the lake, never the source of truth: the writer
 // (the single materializer, via materializer.LatestPublisher) folds each
 // decoded batch in last-write-wins by (timestamp DESC, cloud_event_id ASC) —
-// the exact recency order foldSignalsRollup uses — so publishes are idempotent
+// the exact recency order rollupSelectSQL uses — so publishes are idempotent
 // under NATS redelivery, window replay, and backfill. A lost update (KV outage,
 // crash) heals per (subject, name) on that signal's next reading, or wholesale
 // via BootstrapFromRollup. Readers must treat a miss or an unreachable bucket
@@ -142,7 +142,7 @@ func (e *Entry) LastSeen() time.Time {
 // newerThan reports whether (ts, ceid) beats (oldTS, oldCEID) under the
 // rollup's recency order: ORDER BY timestamp DESC, cloud_event_id ASC. On an
 // exact timestamp tie the LEXICOGRAPHICALLY SMALLER cloud_event_id wins —
-// matching foldSignalsRollup/rollupSelectSQL so the KV and the rollup pick the
+// matching rollupSelectSQL so the KV and the rollup pick the
 // same winner and the phase-2 fallback path can't flap between two values.
 func newerThan(ts time.Time, ceid string, oldTS time.Time, oldCEID string) bool {
 	if ts.After(oldTS) {

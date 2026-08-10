@@ -161,11 +161,12 @@ func (r *Runner) Run(ctx context.Context) error {
 			failures.record(true, time.Now()) // any success clears the failure streak
 			triedSessionRecycle = false       // a healthy pass proves the session pool recovered
 			if processed > 0 {
-				// Still draining. signals_latest is maintained INCREMENTALLY at commit
-				// (#5b), so FlushRollup here only recomputes the events_latest rollup and
-				// any backfill-dirtied signal subjects — cheap in steady state. Interval-
-				// gated so a long catch-up doesn't stall the drain (backfill defers to the
-				// single catch-up flush so the drain runs flat-out).
+				// Still draining. signals_latest is maintained by the daily refresh
+				// (dq#55), so FlushRollup here only recomputes the events_latest rollup
+				// (signal subjects are dirtied solely in backfill mode) — cheap in steady
+				// state. Interval-gated so a long catch-up doesn't stall the drain
+				// (backfill defers to the single catch-up flush so the drain runs
+				// flat-out).
 				if !r.cfg.BackfillMode {
 					r.maybeFlushRollup(ctx, &lastRollup)
 				}
@@ -184,8 +185,8 @@ func (r *Runner) Run(ctx context.Context) error {
 			// PollInterval (15s) regardless of RollupInterval — churning ~256 tiny
 			// files per flush into the 256-way-partitioned rollup tables. Honoring
 			// RollupInterval here makes MATERIALIZER_ROLLUP_INTERVAL actually govern
-			// the steady-state cadence (signals_latest stays fresh either way — it is
-			// folded incrementally at commit, so this flush is a no-op for it).
+			// the steady-state cadence (signals_latest is the daily refresh's job, so
+			// this flush is a no-op for it).
 			r.maybeFlushRollup(ctx, &lastRollup)
 			// The daily rollup refresh (dq#55) runs only from the caught-up
 			// branch: "caught up" is the settled-cursor condition its boundary

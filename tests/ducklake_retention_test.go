@@ -65,6 +65,7 @@ func TestDuckLake_PruneDecoded_RemovesOrphanRollup(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 1, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, time.Now().UTC().Truncate(24*time.Hour))
 
 	rollupCount := func() int {
 		var n int

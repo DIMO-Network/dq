@@ -26,7 +26,9 @@ const (
 	// KVReadShadow serves from the rollup exactly as before but ALSO reads the
 	// cache and compares, counting dq_lake_latest_kv_shadow_total — the dark
 	// launch that proves per-query parity on real traffic before any user
-	// request depends on the cache.
+	// request depends on the cache. Under the daily rollup (dq#55) the rollup
+	// baseline is day-stale, so shadow comparisons mint kv_newer noise — shadow
+	// remains useful only for gross-mismatch detection.
 	KVReadShadow KVReadMode = "shadow"
 	// KVReadServe answers from the cache, falling back to the rollup path on
 	// any miss, error, or unknown entry version. NATS unavailability degrades
