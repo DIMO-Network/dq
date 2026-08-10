@@ -35,6 +35,7 @@ func TestDuckLake_QueryBackend(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Positive(t, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	lake := duck.NewLakeQueries(svc)
 

@@ -1,34 +1,25 @@
-// ducklake_daily_flip_test.go proves dq#55 step 4: the shadow→on promote
-// (including remediation of a duplicate-corrupted live table), the per-pass
-// fold going quiet under mode on, and the daily refresh maintaining
-// lake.signals_latest itself — still exactly equal to a full recompute over
-// settled data.
+// ducklake_daily_flip_test.go proves the dq#55 boot transitions of the daily
+// refresh: the shadow→on promote (a leftover shadow-era
+// lake.signals_latest_daily table found at boot under mode on is swapped into
+// lake.signals_latest — including remediation of a duplicate-corrupted live
+// table — then dropped forever), decode leaving lake.signals_latest untouched
+// (the per-pass fold is gone, step 5), and the daily refresh maintaining the
+// live table itself — still exactly equal to a full recompute over settled
+// data. Shadow MODE no longer exists, so the shadow-era state is manufactured
+// directly: the table, its content (a bounded recompute), and the watermark
+// row — exactly what a node upgrading straight from mode=shadow boots with.
 package tests
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/DIMO-Network/dq/internal/materializer"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// oracleRecompute rebuilds lake.signals_latest from the full base with a
-// mode-off materializer (RecomputeRollup is deliberately disabled under mode
-// on) and returns the rows — the exactness oracle for flip tests, valid when
-// every seeded row is stamped before the last refreshed boundary.
-func oracleRecompute(t *testing.T, ctx context.Context, db *sql.DB) map[string]rollupRow {
-	t.Helper()
-	oracle, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
-	require.NoError(t, err)
-	require.NoError(t, oracle.RecomputeRollup(ctx))
-	return dumpRollupMap(t, ctx, db)
-}
 
 func TestDuckLake_DailyFlip_PromoteHealsAndServes(t *testing.T) {
 	ctx := context.Background()
@@ -38,20 +29,24 @@ func TestDuckLake_DailyFlip_PromoteHealsAndServes(t *testing.T) {
 	day0 := time.Now().UTC().AddDate(0, 0, -4).Truncate(24 * time.Hour)
 	b1, b2 := day0.AddDate(0, 0, 1), day0.AddDate(0, 0, 2)
 
-	// Shadow era: fold on, shadow table seeded and folded once.
-	shadowRunner, shadowMat := incrRunner(t, ctx, db, func(m *materializer.DuckLakeMaterializer) {
-		m.WithDailyRollup(materializer.DailyRollupShadow, 0)
-	})
-	require.NoError(t, shadowMat.LoadDailyRollupState(ctx))
+	// Base rows across two settled days, decoded by a default-mode writer.
+	preRunner, preMat := incrRunner(t, ctx, db)
 	seedRawStatus(t, db, "fl-1", subj, day0.Add(time.Hour), speedAt(day0.Add(time.Hour), 30))
-	drainNoFlush(t, ctx, shadowRunner)
-	require.NoError(t, shadowMat.RunDailyRollupRefresh(ctx, b1))
 	seedRawStatus(t, db, "fl-2", subj, b1.Add(time.Hour), speedAt(b1.Add(time.Hour), 44), odoAt(b1.Add(time.Hour), 500))
-	drainNoFlush(t, ctx, shadowRunner)
-	require.NoError(t, shadowMat.RunDailyRollupRefresh(ctx, b2))
+	drainNoFlush(t, ctx, preRunner)
 
-	// Manufacture the production corruption: visible duplicate rows on the
-	// live table (the per-pass-fold-vs-compaction race residue).
+	// Manufacture the shadow-era leftovers a straight-from-shadow upgrade boots
+	// with: a validated one-row-per-key shadow table exact through b2 (all data
+	// is < b2, so a full recompute IS the bounded one) and its watermark row.
+	require.NoError(t, preMat.RecomputeRollup(ctx))
+	_, err := db.ExecContext(ctx, "CREATE TABLE lake.signals_latest_daily AS SELECT * FROM lake.signals_latest")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "INSERT INTO lake.ingest_progress (partition, cursor) VALUES (?, ?)",
+		"lake.signals_latest#daily_watermark", b2.Format(time.RFC3339))
+	require.NoError(t, err)
+
+	// Manufacture the production corruption on the live table: visible
+	// duplicate rows (the per-pass-fold-vs-compaction race residue).
 	for i := 0; i < 5; i++ {
 		_, err := db.ExecContext(ctx,
 			`INSERT INTO lake.signals_latest SELECT * FROM lake.signals_latest WHERE subject = ? AND name = 'speed' LIMIT 1`, subj)
@@ -61,7 +56,7 @@ func TestDuckLake_DailyFlip_PromoteHealsAndServes(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM lake.signals_latest WHERE subject = ? AND name = 'speed'", subj).Scan(&liveRows))
 	require.Greater(t, liveRows, 1, "corruption manufactured")
 
-	// The flip: a new materializer in mode on. Loading state promotes the
+	// The flip boot: a new materializer in mode on. Loading state promotes the
 	// shadow table — the corrupted live content is discarded wholesale.
 	flipRunner, flipMat := incrRunner(t, ctx, db, func(m *materializer.DuckLakeMaterializer) {
 		m.WithDailyRollup(materializer.DailyRollupOn, 0)
@@ -82,7 +77,7 @@ func TestDuckLake_DailyFlip_PromoteHealsAndServes(t *testing.T) {
 	seedRawStatus(t, db, "fl-3", subj, newTS, speedAt(newTS, 77))
 	drainNoFlush(t, ctx, flipRunner)
 	afterDecode := dumpRollupMap(t, ctx, db)
-	assert.EqualValues(t, 2, afterDecode[subj+"|speed"].count, "per-pass fold is off: the rollup is untouched by decode")
+	assert.EqualValues(t, 2, afterDecode[subj+"|speed"].count, "per-pass fold is gone: the rollup is untouched by decode")
 	assert.EqualValues(t, 44, afterDecode[subj+"|speed"].valueNumber.Float64)
 
 	// The next refresh folds the tail into the LIVE table; the result must
@@ -101,6 +96,37 @@ func TestDuckLake_DailyFlip_PromoteHealsAndServes(t *testing.T) {
 		assert.Truef(t, w.firstSeen.Equal(g.firstSeen), "%s first_seen", k)
 		assert.Truef(t, w.lastSeen.Equal(g.lastSeen), "%s last_seen", k)
 	}
+}
+
+// TestDuckLake_DailyFlip_AbortedShadowSeedIsDropped covers the degenerate
+// leftover: a shadow table WITHOUT a watermark (an aborted shadow-era seed) is
+// worthless as a promote source — boot under mode on must drop it, leave the
+// live table alone, and let the first refresh seed lake.signals_latest.
+func TestDuckLake_DailyFlip_AbortedShadowSeedIsDropped(t *testing.T) {
+	ctx := context.Background()
+	svc := newLakeService(t, t.TempDir())
+	db := svc.DB()
+	subj := fmt.Sprintf("did:erc721:137:%s:123", vehicleNFT.Hex())
+	day0 := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour)
+	b1 := day0.AddDate(0, 0, 1)
+
+	runner, mat := incrRunner(t, ctx, db, func(m *materializer.DuckLakeMaterializer) {
+		m.WithDailyRollup(materializer.DailyRollupOn, 0)
+	})
+	seedRawStatus(t, db, "as-1", subj, day0.Add(time.Hour), speedAt(day0.Add(time.Hour), 41))
+	drainNoFlush(t, ctx, runner)
+	// A shadow table with no watermark row: the aborted-seed leftover.
+	_, err := db.ExecContext(ctx, "CREATE TABLE lake.signals_latest_daily AS SELECT * FROM lake.signals_latest WHERE false")
+	require.NoError(t, err)
+
+	require.NoError(t, mat.LoadDailyRollupState(ctx))
+	var shadowExists int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = 'signals_latest_daily'`).Scan(&shadowExists))
+	assert.Zero(t, shadowExists, "unwatermarked shadow table dropped, not promoted")
+
+	require.NoError(t, mat.RunDailyRollupRefresh(ctx, b1))
+	assert.EqualValues(t, 1, dumpRollupMap(t, ctx, db)[subj+"|speed"].count, "first refresh seeds the live table")
 }
 
 // TestDuckLake_DailyFlip_FreshInstallSeedsLive covers mode on with no shadow

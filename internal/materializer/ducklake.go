@@ -1556,38 +1556,21 @@ func (m *DuckLakeMaterializer) insertDecodedSteady(ctx context.Context, tx *sql.
 		}
 		cleanup = append(cleanup, tmp)
 		tsMin, tsMax := timeRange(dec.signals, func(r SignalRow) time.Time { return r.Timestamp })
-		// #5b: steady-state lake.signals_latest is maintained INCREMENTALLY here
-		// (O(batch), not an O(history) recompute per flush). The count delta must be
-		// captured BEFORE the base insert — afterwards the batch rows are in the base and
-		// the NOT-EXISTS probe finds them, yielding delta 0 (that is exactly what makes a
-		// replayed window idempotent). Backfill (bulk/arbitrarily-old) skips the fold and
-		// defers to the end-of-catch-up recompute (markDirtyFromBatch marks it dirty).
-		//
-		// Under MATERIALIZER_DAILY_ROLLUP_MODE=on (dq#55 step 4) the fold is OFF:
-		// the daily refresh maintains lake.signals_latest, and these three
-		// lake.signals scans — the dominant, day-length-dependent term in span
-		// cost — leave the span transaction entirely. This is the flip #55 exists
-		// for; the fold code itself is removed in step 5.
-		foldOn := !m.backfillMode && m.dailyMode != DailyRollupOn
-		if foldOn {
-			if err := m.captureRollupDelta(ctx, tx, tmp); err != nil {
-				return cleanup, err
-			}
-		}
+		// lake.signals_latest is NOT touched here (dq#55 step 5): the per-pass
+		// incremental fold (#5b) was removed once the daily watermarked refresh
+		// (daily_rollup.go) became the rollup's only writer — its three
+		// lake.signals scans were the dominant, day-length-dependent term in
+		// span cost, and its DELETE raced din's compaction into duplicate rows.
+		// The span transaction is now base-insert + late-subject marking only.
 		if _, err := tx.ExecContext(ctx, antiJoinInsert("lake.signals", tmp, tsMin, tsMax, m.backfillMode)); err != nil {
 			return cleanup, fmt.Errorf("insert signals: %w", err)
-		}
-		if foldOn {
-			if err := m.foldSignalsRollup(ctx, tx, tmp); err != nil {
-				return cleanup, err
-			}
 		}
 		// Record late arrivals for the daily rollup refresh (dq#55): a row
 		// stamped before the daily watermark is invisible to every future
 		// constant-predicate fold, so its subject must be marked for the
 		// refresh's bounded recompute. In THIS transaction, so the mark is
 		// crash-atomic with the rows it marks. Normally zero rows and skipped
-		// entirely; a no-op unless MATERIALIZER_DAILY_ROLLUP_MODE is set.
+		// entirely; a no-op until the daily watermark is loaded.
 		if m.dailyActive() {
 			if stmt, args := m.lateDailyInsert(dec.signals); stmt != "" {
 				if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
@@ -1613,9 +1596,11 @@ func (m *DuckLakeMaterializer) insertDecodedSteady(ctx context.Context, tx *sql.
 // markDirtyFromBatch records the subjects dec wrote so the decoupled rollups refresh
 // only their rows, escalating to a full rebuild if a dirty set overflows its cap (a
 // fleet-wide catch-up would otherwise grow the maps unbounded — see the field docs).
-// signals_latest is now maintained incrementally at commit time (#5b), so signals are
-// dirtied ONLY under backfillMode (the deferred bulk catch-up recomputes them at the
-// end); events_latest still uses the decoupled recompute, so events are always dirtied.
+// signals_latest is maintained by the daily refresh (dq#55), so signals are dirtied
+// ONLY under backfillMode — the bulk catch-up's touched set, which
+// PersistDailyLateSubjects hands to the late table (and FlushRollup recomputes
+// directly in the tests-only mode off); events_latest still uses the decoupled
+// recompute, so events are always dirtied.
 // Single-writer: mutated only on the decode-loop goroutine.
 func (m *DuckLakeMaterializer) markDirtyFromBatch(dec *decodedBatch) {
 	if m.backfillMode {
@@ -1640,103 +1625,6 @@ func (m *DuckLakeMaterializer) markDirtyFromBatch(dec *decodedBatch) {
 	if m.dailyActive() {
 		m.markLateDailySeen(dec.signals)
 	}
-}
-
-// captureRollupDelta stages, into the per-connection temp table _rollup_delta, the number
-// of NEWLY-DISTINCT (subject, name, timestamp) tuples this batch adds — i.e. the exact
-// increment to lake.signals_latest.count (#5b). It must run BEFORE the base insert: it
-// probes lake.signals for tuples that DON'T already exist, so a redelivery or a
-// same-(subject,name,timestamp) collision (which the count must not double) contributes 0,
-// and a replayed window (rows already at rest) yields 0 — the idempotency the crash-
-// recovery path relies on. The probe matches on the EXACT timestamp (partition-pruned by
-// subject_bucket + the day partition), deliberately NOT clamped to the anti-join's 30d
-// dedup window: an ancient (>30d) redelivery must still find its existing row so count
-// stays equal to a full RecomputeRollup, even though the physical anti-join may re-insert a
-// duplicate row (the read-path QUALIFY dedup collapses that, and count must match it).
-func (m *DuckLakeMaterializer) captureRollupDelta(ctx context.Context, tx *sql.Tx, sigParquet string) error {
-	q := fmt.Sprintf(`CREATE OR REPLACE TEMPORARY TABLE _rollup_delta AS
-SELECT b.subject, b.name, CAST(count(*) AS BIGINT) AS delta
-FROM (SELECT DISTINCT subject, name, subject_bucket, "timestamp" FROM read_parquet(%[1]s)) b
-WHERE NOT EXISTS (
-  SELECT 1 FROM lake.signals s
-  WHERE s.subject_bucket = b.subject_bucket AND s.subject = b.subject AND s.name = b.name
-    AND s."timestamp" = b."timestamp"
-)
-GROUP BY b.subject, b.name`, sqlLit(sigParquet))
-	if _, err := tx.ExecContext(ctx, q); err != nil {
-		return fmt.Errorf("capture rollup count delta: %w", err)
-	}
-	return nil
-}
-
-// foldSignalsRollup folds this batch into lake.signals_latest incrementally, EXACTLY as a
-// full recompute would (proven by the differential test), but O(batch) instead of
-// O(history) (#5b). It runs AFTER the base insert, inside the same transaction:
-//   - RECENCY (timestamp, value_*, loc_*, loc_ts) is recomputed from the base but BOUNDED
-//     to "timestamp >= the row's prior latest" — the new latest is either in this batch
-//     (newer) or unchanged (the prior row still qualifies), so the bound is exact yet
-//     prunes every day-partition older than the prior latest. This makes recency
-//     SELF-HEALING (recomputed from the base each batch), matching the recompute's deduped
-//     arg_max via ORDER BY timestamp DESC, cloud_event_id ASC.
-//   - COUNT is prev.count + the captured NOT-EXISTS delta; FIRST_SEEN is min(prev, batch).
-//     These carry forward (idempotent on replay), and self-heal via the boot rebuild
-//     (RecomputeRollup / LAKE_REBUILD_ROLLUP_ON_BOOT) if a rollup row is ever lost.
-// A (subject,name) with no prior rollup row folds against zero — correct in steady state
-// (a newly-seen signal has no prior base); a mass-loss (dropped rollup) is the boot
-// rebuild's job, exactly as before.
-func (m *DuckLakeMaterializer) foldSignalsRollup(ctx context.Context, tx *sql.Tx, sigParquet string) error {
-	build := fmt.Sprintf(`CREATE OR REPLACE TEMPORARY TABLE _rollup_new AS
-WITH affected AS (
-  SELECT subject, name, any_value(subject_bucket) AS subject_bucket, min("timestamp") AS batch_min
-  FROM read_parquet(%[1]s) GROUP BY subject, name
-),
-prev AS (
-  SELECT l.subject, l.name, l."timestamp" AS prev_ts, l.loc_ts AS prev_loc_ts, l.count AS prev_count, l.first_seen AS prev_first
-  FROM lake.signals_latest l
-  WHERE EXISTS (SELECT 1 FROM affected a WHERE a.subject = l.subject AND a.name = l.name)
-),
-recency AS (
-  SELECT s.subject, s.name, s."timestamp" AS ts, s.value_number, s.value_string
-  FROM lake.signals s
-  JOIN affected a ON s.subject = a.subject AND s.name = a.name AND s.subject_bucket = a.subject_bucket
-  LEFT JOIN prev p ON p.subject = s.subject AND p.name = s.name
-  WHERE s."timestamp" >= coalesce(p.prev_ts, make_timestamp(0))
-  QUALIFY row_number() OVER (PARTITION BY s.subject, s.name ORDER BY s."timestamp" DESC, s.cloud_event_id ASC) = 1
-),
-locrec AS (
-  SELECT s.subject, s.name, s."timestamp" AS loc_ts, s.loc_lat, s.loc_lon, s.loc_hdop, s.loc_heading
-  FROM lake.signals s
-  JOIN affected a ON s.subject = a.subject AND s.name = a.name AND s.subject_bucket = a.subject_bucket
-  LEFT JOIN prev p ON p.subject = s.subject AND p.name = s.name
-  WHERE (s.loc_lat != 0 OR s.loc_lon != 0) AND s."timestamp" >= coalesce(p.prev_loc_ts, make_timestamp(0))
-  QUALIFY row_number() OVER (PARTITION BY s.subject, s.name ORDER BY s."timestamp" DESC, s.cloud_event_id ASC) = 1
-)
-SELECT a.subject, a.subject_bucket, a.name,
-  r.ts AS "timestamp", r.value_number, r.value_string,
-  coalesce(lr.loc_lat, 0) AS loc_lat, coalesce(lr.loc_lon, 0) AS loc_lon,
-  coalesce(lr.loc_hdop, 0) AS loc_hdop, coalesce(lr.loc_heading, 0) AS loc_heading,
-  coalesce(lr.loc_ts, make_timestamp(0)) AS loc_ts,
-  coalesce(p.prev_count, 0) + coalesce(d.delta, 0) AS count,
-  LEAST(coalesce(p.prev_first, a.batch_min), a.batch_min) AS first_seen,
-  r.ts AS last_seen
-FROM affected a
-JOIN recency r ON r.subject = a.subject AND r.name = a.name
-LEFT JOIN locrec lr ON lr.subject = a.subject AND lr.name = a.name
-LEFT JOIN prev p ON p.subject = a.subject AND p.name = a.name
-LEFT JOIN _rollup_delta d ON d.subject = a.subject AND d.name = a.name`, sqlLit(sigParquet))
-	if _, err := tx.ExecContext(ctx, build); err != nil {
-		return fmt.Errorf("build incremental rollup rows: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM lake.signals_latest WHERE EXISTS (SELECT 1 FROM _rollup_new n WHERE n.subject = lake.signals_latest.subject AND n.name = lake.signals_latest.name)`); err != nil {
-		return fmt.Errorf("delete superseded rollup rows: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO lake.signals_latest (subject, subject_bucket, name, "timestamp", value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading, loc_ts, count, first_seen, last_seen)
-		 SELECT subject, subject_bucket, name, "timestamp", value_number, value_string, loc_lat, loc_lon, loc_hdop, loc_heading, loc_ts, count, first_seen, last_seen FROM _rollup_new`); err != nil {
-		return fmt.Errorf("insert incremental rollup rows: %w", err)
-	}
-	return nil
 }
 
 // writeWindow writes an INTERMEDIATE pagination window (finding #1c): the decoded rows
@@ -1981,23 +1869,6 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 			WHERE s.subject_bucket = sl.subject_bucket AND s.subject = sl.subject AND s.name = sl.name)`, cutoff)); err != nil {
 		return total, fmt.Errorf("pruning orphaned rollup rows: %w", err)
 	}
-	// Same orphan cleanup for the daily rollup shadow table (dq#55): without it a
-	// retention prune strips live rollup rows the daily table still carries, and
-	// the shadow diff reads that drift as permanent missing_live noise. Gated on
-	// a NON-ZERO watermark, not just loaded state: pre-seed the table is empty
-	// (or damaged from an aborted seed) and must not be scanned — the seed
-	// itself never scans it for the same reason (see seedDailyRollup). Shadow
-	// mode only: post-flip there is no second table (the live block above
-	// covers the daily-maintained lake.signals_latest).
-	if m.dailyMode == DailyRollupShadow && m.dailyStateLoaded && !m.dailyWatermark.IsZero() {
-		if _, err := m.db.ExecContext(ctx,
-			fmt.Sprintf(`DELETE FROM %s sd WHERE sd.last_seen < make_timestamp(%d) AND NOT EXISTS (
-				SELECT 1 FROM lake.signals s
-				WHERE s.subject_bucket = sd.subject_bucket AND s.subject = sd.subject AND s.name = sd.name)`,
-				dailyRollupTable, cutoff)); err != nil {
-			return total, fmt.Errorf("pruning orphaned daily rollup rows: %w", err)
-		}
-	}
 	// Same orphan cleanup for the events rollup (finding #5a): drop events_latest rows
 	// whose base events were all pruned away, bounded to last_seen < cutoff so the
 	// anti-join probes only long-dormant rows and each NOT EXISTS is partition-pruned.
@@ -2025,25 +1896,14 @@ func (m *DuckLakeMaterializer) PruneDecoded(ctx context.Context, retention time.
 const signalsLatestColumns = ` (subject, subject_bucket, name, "timestamp", value_number, ` +
 	`value_string, loc_lat, loc_lon, loc_hdop, loc_heading, loc_ts, count, first_seen, last_seen) `
 
-// rollupSelectSQL is the FULL-history recompute of a set of rollup rows. Steady-state
-// maintenance no longer uses it — lake.signals_latest is folded INCREMENTALLY at commit
-// time (foldSignalsRollup, #5b), O(batch) not O(history). This recompute is retained for
-// the paths that genuinely need a from-scratch rebuild: the disaster-recovery / boot
-// rebuild (RecomputeRollup / LAKE_REBUILD_ROLLUP_ON_BOOT) and the deferred bulk-backfill
-// catch-up (FlushRollup over backfill-dirtied subjects). Kept byte-identical to the fold's
-// result — the differential test (tests/ducklake_incremental_rollup_test.go) asserts the
-// incremental path equals this recompute across redelivery, same-timestamp collision,
-// out-of-order arrival, multi-window spans, and crash-replay.
-//
-// Why the fold is exact where a naive `timestamp >= floor` recompute would not be:
-// RECENCY (timestamp/value_*/loc_*/loc_ts) IS recomputed each batch, but bounded to
-// `timestamp >= the row's prior latest` — the new latest is either in the batch or the
-// prior row still qualifies, so the bound prunes old day-partitions without dropping the
-// answer (self-healing + exact). COUNT and FIRST_SEEN are the full-history aggregates a
-// floor would corrupt, so they are NOT floored: count carries forward as prev.count + a
-// NOT-EXISTS delta over DISTINCT (subject,name,timestamp) — collisions and redeliveries
-// contribute 0, and a replayed window contributes 0 (idempotent) — and first_seen min-folds
-// the batch min. Both self-heal via this recompute on boot if a rollup row is ever lost.
+// rollupSelectSQL is the FULL-history recompute of a set of rollup rows — the single
+// definition of what a lake.signals_latest row IS. Every writer derives from it: the
+// daily refresh (dq#55) seeds with it bounded to timestamp < W, folds with it over
+// [W_old, W_new), and recomputes late subjects with it bounded to < W; the
+// disaster-recovery / boot rebuild (RecomputeRollup / LAKE_REBUILD_ROLLUP_ON_BOOT)
+// and the tests-only mode-off FlushRollup run it unbounded. (The per-pass
+// incremental fold that once maintained the rollup at commit time (#5b) was removed
+// in dq#55 step 5 — the daily refresh is the only steady-state writer.)
 func rollupSelectSQL(whereClause string) string {
 	const locNonzero = "(loc_lat != 0 OR loc_lon != 0)"
 	return fmt.Sprintf(`SELECT subject, any_value(subject_bucket) AS subject_bucket, name,
@@ -2069,8 +1929,11 @@ func rollupSelectSQL(whereClause string) string {
 const rollupSubjectChunk = 500
 
 // FlushRollup recomputes lake.signals_latest for every subject whose base rows
-// changed since the last flush (the decoupled, off-commit rollup maintenance).
-// A no-op when nothing is dirty. Subject-scoped, not bucket-scoped (B2): a
+// changed since the last flush. Since dq#55 step 5 the signals path below the
+// mode gate runs only under the tests-only mode off (steady state dirties
+// signal subjects solely in backfillMode, and mode on diverts those to the
+// late set); it is kept because mode-off tests and the backfill flush still
+// exercise it. A no-op when nothing is dirty. Subject-scoped, not bucket-scoped (B2): a
 // bucket recompute is O(the bucket's entire retained history) and bucket
 // dirtiness saturates at trivial fleet activity, which made every flush a
 // full-table recompute on the decode goroutine. Recomputing only the dirty

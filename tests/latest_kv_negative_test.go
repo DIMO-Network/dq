@@ -195,6 +195,7 @@ func TestLatestKVNegative_ShadowServesRollupResult(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 1, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	shadowQ := negativeQueries(t, svc, store, duck.KVNegativeShadow)
 	rollupQ := duck.NewLakeQueries(svc)

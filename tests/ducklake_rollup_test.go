@@ -36,6 +36,7 @@ func TestDuckLake_LatestSummaryRollup(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 3, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	q := duck.NewLakeQueries(svc)
 
@@ -68,9 +69,12 @@ func TestDuckLake_LatestSummaryRollup(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, avail, "speed")
 
-	// Incremental: a fourth, newer reading updates the rollup latest to 90.
+	// Incremental: a fourth reading lands (stamped before the watermark, so it
+	// travels the late-subject path) and the NEXT refresh updates the rollup
+	// latest to 90.
 	seedRawStatus(t, db, "rl-4", subject, day.Add(4*time.Hour), speedAt(day.Add(4*time.Hour), 90))
 	require.Equal(t, 1, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 2))
 	latest2, err := q.GetAllLatestSignals(ctx, subject, nil)
 	require.NoError(t, err)
 	for _, s := range latest2 {

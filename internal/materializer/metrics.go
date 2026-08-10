@@ -152,7 +152,7 @@ var (
 	//   resolve_blobs — S3 GETs for externalized payloads (16-way concurrent)
 	//   decode        — model-garage conversion fan-out (CPU)
 	//   write_window  — one intermediate window's DuckLake txn (temp parquet,
-	//                   anti-join INSERT, incremental rollup fold, KV publish)
+	//                   anti-join INSERT, late-subject marking, KV publish)
 	//   commit        — the final window's txn incl. the cursor CAS
 	phaseSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "dq_materializer_phase_seconds",
@@ -161,8 +161,7 @@ var (
 	}, []string{"phase"})
 	// Daily rollup refresh metrics (dq#55; daily_rollup.go). The watermark gauge
 	// is the liveness signal: it must advance once per UTC day — alert on it
-	// falling more than ~2 days behind now. The diff gauges are the shadow-mode
-	// differential evidence; any sustained non-zero blocks the step-4 flip.
+	// falling more than ~2 days behind now.
 	dailyRollupRefreshSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "dq_materializer_daily_rollup_refresh_seconds",
 		Help: "Wall-clock of the most recent daily signals_latest refresh (seed or fold + late-set recompute).",
@@ -175,10 +174,6 @@ var (
 		Name: "dq_materializer_daily_rollup_watermark_timestamp_seconds",
 		Help: "The daily rollup watermark (UTC-midnight boundary the daily table is exact through), as a unix timestamp. Advances once per day; alert if it falls >2 days behind.",
 	})
-	dailyRollupDiffRows = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "dq_materializer_daily_rollup_diff_rows",
-		Help: "Shadow-mode diff between the daily table and the incremental rollup over the settled window, by class (missing_daily|missing_live|mismatch). Must hold at zero to gate the dq#55 flip.",
-	}, []string{"class"})
 	dailyRollupLateSubjects = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "dq_materializer_daily_rollup_late_subjects",
 		Help: "Late-arrival subjects (rows stamped before the watermark) recomputed by the most recent daily refresh.",
@@ -188,7 +183,7 @@ var (
 	// serving-visible duplicate rows — see observeRollupCardinality).
 	dailyRollupSideRows = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "dq_materializer_daily_rollup_table_rows",
-		Help: "Rollup table cardinality by side (live|daily) and kind (keys|rows|dup_keys|dup_rows), measured at each daily refresh. rows > keys means visible duplicate rows.",
+		Help: "lake.signals_latest cardinality by kind (keys|rows|dup_keys|dup_rows), measured at boot and at each daily refresh; side is always \"live\" (the shadow side retired with dq#55 step 5). rows > keys means visible duplicate rows.",
 	}, []string{"side", "kind"})
 	// progressReportErrorsTotal counts failures writing dq's snapshot floor to
 	// meta.din_consumer_progress. Decode keeps succeeding (a separate txn) so dq's own
@@ -218,7 +213,7 @@ func registerMetrics() {
 			headSnapshotID, cursorResetGap, blobMissingTotal, blobPoisonTotal,
 			phaseSeconds, progressReportErrorsTotal,
 			dailyRollupRefreshSeconds, dailyRollupRefreshTotal, dailyRollupWatermark,
-			dailyRollupDiffRows, dailyRollupLateSubjects, dailyRollupSideRows,
+			dailyRollupLateSubjects, dailyRollupSideRows,
 		)
 	})
 }

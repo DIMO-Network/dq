@@ -35,6 +35,7 @@ func TestDuckLake_GetLatestSignals_ServedFromRollup(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 2, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	// Drop the base history; the rollup is current state and stays (this is
 	// exactly what PruneDecoded does at the retention boundary).
@@ -63,7 +64,9 @@ func TestDuckLake_GetLatestSignals_ServedFromRollup(t *testing.T) {
 // and a later batch touching one subject refreshes that subject's rollup row
 // without disturbing (or depending on re-scanning) the others. Bucket-scoped
 // dirtiness saturated at trivial fleet activity and made every flush a
-// full-table recompute on the decode goroutine.
+// full-table recompute on the decode goroutine. Since dq#55 step 5 signal
+// subjects are dirtied only in backfill mode (the bulk catch-up is the
+// machinery's remaining consumer), so that is how this test drives it.
 func TestDuckLake_FlushRollup_SubjectScoped(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -82,6 +85,7 @@ func TestDuckLake_FlushRollup_SubjectScoped(t *testing.T) {
 
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
+	mat.WithBackfillMode(true) // the dirty-set flush's remaining consumer (see the test doc)
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 3, drainRunner(t, ctx, runner))
@@ -141,6 +145,7 @@ func TestDuckLake_LocationLatest_ServedFromRollup(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 1, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	// Retention prunes the base; the rollup is current state and stays.
 	_, err = db.ExecContext(ctx, "DELETE FROM lake.signals")
@@ -168,7 +173,9 @@ func TestDuckLake_LocationLatest_ServedFromRollup(t *testing.T) {
 // catch-up bound: when more distinct subjects dirty the rollup than the cap
 // allows (initial backfill defers the flush until fully drained), the dirty
 // set must not grow unbounded — FlushRollup escalates to the bucket-chunked
-// full rebuild and the rollup still comes out complete and correct.
+// full rebuild and the rollup still comes out complete and correct. Backfill
+// mode is what dirties signal subjects since dq#55 step 5, so it drives the
+// overflow here.
 func TestDuckLake_DirtySetOverflow_EscalatesToFullRebuild(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -185,6 +192,7 @@ func TestDuckLake_DirtySetOverflow_EscalatesToFullRebuild(t *testing.T) {
 
 	mat, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
 	require.NoError(t, err)
+	mat.WithBackfillMode(true)  // signal subjects are dirtied only in backfill mode
 	mat.WithMaxDirtySubjects(2) // force the overflow path with a tiny cap
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)

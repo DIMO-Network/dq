@@ -12,29 +12,38 @@ import (
 	"github.com/DIMO-Network/dq/internal/service/duck"
 )
 
-// The daily rollup refresh (dq#55, step 1).
+// The daily rollup refresh (dq#55) — since step 5, THE maintenance path for
+// lake.signals_latest.
 //
-// The per-pass incremental fold (captureRollupDelta + foldSignalsRollup) keeps
-// lake.signals_latest continuously exact, but its lake.signals scans carry a
-// correlated bound (s.timestamp >= prev_ts) that cannot drive static partition
-// pruning — every span re-opens roughly the day partition's current file set,
-// three times, and the file count grows all day. That is the daily pass-duration
-// sawtooth. Since the KV serves signalsLatest (LATEST_KV_READ_MODE=serve), the
-// rollup's remaining jobs — KV bootstrap/reconcile source, rare fallback — have
-// no freshness SLA of their own, so the plan is to refresh it once daily from a
-// WATERMARK: a constant timestamp literal that prunes the fold to the settled
-// day partition.
-//
-// Step 1 (this file) ships the mechanism WITHOUT touching the serving table:
-// a shadow table, lake.signals_latest_daily, is maintained exclusively by the
-// daily refresh while the per-pass fold keeps maintaining lake.signals_latest.
-// A diff pass after each refresh compares the two over the settled window —
-// the production differential evidence that gates the step-4 flip (at which
-// point the validated shadow table is promoted and the fold removed).
+// History, briefly: the per-pass incremental fold (captureRollupDelta +
+// foldSignalsRollup, removed in step 5) kept lake.signals_latest continuously
+// exact, but its lake.signals scans carried a correlated bound (s.timestamp >=
+// prev_ts) that cannot drive static partition pruning — every span re-opened
+// roughly the day partition's current file set, three times, growing all day
+// (the daily pass-duration sawtooth). Worse, the fold's DELETE racing din's
+// rewrite_data_files compaction silently removed nothing and accumulated
+// visible duplicate rows (2026-08-08: 823k rows over 7.7k keys on the live
+// table). Since the KV serves signalsLatest (LATEST_KV_READ_MODE=serve), the
+// rollup's remaining jobs — KV bootstrap/reconcile source, summaries baseline,
+// rare fallback — have no freshness SLA of their own, so it is refreshed once
+// daily from a WATERMARK: a constant timestamp literal that prunes the fold to
+// the settled day partition. Step 1 (#56) shipped the mechanism against a
+// shadow table (lake.signals_latest_daily) with a per-refresh diff as the flip
+// evidence — creating that table with plain DDL and never scanning it pre-seed
+// (#59), after a zero-row CTAS left degenerate inlined-data state whose first
+// scan crashed the ducklake extension (the ducklake#281 family, 2026-08-07);
+// the cardinality probe (#62) then quantified the fold-era duplicate
+// corruption; step 4 (#63) flipped prod to mode on (promoting the validated
+// shadow table, which also remediated that corruption); step 5 removed the
+// per-pass fold and the shadow scaffolding. What remains of the shadow era is
+// the boot-time promote in LoadDailyRollupState, for a node upgrading straight
+// from mode=shadow with a leftover shadow table.
 //
 // Invariant (the induction base every fold step relies on): after a refresh to
-// watermark W, lake.signals_latest_daily is EXACTLY rollupSelectSQL over
-// lake.signals restricted to timestamp < W. Three mechanisms preserve it:
+// watermark W, lake.signals_latest is EXACTLY rollupSelectSQL over
+// lake.signals restricted to timestamp < W (plus, above W, nothing — the tail
+// is the read side's job: the summaries union and the KV serve it). Three
+// mechanisms preserve it:
 //
 //   - the seed: a full bounded recompute (timestamp < W), bucket-chunked;
 //   - the daily fold: rollupSelectSQL over [W_old, W_new) merged onto the
@@ -50,7 +59,7 @@ import (
 //     path records their subjects durably in lake.rollup_late_subjects (same
 //     transaction as the base insert), and the refresh recomputes those
 //     subjects bounded to timestamp < W_new, then clears them. Without this
-//     the shadow table would be stale for a buffered-upload subject not for
+//     the rollup would be stale for a buffered-upload subject not for
 //     <=24h but forever.
 const (
 	// dailyWatermarkPartition is the lake.ingest_progress key holding the daily
@@ -61,8 +70,9 @@ const (
 	// definition lives in duck (the query layer's summaries union reads it
 	// too); internal/latestkv carries a documented duplicate (import cycle).
 	dailyWatermarkPartition = duck.RollupDailyWatermarkPartition
-	// dailyRollupTable is the shadow rollup maintained by the daily refresh in
-	// step 1 (mode shadow). The step-4 flip promotes it to lake.signals_latest.
+	// dailyRollupTable is the shadow-era rollup table (dq#55 step 1). It is no
+	// longer written; the name survives only for the boot-time promote/drop of
+	// a leftover copy in LoadDailyRollupState — after which it is gone forever.
 	dailyRollupTable = "lake.signals_latest_daily"
 	// lateSubjectsTable records subjects that committed base rows stamped
 	// BEFORE the current watermark (late arrivals). Written in the decode
@@ -82,46 +92,36 @@ const defaultDailyRollupDelay = 3*time.Hour + 30*time.Minute
 type DailyRollupMode string
 
 const (
-	// DailyRollupOff disables the daily refresh entirely (default).
+	// DailyRollupOff disables the daily refresh entirely. With the per-pass
+	// fold removed (dq#55 step 5) NOTHING maintains lake.signals_latest in
+	// this mode — it exists for tests and one-off ops only, and
+	// LoadDailyRollupState warns when it sees it.
 	DailyRollupOff DailyRollupMode = "off"
-	// DailyRollupShadow maintains lake.signals_latest_daily by daily refresh
-	// while the per-pass fold keeps maintaining lake.signals_latest, and diffs
-	// the two after each refresh — the production differential evidence that
-	// gates the flip. Serving is untouched.
-	DailyRollupShadow DailyRollupMode = "shadow"
-	// DailyRollupOn is the dq#55 step-4 flip: the daily refresh maintains
-	// lake.signals_latest ITSELF and the per-pass fold is off — span
-	// transactions lose their dominant, day-length-dependent term. On the
-	// first boot after switching from shadow, the (validated, one-row-per-key)
-	// shadow table is PROMOTED into lake.signals_latest — which is also the
-	// remediation for the duplicate-row corruption the shadow diff exposed
-	// (2026-08-08: live carried 823k rows over 7.7k keys; the promote
-	// discards them). Pair with LAKE_ROLLUP_DAILY_SERVING=true on the query
-	// fleet, or summaries under-count the tail.
+	// DailyRollupOn (the default): the daily refresh maintains
+	// lake.signals_latest — since the dq#55 step-4 flip the only writer of the
+	// rollup, and since step 5 the only mechanism that exists. On the first
+	// boot after an upgrade straight from mode=shadow, the (validated,
+	// one-row-per-key) shadow table is PROMOTED into lake.signals_latest —
+	// which is also the remediation for the duplicate-row corruption the
+	// shadow diff exposed (2026-08-08: live carried 823k rows over 7.7k keys;
+	// the promote discards them). Pair with LAKE_ROLLUP_DAILY_SERVING=true on
+	// the query fleet, or summaries under-count the tail.
 	DailyRollupOn DailyRollupMode = "on"
 )
 
-// ParseDailyRollupMode validates a MATERIALIZER_DAILY_ROLLUP_MODE value; empty
-// means off.
+// ParseDailyRollupMode validates a MATERIALIZER_DAILY_ROLLUP_MODE value. Empty
+// means ON: with the per-pass fold gone, an unmaintained rollup must not be
+// reachable by default — a node with no explicit mode gets the daily refresh.
+// The retired "shadow" value is now invalid so a stale config fails loud at
+// boot instead of silently running an unmaintained mode.
 func ParseDailyRollupMode(s string) (DailyRollupMode, bool) {
 	switch DailyRollupMode(s) {
-	case "", DailyRollupOff:
-		return DailyRollupOff, true
-	case DailyRollupShadow:
-		return DailyRollupShadow, true
-	case DailyRollupOn:
+	case "", DailyRollupOn:
 		return DailyRollupOn, true
+	case DailyRollupOff:
+		return DailyRollupOff, true
 	}
 	return DailyRollupOff, false
-}
-
-// dailyTargetTable is the table the daily refresh maintains: the shadow table
-// during the evidence phase, lake.signals_latest itself after the flip.
-func (m *DuckLakeMaterializer) dailyTargetTable() string {
-	if m.dailyMode == DailyRollupOn {
-		return "lake.signals_latest"
-	}
-	return dailyRollupTable
 }
 
 // WithDailyRollup configures the daily rollup refresh (dq#55). delay <= 0 uses
@@ -149,19 +149,18 @@ func (m *DuckLakeMaterializer) dailyActive() bool {
 
 // LoadDailyRollupState ensures the daily-refresh tables exist and loads the
 // watermark. Called once from the Runner before the decode loop (and lazily by
-// MaybeDailyRollupRefresh if that call failed); a no-op when the mode is off.
+// MaybeDailyRollupRefresh if that call failed); a no-op when the mode is off —
+// but a LOUD one: with the fold gone, off means nothing maintains the rollup.
 func (m *DuckLakeMaterializer) LoadDailyRollupState(ctx context.Context) error {
 	if !m.dailyConfigured() || m.dailyStateLoaded {
+		if m.dailyMode == DailyRollupOff {
+			m.log.Warn().Msg("MATERIALIZER_DAILY_ROLLUP_MODE=off: NOTHING maintains lake.signals_latest (the per-pass fold was removed in dq#55 step 5) — tests/one-off ops only")
+		}
 		return nil
 	}
 	daily, err := m.tableExists(ctx, "lake", "signals_latest_daily")
 	if err != nil {
 		return err
-	}
-	if !daily && m.dailyMode == DailyRollupShadow {
-		if err := m.createDailyTable(ctx); err != nil {
-			return err
-		}
 	}
 	if err := m.execRetryConflict(ctx, "CREATE TABLE IF NOT EXISTS "+lateSubjectsTable+" (subject VARCHAR)"); err != nil {
 		return fmt.Errorf("ensuring daily rollup objects: %w", err)
@@ -170,13 +169,14 @@ func (m *DuckLakeMaterializer) LoadDailyRollupState(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// The shadow→on transition: a leftover shadow table with a valid watermark
-	// is the validated, one-row-per-key copy — promote it into
-	// lake.signals_latest (and discard whatever the per-pass fold era left
-	// there, duplicate-row corruption included). A failure leaves state
-	// unloaded, so the next caught-up pass retries; the fold is already off
-	// (mode-gated), and every serving-critical read is KV-backed meanwhile.
-	if m.dailyMode == DailyRollupOn && daily {
+	// The shadow→on transition (a node upgrading straight from shadow-era
+	// config): a leftover shadow table with a valid watermark is the
+	// validated, one-row-per-key copy — promote it into lake.signals_latest
+	// (and discard whatever the per-pass fold era left there, duplicate-row
+	// corruption included). A failure leaves state unloaded, so the next
+	// caught-up pass retries; every serving-critical read is KV-backed
+	// meanwhile. After the promote the table is gone forever.
+	if daily {
 		if w.IsZero() {
 			// A shadow table without a watermark is an aborted shadow seed —
 			// worthless as a promote source. Drop it; the first refresh seeds
@@ -249,37 +249,6 @@ func (m *DuckLakeMaterializer) promoteDailyRollup(ctx context.Context) error {
 		return fmt.Errorf("dropping promoted shadow table: %w", err)
 	}
 	m.log.Info().Int64("keys", keys).Msg("shadow table promoted; lake.signals_latest is one-row-per-key and daily-maintained")
-	return nil
-}
-
-// createDailyTable creates the shadow table with EXPLICIT DDL — a column-level
-// copy of lake.signals_latest's creation statement (setupStatements), and
-// deliberately NOT a zero-row CTAS. The original `CREATE ... AS SELECT * FROM
-// lake.signals_latest WHERE false` left degenerate inlined-data state on the
-// production catalog (Postgres, din's data inlining on): the table's very
-// first scan — the seed's bucket-0 DELETE — died inside
-// DuckLakeInlinedDataReader::TryInitializeScan with "Attempted to access index
-// 0 within vector of size 0" (the ducklake#281 error family, still present at
-// v1.5.4), invalidating the embedded database and restart-looping the writer
-// (2026-08-07). Every other lake table is created with plain DDL and scans
-// fine under inlining; the shadow table now matches. The partition ALTER must
-// run only at first creation (re-ALTERing is a crash — see setupStatements).
-func (m *DuckLakeMaterializer) createDailyTable(ctx context.Context) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS ` + dailyRollupTable + ` (
-			subject VARCHAR, subject_bucket INTEGER, name VARCHAR,
-			"timestamp" TIMESTAMP WITH TIME ZONE,
-			value_number DOUBLE, value_string VARCHAR,
-			loc_lat DOUBLE, loc_lon DOUBLE, loc_hdop DOUBLE, loc_heading DOUBLE,
-			loc_ts TIMESTAMP WITH TIME ZONE,
-			count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
-		"ALTER TABLE " + dailyRollupTable + " SET PARTITIONED BY (subject_bucket)",
-	}
-	for _, s := range stmts {
-		if err := m.execRetryConflict(ctx, s); err != nil {
-			return fmt.Errorf("creating daily rollup table: %w", err)
-		}
-	}
 	return nil
 }
 
@@ -401,57 +370,32 @@ func (m *DuckLakeMaterializer) RunDailyRollupRefresh(ctx context.Context, bounda
 	dailyRollupRefreshTotal.WithLabelValues("ok").Inc()
 	m.log.Info().Time("watermark", boundary).Dur("took", time.Since(start)).
 		Msg("daily signals_latest refresh complete")
-	if m.dailyMode == DailyRollupShadow {
-		// Diff is evidence, not correctness: a failure must not fail the refresh
-		// (the watermark has advanced; rerunning the fold would double-fold).
-		if _, derr := m.DailyRollupDiff(ctx); derr != nil {
-			m.log.Error().Err(derr).Msg("daily rollup shadow diff failed; no comparison this cycle")
-		}
-	} else if err := m.observeRollupCardinality(ctx); err != nil {
-		// Mode on: the diff (which carried the probe in shadow mode) no longer
-		// runs, but the one-row-per-key check is the STANDING proof the
-		// fold-era duplicate corruption stays gone — it must fire every
-		// refresh, not only at boot. Best-effort like the diff.
+	// The cardinality probe is evidence, not correctness: a failure must not
+	// fail the refresh (the watermark has advanced; rerunning the fold would
+	// double-fold). It fires every refresh — the STANDING proof the fold-era
+	// duplicate corruption stays gone (dq#64).
+	if err := m.observeRollupCardinality(ctx); err != nil {
 		m.log.Error().Err(err).Msg("rollup cardinality probe failed; no corruption check this cycle")
 	}
 	return nil
 }
 
-// seedDailyRollup establishes the induction base: the daily table becomes
-// exactly rollupSelectSQL over timestamp < boundary. The table is DROPPED and
-// recreated rather than per-bucket DELETEd — the seed must never scan the
-// table it is establishing (an empty or half-seeded table's scan is where the
-// inlined-reader crash lived, see createDailyTable; a drop is catalog-only),
-// and it makes the seed self-healing over ANY damaged prior state, including
-// the poisoned CTAS table the first rollout left behind. Then bucket-chunked
-// INSERTs like RecomputeRollup (one txn per bucket, memory-bounded over deep
-// history). The watermark is written only after every bucket committed, so a
-// crash mid-seed simply reseeds from the drop. This is the RecomputeRollup
-// cost class, run once at enable (and on operator reseed: delete the
-// watermark row).
+// seedDailyRollup establishes the induction base: lake.signals_latest becomes
+// exactly rollupSelectSQL over timestamp < boundary. The table is being SERVED
+// — never drop it. It is cleared transactionally instead: readers see the old
+// content until the commit, then a briefly-empty rollup that fills bucket by
+// bucket — the same partial visibility the LAKE_REBUILD_ROLLUP_ON_BOOT
+// recovery has always had, and every serving-critical read is KV-backed
+// anyway. Then bucket-chunked INSERTs like RecomputeRollup (one txn per
+// bucket, memory-bounded over deep history). The watermark is written only
+// after every bucket committed, so a crash mid-seed simply reseeds from the
+// clear. This is the RecomputeRollup cost class, run once at enable (and on
+// operator reseed: delete the watermark row).
 func (m *DuckLakeMaterializer) seedDailyRollup(ctx context.Context, boundary time.Time) error {
-	target := m.dailyTargetTable()
-	m.log.Info().Time("boundary", boundary).Str("table", target).
+	m.log.Info().Time("boundary", boundary).
 		Msg("seeding the daily rollup (bounded full recompute; one-time, O(history))")
-	if target == dailyRollupTable {
-		// Shadow target: nothing reads it, so DROP+recreate (never scan a table
-		// being established — see createDailyTable's crash history).
-		if err := m.execRetryConflict(ctx, "DROP TABLE IF EXISTS "+dailyRollupTable); err != nil {
-			return fmt.Errorf("daily seed drop: %w", err)
-		}
-		if err := m.createDailyTable(ctx); err != nil {
-			return err
-		}
-	} else {
-		// Live target (mode on, fresh install or operator reseed): the table is
-		// being SERVED — never drop it. Clear it transactionally instead;
-		// readers see the old content until the commit, then a briefly-empty
-		// rollup that fills bucket by bucket — the same partial visibility the
-		// LAKE_REBUILD_ROLLUP_ON_BOOT recovery has always had, and every
-		// serving-critical read is KV-backed anyway.
-		if err := m.execRetryConflict(ctx, "DELETE FROM "+target); err != nil {
-			return fmt.Errorf("daily seed clear: %w", err)
-		}
+	if err := m.execRetryConflict(ctx, "DELETE FROM lake.signals_latest"); err != nil {
+		return fmt.Errorf("daily seed clear: %w", err)
 	}
 	bound := fmt.Sprintf(`"timestamp" < make_timestamp(%d)`, boundary.UnixMicro())
 	for b := 0; b < duck.NumLatestBuckets; b++ {
@@ -463,7 +407,7 @@ func (m *DuckLakeMaterializer) seedDailyRollup(ctx context.Context, boundary tim
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO "+target+signalsLatestColumns+rollupSelectSQL(where)); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest"+signalsLatestColumns+rollupSelectSQL(where)); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("daily seed bucket %d insert: %w", b, err)
 		}
@@ -493,14 +437,14 @@ func (m *DuckLakeMaterializer) seedDailyRollup(ctx context.Context, boundary tim
 	return tx.Commit()
 }
 
-// foldDailyRollup folds [from, to) into the daily table and advances the
+// foldDailyRollup folds [from, to) into lake.signals_latest and advances the
 // watermark in the same transaction, then recomputes the late set. The tail
 // aggregate IS rollupSelectSQL restricted to the window — a constant-literal
 // predicate on the partition column's source, so the scan prunes to the
 // settled day partition(s) instead of re-deriving bounds per row (the whole
 // point of dq#55).
 func (m *DuckLakeMaterializer) foldDailyRollup(ctx context.Context, from, to time.Time) error {
-	target := m.dailyTargetTable()
+	const target = "lake.signals_latest"
 	window := fmt.Sprintf(`WHERE "timestamp" >= make_timestamp(%d) AND "timestamp" < make_timestamp(%d)`,
 		from.UnixMicro(), to.UnixMicro())
 	tx, err := m.db.BeginTx(ctx, nil)
@@ -599,7 +543,7 @@ func (m *DuckLakeMaterializer) recomputeLateDailySubjects(ctx context.Context, b
 	}
 	if len(subjects) > m.maxDirtySubjects {
 		m.log.Warn().Int("late_subjects", len(subjects)).
-			Msg("daily rollup late set overflowed; reseeding the daily table instead of per-subject recompute")
+			Msg("daily rollup late set overflowed; reseeding lake.signals_latest instead of per-subject recompute")
 		if err := m.execRetryConflict(ctx, "DELETE FROM "+lateSubjectsTable); err != nil {
 			return err
 		}
@@ -636,9 +580,9 @@ func (m *DuckLakeMaterializer) recomputeLateDailySubjects(ctx context.Context, b
 	return nil
 }
 
-// recomputeDailyChunk DELETEs+recomputes one bucket's given subjects in the
-// daily table (bounded by `bound`) and clears their late marks, all in one
-// transaction — the marks disappear exactly when the recompute that makes
+// recomputeDailyChunk DELETEs+recomputes one bucket's given subjects in
+// lake.signals_latest (bounded by `bound`) and clears their late marks, all in
+// one transaction — the marks disappear exactly when the recompute that makes
 // them unnecessary lands.
 func (m *DuckLakeMaterializer) recomputeDailyChunk(ctx context.Context, bucket int, subjects []string, bound string) error {
 	args := make([]any, len(subjects))
@@ -655,10 +599,10 @@ func (m *DuckLakeMaterializer) recomputeDailyChunk(ctx context.Context, bucket i
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE subject_bucket = %d AND subject IN (%s)", m.dailyTargetTable(), bucket, in), args...); err != nil {
+		fmt.Sprintf("DELETE FROM lake.signals_latest WHERE subject_bucket = %d AND subject IN (%s)", bucket, in), args...); err != nil {
 		return fmt.Errorf("delete: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO "+m.dailyTargetTable()+signalsLatestColumns+rollupSelectSQL(where), args...); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO lake.signals_latest"+signalsLatestColumns+rollupSelectSQL(where), args...); err != nil {
 		return fmt.Errorf("insert: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -759,107 +703,34 @@ func (m *DuckLakeMaterializer) PersistDailyLateSubjects(ctx context.Context) err
 	return nil
 }
 
-// DailyRollupDiff compares the daily table against the live rollup over the
-// settled window (live rows with last_seen < watermark; fresher live rows are
-// legitimately ahead of the daily table and excluded). This is the
-// production differential evidence for the dq#55 flip: classes are
-// missing_daily (live has a settled row the daily table lacks), missing_live
-// (the daily table has a row live lacks — also what retention-prune drift
-// looks like), and mismatch (any column differs). Zero across days of real
-// traffic is the gate.
-func (m *DuckLakeMaterializer) DailyRollupDiff(ctx context.Context) (map[string]int, error) {
-	start := time.Now()
-	stmt := fmt.Sprintf(`
-SELECT
-  CASE WHEN l.subject IS NULL THEN 'missing_live'
-       WHEN d.subject IS NULL THEN 'missing_daily'
-       ELSE 'mismatch' END AS class,
-  coalesce(l.subject, d.subject) AS subject, coalesce(l.name, d.name) AS name
-FROM lake.signals_latest l
-FULL OUTER JOIN %s d ON d.subject = l.subject AND d.name = l.name
-WHERE (l.subject IS NULL OR l.last_seen < make_timestamp(%d))
-  AND (l.subject IS NULL OR d.subject IS NULL
-    OR l.count != d.count
-    OR l."timestamp" != d."timestamp"
-    OR l.value_number IS DISTINCT FROM d.value_number
-    OR l.value_string IS DISTINCT FROM d.value_string
-    OR l.loc_lat != d.loc_lat OR l.loc_lon != d.loc_lon
-    OR l.loc_hdop != d.loc_hdop OR l.loc_heading != d.loc_heading
-    OR coalesce(l.loc_ts, make_timestamp(0)) != coalesce(d.loc_ts, make_timestamp(0))
-    OR l.first_seen != d.first_seen OR l.last_seen != d.last_seen)`,
-		dailyRollupTable, m.dailyWatermark.UnixMicro())
-	rows, err := m.db.QueryContext(ctx, stmt)
-	if err != nil {
-		return nil, fmt.Errorf("daily rollup diff: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	counts := map[string]int{}
-	logged := 0
-	for rows.Next() {
-		var class, subject, name string
-		if err := rows.Scan(&class, &subject, &name); err != nil {
-			return nil, fmt.Errorf("scanning diff row: %w", err)
-		}
-		counts[class]++
-		if logged < 10 {
-			logged++
-			m.log.Warn().Str("class", class).Str("subject", subject).Str("name", name).
-				Msg("daily rollup shadow diff: daily table disagrees with the incremental rollup")
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("diff scan: %w", err)
-	}
-	for _, class := range []string{"missing_daily", "missing_live", "mismatch"} {
-		dailyRollupDiffRows.WithLabelValues(class).Set(float64(counts[class]))
-	}
-	total := counts["missing_daily"] + counts["missing_live"] + counts["mismatch"]
-	m.log.Info().Int("diff_rows", total).Dur("took", time.Since(start)).
-		Msg("daily rollup shadow diff complete")
-	if err := m.observeRollupCardinality(ctx); err != nil {
-		m.log.Error().Err(err).Msg("rollup cardinality probe failed")
-	}
-	return counts, nil
-}
-
-// observeRollupCardinality measures, for each rollup table, how many physical
+// observeRollupCardinality measures how many physical lake.signals_latest
 // rows exist per (subject, name) key — the rollup contract is EXACTLY ONE.
 // Added when the 2026-08-08 shadow diff hit 300k all-mismatch rows over a
-// ≤39k-key fleet: a FULL OUTER JOIN can only exceed the key count if a side
-// holds duplicate keys, and this probe is what says which side and how badly.
-// The standing suspicion is the per-pass fold's DELETE racing din's
-// rewrite_data_files compaction (the delete lands on rows whose files were
-// just rewritten and removes nothing; din's 2026-08-06 flush conflict is the
-// same collision seen from the other side). Duplicate keys on the LIVE table
-// mean dataSummary/rollup-fallback reads are serving duplicated rows; the
-// dq#55 flip (one fold/day, promote the clean daily table) is the structural
-// fix, and this gauge is how we prove the corruption gone afterwards.
+// ≤39k-key fleet: the cause was the per-pass fold's DELETE racing din's
+// rewrite_data_files compaction (the delete landed on rows whose files were
+// just rewritten and removed nothing; din's 2026-08-06 flush conflict is the
+// same collision seen from the other side). Duplicate keys mean
+// dataSummary/rollup-fallback reads serve duplicated rows; the daily refresh
+// (one fold/day, no per-pass DELETE) is the structural fix, and this gauge is
+// the standing proof the corruption stays gone.
 func (m *DuckLakeMaterializer) observeRollupCardinality(ctx context.Context) error {
-	sides := []struct{ label, table string }{{"live", "lake.signals_latest"}}
-	if m.dailyMode == DailyRollupShadow {
-		// The shadow table exists only during the evidence phase; post-flip the
-		// live table IS the daily-maintained one.
-		sides = append(sides, struct{ label, table string }{"daily", dailyRollupTable})
+	var keys, rows, dupKeys, dupRows int64
+	if err := m.db.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(n), 0),
+		count(*) FILTER (WHERE n > 1), coalesce(sum(n) FILTER (WHERE n > 1), 0)
+		FROM (SELECT count(*) AS n FROM lake.signals_latest GROUP BY subject, name)`).
+		Scan(&keys, &rows, &dupKeys, &dupRows); err != nil {
+		return fmt.Errorf("cardinality of lake.signals_latest: %w", err)
 	}
-	for _, side := range sides {
-		var keys, rows, dupKeys, dupRows int64
-		q := fmt.Sprintf(`SELECT count(*), coalesce(sum(n), 0),
-			count(*) FILTER (WHERE n > 1), coalesce(sum(n) FILTER (WHERE n > 1), 0)
-			FROM (SELECT count(*) AS n FROM %s GROUP BY subject, name)`, side.table)
-		if err := m.db.QueryRowContext(ctx, q).Scan(&keys, &rows, &dupKeys, &dupRows); err != nil {
-			return fmt.Errorf("cardinality of %s: %w", side.table, err)
-		}
-		dailyRollupSideRows.WithLabelValues(side.label, "keys").Set(float64(keys))
-		dailyRollupSideRows.WithLabelValues(side.label, "rows").Set(float64(rows))
-		dailyRollupSideRows.WithLabelValues(side.label, "dup_keys").Set(float64(dupKeys))
-		dailyRollupSideRows.WithLabelValues(side.label, "dup_rows").Set(float64(dupRows))
-		evt := m.log.Info()
-		if dupKeys > 0 {
-			evt = m.log.Warn()
-		}
-		evt.Str("table", side.table).Int64("keys", keys).Int64("rows", rows).
-			Int64("dup_keys", dupKeys).Int64("dup_rows", dupRows).
-			Msg("rollup cardinality (rows must equal keys; every excess row is a visible duplicate)")
+	dailyRollupSideRows.WithLabelValues("live", "keys").Set(float64(keys))
+	dailyRollupSideRows.WithLabelValues("live", "rows").Set(float64(rows))
+	dailyRollupSideRows.WithLabelValues("live", "dup_keys").Set(float64(dupKeys))
+	dailyRollupSideRows.WithLabelValues("live", "dup_rows").Set(float64(dupRows))
+	evt := m.log.Info()
+	if dupKeys > 0 {
+		evt = m.log.Warn()
 	}
+	evt.Int64("keys", keys).Int64("rows", rows).
+		Int64("dup_keys", dupKeys).Int64("dup_rows", dupRows).
+		Msg("rollup cardinality (rows must equal keys; every excess row is a visible duplicate)")
 	return nil
 }

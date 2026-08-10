@@ -25,9 +25,9 @@ import (
 // TestLatestKV_ReconcileReplaysTailSinceWatermark manufactures the exact hole
 // the tail replay closes: subject B's first-ever reading lands AFTER the
 // watermark, its publish is "lost" (the bucket never saw it), and the rollup
-// is day-stale (B absent — simulated by deleting B's rollup rows, which is
-// what a daily-refreshed rollup looks like before its next fold). The
-// reconcile must still produce B's key, or negative serving would lie.
+// is day-stale (B absent — under mode on the daily refresh really does leave
+// post-watermark subjects invisible until the next boundary). The reconcile
+// must still produce B's key, or negative serving would lie.
 func TestLatestKV_ReconcileReplaysTailSinceWatermark(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeService(t, t.TempDir())
@@ -43,11 +43,12 @@ func TestLatestKV_ReconcileReplaysTailSinceWatermark(t *testing.T) {
 
 	// No KV publisher wired: every "publish" is lost, the bucket starts empty.
 	runner, mat := incrRunner(t, ctx, db, func(m *materializer.DuckLakeMaterializer) {
-		m.WithDailyRollup(materializer.DailyRollupShadow, 0)
+		m.WithDailyRollup(materializer.DailyRollupOn, 0)
 	})
 	seedRawStatus(t, db, "wmA", subjA, oldTS, speedAt(oldTS, 33))
 	drainNoFlush(t, ctx, runner)
-	// The real writer establishes the watermark row latestkv must find.
+	// The real writer establishes the watermark row latestkv must find, and
+	// seeds the rollup (which covers A: oldTS < watermark).
 	require.NoError(t, mat.RunDailyRollupRefresh(ctx, watermark))
 
 	// B is born after the watermark, with a same-timestamp collision (the
@@ -59,11 +60,9 @@ func TestLatestKV_ReconcileReplaysTailSinceWatermark(t *testing.T) {
 	seedRawStatus(t, db, "wmB-3", subjB, locTS, locFixAt(locTS, 42.33, -83.05))
 	drainNoFlush(t, ctx, runner)
 
-	// Simulate the post-flip world: the rollup is day-stale and has never seen
-	// B. (Pre-flip the per-pass fold keeps it fresh, so delete B's rows.)
-	_, err := db.ExecContext(ctx, "DELETE FROM lake.signals_latest WHERE subject = ?", subjB)
-	require.NoError(t, err)
-
+	// The rollup is now GENUINELY day-stale: under the daily refresh nothing
+	// folds B's post-watermark rows until the next boundary, so B is absent
+	// from lake.signals_latest — exactly the hole the tail replay must cover.
 	require.NoError(t, store.ReconcileFromRollup(ctx, db))
 
 	// A: restored from the rollup pass, as before.
@@ -107,16 +106,17 @@ func TestLatestKV_BootstrapReplaysTail(t *testing.T) {
 	day := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour)
 	watermark := day.AddDate(0, 0, 1)
 	runner, mat := incrRunner(t, ctx, db, func(m *materializer.DuckLakeMaterializer) {
-		m.WithDailyRollup(materializer.DailyRollupShadow, 0)
+		m.WithDailyRollup(materializer.DailyRollupOn, 0)
 	})
 	// Establish the watermark first, over an empty pre-boundary lake.
 	require.NoError(t, mat.RunDailyRollupRefresh(ctx, watermark))
 
+	// The subject is born after the watermark: under the daily refresh the
+	// rollup never sees it until the next boundary — the day-stale hole the
+	// bootstrap's tail replay must cover.
 	newTS := watermark.Add(45 * time.Minute)
 	seedRawStatus(t, db, "wmboot-1", subj, newTS, speedAt(newTS, 88))
 	drainNoFlush(t, ctx, runner)
-	_, err := db.ExecContext(ctx, "DELETE FROM lake.signals_latest WHERE subject = ?", subj)
-	require.NoError(t, err)
 
 	require.NoError(t, store.BootstrapFromRollup(ctx, db, false))
 	entry, err := store.GetEntry(ctx, subj)

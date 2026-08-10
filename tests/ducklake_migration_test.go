@@ -53,6 +53,10 @@ func TestDuckLake_LocTSMigration_ExistingCatalog(t *testing.T) {
 		r0 := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 			WithDuckLake(mat0)
 		require.Equal(t, 1, drainRunner(t, ctx, r0))
+		// The pre-H9 materializer maintained the rollup at decode time; today
+		// nothing does, so materialize the pre-migration rollup row explicitly
+		// before stripping loc_ts back off.
+		require.NoError(t, mat0.RecomputeRollup(ctx))
 		_, err = db.ExecContext(ctx, `ALTER TABLE lake.signals_latest DROP COLUMN loc_ts`)
 		require.NoError(t, err)
 	}

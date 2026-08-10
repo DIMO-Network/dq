@@ -1,8 +1,8 @@
 // ducklake_rollup_rebuild_test.go covers the disaster-recovery rebuild of
-// lake.signals_latest (RecomputeRollup): the per-batch refreshRollup only touches
-// subjects present in a batch, so a dropped/truncated rollup needs a full rebuild
-// from the base to repopulate dormant vehicles. RecomputeRollup must produce a
-// rollup byte-identical to what the per-batch recompute built.
+// lake.signals_latest (RecomputeRollup): the daily refresh only folds forward
+// from its watermark, so a dropped/truncated rollup needs a full rebuild from
+// the base to repopulate dormant vehicles. RecomputeRollup must produce a
+// rollup byte-identical to what the daily refresh built.
 package tests
 
 import (
@@ -56,8 +56,9 @@ func TestRecomputeRollup_RebuildsDroppedRollupFromBase(t *testing.T) {
 	seedRawStatus(t, db, "rr2", subjA, base.Add(2*time.Hour), speedAt(base.Add(2*time.Hour), 80))
 	seedRawStatus(t, db, "rr3", subjB, base.Add(time.Hour), speedAt(base.Add(time.Hour), 12))
 	require.Positive(t, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, time.Now().UTC().Truncate(24*time.Hour))
 
-	// The rollup the per-batch recompute built.
+	// The rollup the daily refresh built.
 	perBatch := dumpRollup(t, ctx, db)
 	require.Len(t, perBatch, 2, "one (subject,name) row per vehicle")
 
@@ -68,9 +69,13 @@ func TestRecomputeRollup_RebuildsDroppedRollupFromBase(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, dumpRollup(t, ctx, db))
 
-	// Full rebuild from the base.
-	require.NoError(t, mat.RecomputeRollup(ctx))
+	// Full rebuild from the base — via a default-mode materializer, since
+	// RecomputeRollup is refused under mode on (the reseed is the mode-on
+	// equivalent; DR keeps the unbounded rebuild).
+	oracle, err := materializer.NewDuckLakeMaterializer(ctx, db, zerolog.Nop())
+	require.NoError(t, err)
+	require.NoError(t, oracle.RecomputeRollup(ctx))
 
 	require.Equal(t, perBatch, dumpRollup(t, ctx, db),
-		"RecomputeRollup must rebuild signals_latest byte-identical to the per-batch recompute")
+		"RecomputeRollup must rebuild signals_latest byte-identical to the daily refresh's output")
 }

@@ -48,6 +48,7 @@ func TestLatestKV_ServeMatchesRollupAndFallsBack(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 2, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	rollupQ := duck.NewLakeQueries(svc)
 	serveQ := duck.NewLakeQueries(svc).WithLatestKV(store, duck.KVReadServe, zerolog.Nop())
@@ -106,6 +107,7 @@ func TestLatestKV_ShadowServesRollupResult(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 1, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	shadowQ := duck.NewLakeQueries(svc).WithLatestKV(store, duck.KVReadShadow, zerolog.Nop())
 	got, err := shadowQ.GetLatestSignals(ctx, subject, latestArgsFor("speed"))

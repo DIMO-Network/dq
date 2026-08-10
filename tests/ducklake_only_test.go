@@ -216,6 +216,7 @@ func TestDuckLakeOnly_SegmentsSucceed(t *testing.T) {
 
 	processed := drainRunner(t, ctx, runner)
 	require.Equal(t, 2, processed, "two raw events decoded")
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	// LakeQueries serves GetAvailableSignals.
 	lakeQ := duck.NewLakeQueries(lkSvc)

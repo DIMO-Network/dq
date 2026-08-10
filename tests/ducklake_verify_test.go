@@ -1,7 +1,8 @@
-// ducklake_verify_test.go — adversarial verification campaign for the #1c pagination +
-// #5b incremental-rollup exactly-once path. Each subtest is a distinct attack vector; the
-// contract is always the same: the incrementally-maintained lake.signals_latest equals a
-// full RecomputeRollup, and base rows are exactly-once. These are throwaway-hardening
+// ducklake_verify_test.go — adversarial verification campaign for the #1c pagination
+// exactly-once path. Each subtest is a distinct attack vector; the contract is always
+// the same: base rows are exactly-once, observed through an explicit RecomputeRollup
+// over the deduped base (the per-pass incremental fold was removed in dq#55 step 5,
+// so the rollup is only ever recompute-derived here). These are throwaway-hardening
 // tests that also stay as regression guards.
 package tests
 
@@ -22,8 +23,8 @@ func locAt(ts time.Time, lat, lon, hdop float64) map[string]any {
 		"value": map[string]any{"latitude": lat, "longitude": lon, "hdop": hdop}}
 }
 
-// V1 — a location signal has value_number NULL and loc_* set; the fold must keep
-// value_number NULL and carry loc columns exactly like the recompute.
+// V1 — a location signal has value_number NULL and loc_* set; the recompute must keep
+// value_number NULL and carry the loc columns of the newest fix.
 func TestVerify01_LocationSignalNullValueNumber(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeService(t, t.TempDir())
@@ -35,7 +36,7 @@ func TestVerify01_LocationSignalNullValueNumber(t *testing.T) {
 	drainNoFlush(t, ctx, runner)
 	seedRawStatus(t, db, "v1b", subj, base.Add(2*time.Minute), locAt(base.Add(2*time.Minute), 42.3, -83.1, 0.9))
 	drainNoFlush(t, ctx, runner)
-	assertMatchesRecompute(t, ctx, db, mat) // the real contract: value_number (whatever it is) matches the recompute
+	require.NoError(t, mat.RecomputeRollup(ctx))
 	got := dumpRollupMap(t, ctx, db)[subj+"|currentLocationCoordinates"]
 	assert.InDelta(t, 42.3, got.locLat, 1e-9, "loc_lat folds to the newest fix")
 	assert.True(t, got.locTS.Equal(base.Add(2*time.Minute)), "loc_ts is the newest fix")
@@ -56,13 +57,13 @@ func TestVerify02_IntermittentLocation(t *testing.T) {
 	drainNoFlush(t, ctx, runner)
 	seedRawStatus(t, db, "v2old", subj, base.Add(1*time.Minute), locAt(base.Add(1*time.Minute), 1.0, 2.0, 9.0)) // older loc
 	drainNoFlush(t, ctx, runner)
-	assertMatchesRecompute(t, ctx, db, mat)
+	require.NoError(t, mat.RecomputeRollup(ctx))
 	loc := dumpRollupMap(t, ctx, db)[subj+"|currentLocationCoordinates"]
 	assert.True(t, loc.locTS.Equal(base.Add(5*time.Minute)), "loc_ts stays the newest fix despite a later-arriving older one")
 	assert.InDelta(t, 40.0, loc.locLat, 1e-9)
 }
 
-// V3 — a fat single snapshot with many (subject,name) pairs folds exactly in one window.
+// V3 — a fat single snapshot with many (subject,name) pairs decodes exactly in one window.
 func TestVerify03_ManyKeysOneSnapshot(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeService(t, t.TempDir())
@@ -85,7 +86,7 @@ func TestVerify03_ManyKeysOneSnapshot(t *testing.T) {
 	}
 	require.NoError(t, tx.Commit())
 	drainNoFlush(t, ctx, runner)
-	assertMatchesRecompute(t, ctx, db, mat)
+	require.NoError(t, mat.RecomputeRollup(ctx))
 	assert.Len(t, dumpRollupMap(t, ctx, db), 12, "6 subjects x 2 names = 12 rollup rows")
 }
 
@@ -104,13 +105,13 @@ func TestVerify04_ByteBudgetPagination(t *testing.T) {
 	})
 	seedRawStatusOneSnapshot(t, db, subj, base, 1100) // > windowReadChunk so the byte path paginates
 	drainNoFlush(t, ctx, runner)
-	assertMatchesRecompute(t, ctx, db, mat)
+	require.NoError(t, mat.RecomputeRollup(ctx))
 	assert.EqualValues(t, 1100, dumpRollupMap(t, ctx, db)[subj+"|speed"].count)
 	assert.Positive(t, intermediate, "the byte-budget path split the span into multiple windows")
 }
 
 // V5 — crash at the LAST intermediate window (most windows durable, cursor not advanced);
-// restart converges exactly for BOTH base rows and the rollup.
+// restart converges to exactly-once base rows (no row lost, none double-counted).
 func TestVerify05_CrashLastIntermediateWindow(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeService(t, t.TempDir())
@@ -133,8 +134,8 @@ func TestVerify05_CrashLastIntermediateWindow(t *testing.T) {
 	assert.EqualValues(t, 0, readCursor(t, ctx, db), "cursor not advanced on a partial span")
 	runner2, mat2 := incrRunner(t, ctx, db, func(m *materializer.DuckLakeMaterializer) { m.WithMaxRowsPerWindow(2) })
 	drainNoFlush(t, ctx, runner2)
+	require.NoError(t, mat2.RecomputeRollup(ctx))
 	assert.EqualValues(t, 9, dumpRollupMap(t, ctx, db)[subj+"|speed"].count)
-	assertMatchesRecompute(t, ctx, db, mat2)
 }
 
 // V6 — a paginated span mixes decodable rows with rows that decode to NOTHING (wrong-chain
@@ -164,12 +165,12 @@ func TestVerify06_MixedNonDecodableRows(t *testing.T) {
 	runner, mat := incrRunner(t, ctx, db, func(m *materializer.DuckLakeMaterializer) { m.WithMaxRowsPerWindow(3) })
 	drainNoFlush(t, ctx, runner)
 	assert.Positive(t, readCursor(t, ctx, db), "cursor advanced past non-decodable rows")
+	require.NoError(t, mat.RecomputeRollup(ctx))
 	assert.EqualValues(t, 6, dumpRollupMap(t, ctx, db)[good+"|speed"].count, "only the 6 vehicle rows counted")
-	assertMatchesRecompute(t, ctx, db, mat)
 }
 
 // V7 — an out-of-order batch 100 days older than the existing latest: recency unchanged,
-// count increments, first_seen moves back, exactly matching the recompute.
+// count increments, first_seen moves back in the recomputed rollup.
 func TestVerify07_DeepOutOfOrder(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeService(t, t.TempDir())
@@ -182,15 +183,15 @@ func TestVerify07_DeepOutOfOrder(t *testing.T) {
 	old := now.AddDate(0, 0, -100)
 	seedRawStatus(t, db, "v7old", subj, old, speedAt(old, 12))
 	drainNoFlush(t, ctx, runner)
-	assertMatchesRecompute(t, ctx, db, mat)
+	require.NoError(t, mat.RecomputeRollup(ctx))
 	got := dumpRollupMap(t, ctx, db)[subj+"|speed"]
 	assert.EqualValues(t, 2, got.count)
 	assert.EqualValues(t, 70, got.valueNumber.Float64, "recency unchanged by the 100-day-old arrival")
 	assert.True(t, got.firstSeen.Equal(old), "first_seen moved back 100 days")
 }
 
-// V8 — interleave a full RecomputeRollup with incremental folds: the incremental path must
-// stay exact when it continues on top of a freshly recomputed rollup (self-healing).
+// V8 — RecomputeRollup mid-stream then again after more data: rebuilding on top of a
+// previously recomputed rollup must stay exact (the DELETE+INSERT rebuild is idempotent).
 func TestVerify08_RecomputeInterleave(t *testing.T) {
 	ctx := context.Background()
 	svc := newLakeService(t, t.TempDir())
@@ -204,6 +205,6 @@ func TestVerify08_RecomputeInterleave(t *testing.T) {
 	require.NoError(t, mat.RecomputeRollup(ctx)) // rebuild from base mid-stream
 	seedRawStatus(t, db, "v8c", subj, base.Add(3*time.Minute), speedAt(base.Add(3*time.Minute), 30))
 	drainNoFlush(t, ctx, runner)
-	assertMatchesRecompute(t, ctx, db, mat)
+	require.NoError(t, mat.RecomputeRollup(ctx))
 	assert.EqualValues(t, 3, dumpRollupMap(t, ctx, db)[subj+"|speed"].count)
 }

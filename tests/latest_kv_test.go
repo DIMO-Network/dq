@@ -66,6 +66,7 @@ func TestLatestKV_PublishedAtDecode_MatchesRollup(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 2, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	entry, err := store.GetEntry(ctx, subject)
 	require.NoError(t, err)
@@ -109,6 +110,7 @@ func TestLatestKV_BootstrapFromRollup(t *testing.T) {
 	runner := materializer.New(materializer.Config{ChainID: 137, VehicleNFTAddress: vehicleNFT}, zerolog.Nop()).
 		WithDuckLake(mat)
 	require.Equal(t, 2, drainRunner(t, ctx, runner))
+	refreshRollup(t, ctx, mat, day.AddDate(0, 0, 1))
 
 	store := newLatestKVStore(t, "boot")
 	require.NoError(t, store.BootstrapFromRollup(ctx, db, false))
