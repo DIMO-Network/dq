@@ -407,6 +407,12 @@ func (m *DuckLakeMaterializer) RunDailyRollupRefresh(ctx context.Context, bounda
 		if _, derr := m.DailyRollupDiff(ctx); derr != nil {
 			m.log.Error().Err(derr).Msg("daily rollup shadow diff failed; no comparison this cycle")
 		}
+	} else if err := m.observeRollupCardinality(ctx); err != nil {
+		// Mode on: the diff (which carried the probe in shadow mode) no longer
+		// runs, but the one-row-per-key check is the STANDING proof the
+		// fold-era duplicate corruption stays gone — it must fire every
+		// refresh, not only at boot. Best-effort like the diff.
+		m.log.Error().Err(err).Msg("rollup cardinality probe failed; no corruption check this cycle")
 	}
 	return nil
 }
