@@ -530,9 +530,18 @@ func buildDuckLakeMaterializer(settings *config.Settings, pollInterval time.Dura
 			return nil, nil, nil, fmt.Errorf("invalid MATERIALIZER_ROLLUP_INTERVAL %q: %w", settings.MaterializerRollupInterval, err)
 		}
 	}
+	var rawTypesInterval time.Duration
+	if settings.MaterializerRawTypesInterval != "" {
+		rawTypesInterval, err = time.ParseDuration(settings.MaterializerRawTypesInterval)
+		if err != nil {
+			_ = duckSvc.Close()
+			return nil, nil, nil, fmt.Errorf("invalid MATERIALIZER_RAW_TYPES_INTERVAL %q: %w", settings.MaterializerRawTypesInterval, err)
+		}
+	}
 	runner := materializer.New(materializer.Config{
 		PollInterval:      pollInterval,
 		RollupInterval:    rollupInterval,
+		RawTypesInterval:  rawTypesInterval,
 		ChainID:           settings.DIMORegistryChainID,
 		VehicleNFTAddress: common.HexToAddress(settings.VehicleNFTAddress),
 		Workers:           settings.MaterializerWorkers,

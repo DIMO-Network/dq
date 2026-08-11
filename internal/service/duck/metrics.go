@@ -108,7 +108,11 @@ func observeLakePath(rollup bool) {
 //     projection, different shape.
 //   - fetchByID, fetchByIDBatch — single point lookup vs a chunked IN-list of
 //     up to maxLakeQueryLimit ids.
-//   - fetchTypeSummary — the per-type aggregate.
+//   - fetchTypeSummaryRollup, fetchTypeSummary — the per-type aggregate: the
+//     O(types) raw_types_latest rollup read vs the full raw_events scan (dq#40).
+//     Split like eventSummaries*: subject/type-only filters serve from the
+//     rollup (with empty-result fallback to the scan), narrower filters scan, so
+//     the scan rate IS the fallback rate.
 //   - fetchPayload — per-event S3 blob resolution, the only op here whose cost
 //     is off-lake.
 var lakeReadSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{

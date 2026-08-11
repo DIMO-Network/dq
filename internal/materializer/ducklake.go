@@ -496,6 +496,18 @@ func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 	// The remaining statements are genuinely idempotent (CREATE IF NOT EXISTS /
 	// guarded INSERT) and mint no schema change, so they run on every boot.
 	stmts = append(stmts,
+		// raw_types_latest is the per-(subject,type) summary rollup of din's
+		// lake.raw_events (dq#40): it serves availableCloudEventTypes in one small
+		// file instead of a ~62-file all-partition scan (the summary is the one
+		// query that can use neither of raw_events' partition keys). Rebuilt in
+		// full on an interval by RecomputeRawTypesRollup — no dirty tracking,
+		// because raw_events prunes on nothing, so one whole-table pass costs the
+		// same as any per-subject recompute and also self-heals retention drift.
+		// Deliberately UNPARTITIONED (~subjects × types rows), hence no ALTER and
+		// no first-creation gating: this CREATE is genuinely idempotent.
+		`CREATE TABLE IF NOT EXISTS lake.raw_types_latest (
+			subject VARCHAR, type VARCHAR, count BIGINT,
+			first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
 		"CREATE TABLE IF NOT EXISTS lake.ingest_progress (partition VARCHAR, cursor VARCHAR)",
 		// Seed the cursor row once so every advance is a compare-and-swap UPDATE
 		// against a single row (CHD-9). Without a pre-seeded row the first writer
