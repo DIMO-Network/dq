@@ -102,6 +102,19 @@ var (
 		Name: "dq_materializer_event_rollup_flush_errors_total",
 		Help: "events_latest flush passes that failed; a sustained increase means the event-summary view is stale.",
 	})
+	// rawTypesRefreshSeconds / rawTypesRefreshErrorsTotal cover the interval full
+	// rebuild of lake.raw_types_latest (dq#40; raw_types.go). The rebuild is one
+	// whole-table pass over raw_events (~4.5 s in production), so the gauge is
+	// also a proxy for that table's file count; sustained errors mean
+	// availableCloudEventTypes is serving stale (or falling back to the scan).
+	rawTypesRefreshSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "dq_materializer_raw_types_refresh_seconds",
+		Help: "Wall-clock of the most recent raw_types_latest full rebuild (one whole-table pass over lake.raw_events).",
+	})
+	rawTypesRefreshErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "dq_materializer_raw_types_refresh_errors_total",
+		Help: "raw_types_latest rebuild passes that failed; a sustained increase means the type-summary rollup is stale.",
+	})
 	cursorResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "dq_materializer_cursor_resets_total",
 		Help: "DuckLake snapshot cursor resets after the consumer lagged past LAKE_SNAPSHOT_RETENTION (expired change feed). Each reset skips an un-decoded gap — alert on any increase.",
@@ -209,6 +222,7 @@ func registerMetrics() {
 			lagSeconds, commitLagSeconds, eventAgeSeconds, batchesTotal, rowsTotal, errorsTotal,
 			pruneErrorsTotal, passErrorsTotal, rollupRefreshSeconds,
 			rollupFlushErrorsTotal, eventRollupRefreshSeconds, eventRollupFlushErrorsTotal,
+			rawTypesRefreshSeconds, rawTypesRefreshErrorsTotal,
 			cursorResetsTotal, cursorSnapshotID,
 			headSnapshotID, cursorResetGap, blobMissingTotal, blobPoisonTotal,
 			phaseSeconds, progressReportErrorsTotal,

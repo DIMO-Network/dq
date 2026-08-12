@@ -26,6 +26,13 @@ var errOrClauseUnsupported = errors.New("lake fetch: Or clauses in advanced filt
 
 const lakeRawEvents = "lake.raw_events"
 
+// lakeRawTypesLatest is the per-(subject,type) summary rollup of lake.raw_events
+// (dq#40). Unpartitioned by design: at ~subjects × types rows it is one small
+// file, and the type-summary read costs 1 file either way — bucketing would only
+// buy #36's fragmentation. Rebuilt in full by the materializer on an interval
+// (RecomputeRawTypesRollup); created by its ensureSchema.
+const lakeRawTypesLatest = "lake.raw_types_latest"
+
 // defaultFetchScanWindow bounds a subject-less, id-less lake fetch as a DoS
 // guard against scanning all of raw_events (CHD-34). It is NOT a correctness
 // bound: no lookback floor is applied when the caller supplies no `after`
@@ -73,6 +80,31 @@ func voidingClause(ref string) string {
 		ref, lakeRawEvents)
 }
 
+// rawEventDedupQualify collapses redelivered duplicates of one raw event to a
+// single row on the same second-precision header key the fetch path dedups on.
+// din's writer is a blind append, so duplicates can persist past the NATS
+// DuplicateWindow on lag, failover, or replay; a bare count(*) over the base
+// would inflate per-type totals. Shared by the live type-summary scan and the
+// raw_types_latest rollup recompute (RawTypesRollupSelect) so the two cannot
+// drift. Columns are unqualified: apply it to a projection of the bare table.
+const rawEventDedupQualify = ` QUALIFY ROW_NUMBER() OVER` +
+	` (PARTITION BY subject, date_trunc('second', time), type, source, id ORDER BY time) = 1`
+
+// RawTypesRollupSelect builds the SELECT the materializer writes into
+// lake.raw_types_latest (dq#40): per-(subject,type) count/first_seen/last_seen
+// over the whole of lake.raw_events, tombstone-voided and redelivery-deduped
+// with the very predicates the live scan uses (voidingClause +
+// rawEventDedupQualify) — so the rollup is a materialized view of
+// GetCloudEventTypeSummariesAdvanced by construction. It lives here, next to
+// those predicates, rather than in the materializer, so parity survives edits
+// to either.
+func RawTypesRollupSelect() string {
+	deduped := fmt.Sprintf(`SELECT subject, type, time FROM %s WHERE 1=1%s%s`,
+		lakeRawEvents, voidingClause(lakeRawEvents), rawEventDedupQualify)
+	return fmt.Sprintf(`SELECT subject, type, CAST(count(*) AS BIGINT) AS count,`+
+		` min(time) AS first_seen, max(time) AS last_seen FROM (%s) GROUP BY subject, type`, deduped)
+}
+
 // LakeEventService serves the eventrepo.EventService surface from
 // lake.raw_events. Index lookups return a header + an ObjectInfo locator;
 // payload resolution reads inline data (or presigns a blob).
@@ -82,6 +114,14 @@ type LakeEventService struct {
 	presigner  eventrepo.Presigner
 	bucket     string // parquet/blob bucket for presigning and blob download
 	blobCipher *blobcrypt.Cipher
+
+	// rawTypesRollupReady caches that lake.raw_types_latest exists, so
+	// GetCloudEventTypeSummariesAdvanced serves eligible filters from the rollup
+	// (dq#40) instead of the ~62-file full scan. Until it does — a fresh catalog,
+	// or a query pod that started before the materializer created the table — the
+	// summary falls back to the scan. One-way (false→true) and self-healing:
+	// re-checked each call while false, exactly like Queries.eventsRollupReady.
+	rawTypesRollupReady atomic.Bool
 }
 
 // NewLakeEventService constructs a LakeEventService backed by svc (which must
@@ -254,31 +294,114 @@ func (l *LakeEventService) GetLatestIndex(ctx context.Context, opts *grpc.Search
 // GetCloudEventTypeSummariesAdvanced returns per-type counts and time ranges
 // matching opts. Voided events are excluded (ExcludeVoided always true here).
 //
-// This intentionally does NOT apply defaultFetchScanWindow: first_seen/last_seen
-// are all-time min/max per type, so a lookback bound would corrupt them; the
-// summary query is therefore unbounded
-// (SR-10). raw_events is partitioned by (type, day), so a type filter still
-// prunes; an unfiltered summary is an inherent full scan by definition.
+// Subject/type-only filters serve from the lake.raw_types_latest rollup
+// (dq#40): the scan was the slowest read on the node (~62 parquet files for ~4
+// rows, ~97% per-file S3 cost) because this is the one query that discards both
+// of raw_events' partition keys by construction — first_seen/last_seen are
+// all-time so it can't take a time bound, and "which types exist" can't take a
+// type filter. Narrower filters (source, producer, time bounds, …) fall back to
+// the live scan; so does an empty rollup result (getTypeSummariesRollup's doc).
+// The fetchTypeSummaryRollup/fetchTypeSummary op split is the fallback-rate
+// visibility (see the op catalog in metrics.go).
 func (l *LakeEventService) GetCloudEventTypeSummariesAdvanced(ctx context.Context, opts *grpc.AdvancedSearchOptions) ([]eventrepo.CloudEventTypeSummary, error) {
 	f, err := filterFromAdvanced(opts)
 	if err != nil {
 		return nil, err
 	}
+	if typeSummaryRollupServable(f) && l.rawTypesRollupAvailable(ctx) {
+		out, err := l.getTypeSummariesRollup(ctx, f)
+		if err != nil {
+			return nil, err
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+		// Empty is ambiguous — genuinely no events, or a rollup not yet populated
+		// (created but before its first rebuild, or a brand-new subject inside the
+		// rebuild interval). Fall back so both cases stay correct, mirroring
+		// GetEventSummaries' empty-rollup fallback; a genuinely-eventless subject
+		// just pays one extra scan.
+	}
+	return l.getTypeSummariesScan(ctx, f)
+}
+
+// typeSummaryRollupServable reports whether f can be answered from
+// lake.raw_types_latest: only the rollup's own columns (subject, type) may be
+// filtered. Anything narrower — source, producer, id, data_version, extras,
+// tags, time bounds — is not represented in the rollup and must scan.
+// ExcludeVoided is always true on this path and the rollup is voiding-aware;
+// TimestampAsc does not apply to an aggregate.
+func typeSummaryRollupServable(f RawFilter) bool {
+	return len(f.Sources) == 0 && len(f.SourcesNotIn) == 0 &&
+		len(f.Producers) == 0 && len(f.ProducersNotIn) == 0 &&
+		len(f.IDs) == 0 && len(f.IDsNotIn) == 0 &&
+		len(f.DataVersions) == 0 && len(f.DataVersionsNotIn) == 0 &&
+		len(f.Extras) == 0 && len(f.ExtrasNotIn) == 0 &&
+		len(f.Tags) == 0 && len(f.TagsAll) == 0 &&
+		len(f.TagsNotContainAny) == 0 && len(f.TagsNotContainAll) == 0 &&
+		f.After.IsZero() && f.Before.IsZero()
+}
+
+// rawTypesRollupAvailable reports whether lake.raw_types_latest exists, caching
+// a positive result so the metadata check runs only until the materializer has
+// created the table (see the rawTypesRollupReady field doc).
+func (l *LakeEventService) rawTypesRollupAvailable(ctx context.Context) bool {
+	if l.rawTypesRollupReady.Load() {
+		return true
+	}
+	var n int
+	if err := l.svc.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = 'raw_types_latest'`).
+		Scan(&n); err != nil || n == 0 {
+		return false
+	}
+	l.rawTypesRollupReady.Store(true)
+	return true
+}
+
+// getTypeSummariesRollup serves the per-type summary from lake.raw_types_latest:
+// each stored row is already the deduped, voiding-aware per-(subject,type)
+// count + first/last seen the scan would produce (RawTypesRollupSelect — parity
+// by construction), so this reads one small file instead of every raw_events
+// partition. sum(count) re-aggregates across subjects when the filter names
+// several (or none); the CAST keeps the scan's BIGINT shape (DuckDB sums BIGINT
+// into HUGEINT). Staleness is bounded by the materializer's rebuild interval.
+func (l *LakeEventService) getTypeSummariesRollup(ctx context.Context, f RawFilter) ([]eventrepo.CloudEventTypeSummary, error) {
+	defer observeLakeRead("fetchTypeSummaryRollup", time.Now())
+	where, args := whereClauseQ(f, "")
+	q := fmt.Sprintf(`SELECT type, CAST(sum(count) AS BIGINT) AS cnt,`+
+		` min(first_seen) AS first_seen, max(last_seen) AS last_seen`+
+		` FROM %s WHERE %s GROUP BY type ORDER BY type`, lakeRawTypesLatest, where)
+	return l.scanTypeSummaries(ctx, "fetchTypeSummaryRollup", q, args)
+}
+
+// getTypeSummariesScan computes the summary live from lake.raw_events — the
+// pre-rollup path, kept as the fallback for filters the rollup cannot answer.
+//
+// This intentionally does NOT apply defaultFetchScanWindow: first_seen/last_seen
+// are all-time min/max per type, so a lookback bound would corrupt them; the
+// summary query is therefore unbounded
+// (SR-10). raw_events is partitioned by (type, day), so a type filter still
+// prunes; an unfiltered summary is an inherent full scan by definition.
+func (l *LakeEventService) getTypeSummariesScan(ctx context.Context, f RawFilter) ([]eventrepo.CloudEventTypeSummary, error) {
 	defer observeLakeRead("fetchTypeSummary", time.Now())
 	// Build base WHERE with unqualified columns for the aggregate query.
 	where, args := whereClauseQ(f, "")
-	// Dedup redelivered duplicates (the same second-precision key the fetch path uses)
-	// BEFORE counting, so this count matches what cloudEvents returns — din's writer is
-	// a blind append, so duplicates can persist past the NATS DuplicateWindow on lag,
-	// failover, or replay, and a bare count(*) would inflate the per-type total. Excludes
-	// tombstones and voided events.
-	deduped := fmt.Sprintf(`SELECT type, time FROM %s WHERE %s%s`+
-		` QUALIFY ROW_NUMBER() OVER (PARTITION BY subject, date_trunc('second', time), type, source, id ORDER BY time) = 1`,
-		lakeRawEvents, where, voidingClause(lakeRawEvents))
+	// Dedup redelivered duplicates BEFORE counting so this count matches what
+	// cloudEvents returns (rawEventDedupQualify's doc). Excludes tombstones and
+	// voided events.
+	deduped := fmt.Sprintf(`SELECT type, time FROM %s WHERE %s%s%s`,
+		lakeRawEvents, where, voidingClause(lakeRawEvents), rawEventDedupQualify)
 	q := fmt.Sprintf(`SELECT type, count(*) AS cnt, min(time) AS first_seen, max(time) AS last_seen`+
 		` FROM (%s) GROUP BY type ORDER BY type`, deduped)
+	return l.scanTypeSummaries(ctx, "fetchTypeSummary", q, args)
+}
 
-	rows, err := l.svc.queryLake(ctx, "fetchTypeSummary", q, args...)
+// scanTypeSummaries runs a type-summary query (type, count, first_seen,
+// last_seen) and scans the rows, normalizing timestamps to UTC. The column
+// order is shared by the scan and rollup queries, so it lives in one place.
+func (l *LakeEventService) scanTypeSummaries(ctx context.Context, op, q string, args []any) ([]eventrepo.CloudEventTypeSummary, error) {
+	rows, err := l.svc.queryLake(ctx, op, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("lake type summaries: %w", err)
 	}

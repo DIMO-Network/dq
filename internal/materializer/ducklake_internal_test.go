@@ -61,6 +61,7 @@ func TestSetupStatements_LayoutOnlyOnFirstCreation(t *testing.T) {
 	}
 	joined := strings.Join(reboot, "\n")
 	for _, want := range []string{
+		"CREATE TABLE IF NOT EXISTS lake.raw_types_latest",
 		"CREATE TABLE IF NOT EXISTS lake.ingest_progress",
 		"INSERT INTO lake.ingest_progress",
 		"CREATE TABLE IF NOT EXISTS meta.din_consumer_progress",

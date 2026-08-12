@@ -115,6 +115,12 @@ type Settings struct {
 	// subjects per flush and mint fewer catalog snapshots at the cost of
 	// staler latest/summary reads during a backlog.
 	MaterializerRollupInterval string `yaml:"MATERIALIZER_ROLLUP_INTERVAL"`
+	// MaterializerRawTypesInterval is a Go duration: how often the materializer
+	// fully rebuilds lake.raw_types_latest, the rollup that serves
+	// availableCloudEventTypes (dq#40). Each rebuild is one whole-table pass over
+	// lake.raw_events (~4.5 s), so the interval trades S3 scan traffic against
+	// type-summary staleness. Empty uses the default (15m). Materializer-only.
+	MaterializerRawTypesInterval string `yaml:"MATERIALIZER_RAW_TYPES_INTERVAL"`
 	// MaterializerBackfillMode tunes the writer for a large one-time catch-up
 	// (initial historical load, long downtime): it skips the cross-batch dedup
 	// anti-join and flushes signals_latest once on catch-up instead of mid-drain.

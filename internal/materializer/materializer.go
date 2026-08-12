@@ -50,6 +50,11 @@ type Config struct {
 	// catch-up the rollup is always flushed regardless. Defaults to PollInterval;
 	// ignored in BackfillMode (one flush at catch-up).
 	RollupInterval time.Duration
+	// RawTypesInterval is how often the lake.raw_types_latest full rebuild runs
+	// (dq#40) — a whole-table pass over raw_events, so the interval trades S3
+	// scan traffic against availableCloudEventTypes staleness. Defaults to
+	// defaultRawTypesInterval (15m).
+	RawTypesInterval time.Duration
 }
 
 const defaultPollInterval = 15 * time.Second
@@ -63,6 +68,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RollupInterval <= 0 {
 		c.RollupInterval = c.PollInterval
+	}
+	if c.RawTypesInterval <= 0 {
+		c.RawTypesInterval = defaultRawTypesInterval
 	}
 	return c
 }
@@ -115,6 +123,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	defer ticker.Stop()
 	lastPrune := time.Now()
 	lastRollup := time.Now()
+	// Zero, not now: the first pass rebuilds raw_types_latest immediately. That
+	// is what backfills a freshly created table (the rebuild IS the backfill —
+	// one whole-table pass either way), and after a restart it caps staleness at
+	// one boot instead of boot + interval. One ~4.5 s scan per boot.
+	var lastRawTypes time.Time
 	failures := failureTracker{window: materializerMaxFailureWindow}
 	triedSessionRecycle := false
 	for {
@@ -175,6 +188,10 @@ func (r *Runner) Run(ctx context.Context) error {
 				// skipping the (interval-gated) prune here silently stopped
 				// retention for as long as the backlog persisted.
 				r.maybePrune(ctx, &lastPrune)
+				// raw_types_latest reads raw_events, not the decoded tables, so it
+				// is independent of decode progress — keep its interval honored
+				// through a long drain like the prune (one bounded scan per interval).
+				r.maybeRefreshRawTypes(ctx, &lastRawTypes)
 				continue // drain the backlog without waiting
 			}
 			// Caught up: flush the decoupled rollup for every subject touched since
@@ -201,6 +218,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		// catalog-wide maintenance (one maintenance process per catalog), so dq
 		// runs none — it only enforces the optional decoded-row retention.
 		r.maybePrune(ctx, &lastPrune)
+		r.maybeRefreshRawTypes(ctx, &lastRawTypes)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -249,6 +267,22 @@ func (r *Runner) maybeFlushRollup(ctx context.Context, last *time.Time) {
 	}
 	*last = time.Now()
 	r.flushRollup(ctx)
+}
+
+// maybeRefreshRawTypes rebuilds lake.raw_types_latest at most once per
+// RawTypesInterval (dq#40), logging (not propagating) a failure: the base table
+// stays durable, the read path falls back to the scan while the rollup is
+// missing/empty, and the rebuild self-heals at the next interval, so a
+// transient failure must not wedge the decode loop.
+func (r *Runner) maybeRefreshRawTypes(ctx context.Context, last *time.Time) {
+	if time.Since(*last) < r.cfg.RawTypesInterval {
+		return
+	}
+	*last = time.Now()
+	if err := r.lake.RecomputeRawTypesRollup(ctx); err != nil && ctx.Err() == nil {
+		rawTypesRefreshErrorsTotal.Inc()
+		r.log.Error().Err(err).Msg("raw_types_latest rebuild failed; type summaries serve stale (or fall back to the scan) until the next interval")
+	}
 }
 
 // pruneInterval is how often the ducklake path enforces DecodedRetention.
