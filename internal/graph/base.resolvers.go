@@ -10,13 +10,15 @@ import (
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
+	"github.com/DIMO-Network/dq/internal/scope"
 )
 
 // Signals is the resolver for the signals field.
 func (r *queryResolver) Signals(ctx context.Context, subject string, interval string, from time.Time, to time.Time, filter *model.SignalFilter) ([]*model.SignalAggregations, error) {
-	aggArgs, err := aggregationArgsFromContext(ctx, subject, interval, from, to, filter)
+	aggArgs, err := aggregationArgsFromContext(ctx, r.SignalRepo, subject, interval, from, to, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -25,7 +27,7 @@ func (r *queryResolver) Signals(ctx context.Context, subject string, interval st
 
 // SignalsLatest is the resolver for the signalsLatest field.
 func (r *queryResolver) SignalsLatest(ctx context.Context, subject string, filter *model.SignalFilter) (*model.SignalCollection, error) {
-	latestArgs, err := latestArgsFromContext(ctx, subject, filter)
+	latestArgs, err := latestArgsFromContext(ctx, r.SignalRepo, subject, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -42,10 +44,15 @@ func (r *queryResolver) AvailableSignals(ctx context.Context, subject string, fi
 	// lacking the privilege — gate the name list the same way signalsSnapshot gates values
 	// (a VEHICLE_NON_LOCATION_DATA-only token would otherwise see currentLocationCoordinates
 	// in the list, leaking that the vehicle has location data).
-	perms := permissionsFromCtx(ctx)
+	//
+	// Scoped permissions are excluded outright (not merely window-checked):
+	// listing a name asserts the vehicle has data for it at SOME time, which a
+	// windowed grant cannot confirm without a window-bounded existence query.
+	// Teaching this surface windows is a follow-up.
+	tok := tokenFromCtx(ctx)
 	out := names[:0]
 	for _, n := range names {
-		if hasPrivilegesForSignal(r.SignalRepo, n, perms) {
+		if hasUnscopedPrivilegesForSignal(r.SignalRepo, n, tok) {
 			out = append(out, n)
 		}
 	}
@@ -62,10 +69,14 @@ func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter 
 	// seen of every signal, including location, without the privilege. Filter the name list
 	// + per-signal summaries and recompute the aggregate count so it doesn't reveal the
 	// location data-point count either.
-	perms := permissionsFromCtx(ctx)
+	//
+	// Summaries are all-time facts (counts, first/last seen) that cannot be
+	// window-checked post hoc, so signals behind scoped permissions are
+	// excluded entirely; a window-bounded summary query is a follow-up.
+	tok := tokenFromCtx(ctx)
 	names := summary.AvailableSignals[:0]
 	for _, n := range summary.AvailableSignals {
-		if hasPrivilegesForSignal(r.SignalRepo, n, perms) {
+		if hasUnscopedPrivilegesForSignal(r.SignalRepo, n, tok) {
 			names = append(names, n)
 		}
 	}
@@ -73,14 +84,50 @@ func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter 
 	var total uint64
 	sds := summary.SignalDataSummary[:0]
 	for _, s := range summary.SignalDataSummary {
-		if hasPrivilegesForSignal(r.SignalRepo, s.Name, perms) {
+		if hasUnscopedPrivilegesForSignal(r.SignalRepo, s.Name, tok) {
 			sds = append(sds, s)
 			total += s.NumberOfSignals
 		}
 	}
 	summary.SignalDataSummary = sds
 	summary.NumberOfSignals = total
+	if hasScopedPermissions(tok) {
+		// The event summaries and the top-level first/last-seen fold are also
+		// all-time facts; for scoped tokens recompute the fold from what
+		// survived and drop event summaries unless the event permissions are
+		// unconditional.
+		if !scope.Unscoped(tok, tokenclaims.PermissionGetNonLocationHistory) ||
+			!scope.Unscoped(tok, tokenclaims.PermissionGetLocationHistory) {
+			summary.EventDataSummary = nil
+		}
+		summary.FirstSeen, summary.LastSeen = refoldSummaryRange(summary)
+	}
 	return summary, nil
+}
+
+// refoldSummaryRange recomputes the top-level first/last-seen range of a data
+// summary from its surviving per-signal and per-event entries, so the fold
+// cannot reveal timestamps of entries that were filtered out.
+func refoldSummaryRange(summary *model.DataSummary) (time.Time, time.Time) {
+	minTime := time.Now().UTC()
+	maxTime := time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, s := range summary.SignalDataSummary {
+		if s.FirstSeen.Before(minTime) {
+			minTime = s.FirstSeen
+		}
+		if s.LastSeen.After(maxTime) {
+			maxTime = s.LastSeen
+		}
+	}
+	for _, e := range summary.EventDataSummary {
+		if e.FirstSeen.Before(minTime) {
+			minTime = e.FirstSeen
+		}
+		if e.LastSeen.After(maxTime) {
+			maxTime = e.LastSeen
+		}
+	}
+	return minTime, maxTime
 }
 
 // SignalsSnapshot is the resolver for the signalsSnapshot field.
@@ -89,14 +136,24 @@ func (r *queryResolver) SignalsSnapshot(ctx context.Context, subject string, fil
 	if err != nil {
 		return nil, err
 	}
-	permissions := permissionsFromCtx(ctx)
+	tok := tokenFromCtx(ctx)
 	filtered := make([]*model.LatestSignal, 0, len(resp.Signals))
 	for _, sig := range resp.Signals {
-		if hasPrivilegesForSignal(r.SignalRepo, sig.Name, permissions) {
+		// Possession plus, for scoped permissions, the data window: a latest
+		// value recorded outside the window is withheld (point queries are
+		// window-evaluated, not rejected — the timestamps make the result
+		// self-describing).
+		if hasPrivilegesForSignal(r.SignalRepo, sig.Name, tok) &&
+			signalValueVisible(r.SignalRepo, sig.Name, tok, sig.Timestamp) {
 			filtered = append(filtered, sig)
 		}
 	}
 	resp.Signals = filtered
+	if hasScopedPermissions(tok) {
+		// lastSeen spans every signal, windowed or not; suppressed for scoped
+		// tokens until it is window-aware.
+		resp.LastSeen = nil
+	}
 	return resp, nil
 }
 

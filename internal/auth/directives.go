@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/99designs/gqlgen/graphql"
+	"github.com/DIMO-Network/dq/internal/scope"
 )
 
 const didArg = "subject"
@@ -57,28 +57,33 @@ func NewVehicleTokenCheck() func(context.Context, any, graphql.Resolver) (any, e
 	}
 }
 
-// AllOfPrivilegeCheck verifies the claim includes ALL of the required privilege strings.
+// AllOfPrivilegeCheck verifies the claim includes ALL of the required privilege
+// strings. A permission held under constraints (scoped_permissions) counts as
+// held here — this directive is a possession gate only; the data window is
+// enforced where each query touches data (range checks on ranged resolvers,
+// per-value timestamp checks on latest paths).
 func AllOfPrivilegeCheck(ctx context.Context, _ any, next graphql.Resolver, requiredPrivs []string) (any, error) {
 	claim, err := getDQClaim(ctx)
 	if err != nil {
 		return nil, UnauthorizedError{err: err}
 	}
 	for _, priv := range requiredPrivs {
-		if !slices.Contains(claim.Permissions, priv) {
+		if !scope.Holds(&claim.Token, priv) {
 			return nil, newError("missing required privilege %s", priv)
 		}
 	}
 	return next(ctx)
 }
 
-// OneOfPrivilegeCheck verifies the claim includes AT LEAST ONE of the required privilege strings.
+// OneOfPrivilegeCheck verifies the claim includes AT LEAST ONE of the required
+// privilege strings, scoped or not (see AllOfPrivilegeCheck on scoped grants).
 func OneOfPrivilegeCheck(ctx context.Context, _ any, next graphql.Resolver, requiredPrivs []string) (any, error) {
 	claim, err := getDQClaim(ctx)
 	if err != nil {
 		return nil, UnauthorizedError{err: err}
 	}
 	for _, priv := range requiredPrivs {
-		if slices.Contains(claim.Permissions, priv) {
+		if scope.Holds(&claim.Token, priv) {
 			return next(ctx)
 		}
 	}

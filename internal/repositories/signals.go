@@ -147,14 +147,27 @@ func (r *Repository) GetSignalLatest(ctx context.Context, latestArgs *model.Late
 		return nil, handleDBError(ctx, err)
 	}
 	coll := &model.SignalCollection{}
+	var rawLocation *vss.Signal
 	for _, signal := range signals {
 		if signal.Data.Name == model.LastSeenField && !signal.Data.Timestamp.Equal(unixEpoch) {
 			coll.LastSeen = &signal.Data.Timestamp
 			continue
 		}
+		// The raw location row also feeds the derived approximate location,
+		// which is gated separately: a caller may be allowed the approximate
+		// value at a timestamp the raw coordinates are not.
+		if signal.Data.Name == vss.FieldCurrentLocationCoordinates {
+			rawLocation = signal
+		}
+		if latestArgs.RowAllowed != nil && !latestArgs.RowAllowed(signal.Data.Name, signal.Data.Timestamp) {
+			continue
+		}
 		model.SetCollectionField(coll, signal)
 	}
-	setApproximateLocationInCollection(coll)
+	if rawLocation != nil &&
+		(latestArgs.ApproxLocationAllowed == nil || latestArgs.ApproxLocationAllowed(rawLocation.Data.Timestamp)) {
+		setApproximateLocationFromSignal(coll, rawLocation)
+	}
 	return coll, nil
 }
 
@@ -353,21 +366,25 @@ func GetApproximateLoc(lat, long float64) *h3.LatLng {
 	return &latLong
 }
 
-func setApproximateLocationInCollection(coll *model.SignalCollection) {
-	if coll == nil || coll.CurrentLocationCoordinates == nil {
+// setApproximateLocationFromSignal derives the approximate current location
+// from the raw location signal row. It works from the row rather than the
+// assembled collection field so the raw coordinates can be withheld (e.g. by a
+// data-window check) while the approximate value is still served.
+func setApproximateLocationFromSignal(coll *model.SignalCollection, signal *vss.Signal) {
+	if coll == nil || signal == nil {
 		return
 	}
-	loc := coll.CurrentLocationCoordinates
-	latLong := GetApproximateLoc(loc.Value.Latitude, loc.Value.Longitude)
+	loc := signal.Data.ValueLocation
+	latLong := GetApproximateLoc(loc.Latitude, loc.Longitude)
 	if latLong == nil {
 		return
 	}
 	coll.CurrentLocationApproximateCoordinates = &model.SignalLocation{
-		Timestamp: loc.Timestamp,
+		Timestamp: signal.Data.Timestamp,
 		Value: &model.Location{
 			Latitude:  latLong.Lat,
 			Longitude: latLong.Lng,
-			Hdop:      loc.Value.Hdop,
+			Hdop:      loc.HDOP,
 		},
 	}
 }

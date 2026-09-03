@@ -3,9 +3,9 @@ package graph
 import (
 	"testing"
 
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
-	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 )
 
 func TestHasPrivilegesForSignal(t *testing.T) {
@@ -100,7 +100,8 @@ func TestHasPrivilegesForSignal(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := hasPrivilegesForSignal(repo, tt.signal, tt.permissions)
+			tok := &tokenclaims.Token{CustomClaims: tokenclaims.CustomClaims{Permissions: tt.permissions}}
+			got := hasPrivilegesForSignal(repo, tt.signal, tok)
 			if got != tt.want {
 				t.Errorf("hasPrivilegesForSignal(%q, %v) = %v, want %v",
 					tt.signal, tt.permissions, got, tt.want)

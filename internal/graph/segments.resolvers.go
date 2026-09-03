@@ -14,10 +14,18 @@ import (
 
 // Segments is the resolver for the segments field.
 func (r *queryResolver) Segments(ctx context.Context, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, limit *int, after *time.Time) ([]*model.Segment, error) {
+	// Segments require the same history-permission pair as events; reject
+	// ranges outside a scoped permission's data window.
+	if err := eventsRangeAllowed(ctx, from, to); err != nil {
+		return nil, err
+	}
 	return r.SignalRepo.GetSegments(ctx, subject, from, to, mechanism, config, signalRequests, eventRequests, limit, after)
 }
 
 // DailyActivity is the resolver for the dailyActivity field.
 func (r *queryResolver) DailyActivity(ctx context.Context, subject string, from time.Time, to time.Time, mechanism model.DetectionMechanism, config *model.SegmentConfig, signalRequests []*model.SegmentSignalRequest, eventRequests []*model.SegmentEventRequest, timezone *string) ([]*model.DailyActivity, error) {
+	if err := eventsRangeAllowed(ctx, from, to); err != nil {
+		return nil, err
+	}
 	return r.SignalRepo.GetDailyActivity(ctx, subject, from, to, mechanism, config, signalRequests, eventRequests, timezone)
 }
