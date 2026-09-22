@@ -38,19 +38,13 @@ models:
     model: github.com/99designs/gqlgen/graphql.String
     enum_values:
       VEHICLE_NON_LOCATION_DATA:
-        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetNonLocationHistory
-      VEHICLE_COMMANDS:
-        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionExecuteCommands
-      VEHICLE_CURRENT_LOCATION:
-        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetCurrentLocation
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.AbilityTelemetryRead
       VEHICLE_ALL_TIME_LOCATION:
-        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetLocationHistory
-      VEHICLE_VIN_CREDENTIAL:
-        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetVINCredential
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.AbilityLocationPrecise
       VEHICLE_APPROXIMATE_LOCATION:
-        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetApproximateLocation
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.AbilityLocationApproximate
       VEHICLE_RAW_DATA:
-        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.PermissionGetRawData
+        value: github.com/DIMO-Network/dauth/pkg/tokenclaims.AbilityRawRead
   Time:
     model:
       - github.com/99designs/gqlgen/graphql.Time

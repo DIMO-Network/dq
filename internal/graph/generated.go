@@ -3256,12 +3256,17 @@ directive @requiresOneOfPrivilege(
   privileges: [Privilege!]!
 ) on FIELD_DEFINITION | OBJECT | INTERFACE | SCALAR | ENUM
 
+"""
+Privilege names the ability a field needs, in the vocabulary model-garage's
+signal definitions use. Each value maps to an ability name in the access
+token (gqlgen.yml): non-location data is telemetry:read, location is
+location:precise (windows in the token say when, so there is no separate
+"current" privilege), approximate location is location:approximate and raw
+data is raw:read.
+"""
 enum Privilege {
   VEHICLE_NON_LOCATION_DATA
-  VEHICLE_COMMANDS
-  VEHICLE_CURRENT_LOCATION
   VEHICLE_ALL_TIME_LOCATION
-  VEHICLE_VIN_CREDENTIAL
   VEHICLE_APPROXIMATE_LOCATION
   VEHICLE_RAW_DATA
 }
@@ -35438,22 +35443,16 @@ func (ec *executionContext) marshalNPrivilege2string(ctx context.Context, sel as
 
 var (
 	unmarshalNPrivilege2string = map[string]string{
-		"VEHICLE_NON_LOCATION_DATA":    tokenclaims.PermissionGetNonLocationHistory,
-		"VEHICLE_COMMANDS":             tokenclaims.PermissionExecuteCommands,
-		"VEHICLE_CURRENT_LOCATION":     tokenclaims.PermissionGetCurrentLocation,
-		"VEHICLE_ALL_TIME_LOCATION":    tokenclaims.PermissionGetLocationHistory,
-		"VEHICLE_VIN_CREDENTIAL":       tokenclaims.PermissionGetVINCredential,
-		"VEHICLE_APPROXIMATE_LOCATION": tokenclaims.PermissionGetApproximateLocation,
-		"VEHICLE_RAW_DATA":             tokenclaims.PermissionGetRawData,
+		"VEHICLE_NON_LOCATION_DATA":    tokenclaims.AbilityTelemetryRead,
+		"VEHICLE_ALL_TIME_LOCATION":    tokenclaims.AbilityLocationPrecise,
+		"VEHICLE_APPROXIMATE_LOCATION": tokenclaims.AbilityLocationApproximate,
+		"VEHICLE_RAW_DATA":             tokenclaims.AbilityRawRead,
 	}
 	marshalNPrivilege2string = map[string]string{
-		tokenclaims.PermissionGetNonLocationHistory:  "VEHICLE_NON_LOCATION_DATA",
-		tokenclaims.PermissionExecuteCommands:        "VEHICLE_COMMANDS",
-		tokenclaims.PermissionGetCurrentLocation:     "VEHICLE_CURRENT_LOCATION",
-		tokenclaims.PermissionGetLocationHistory:     "VEHICLE_ALL_TIME_LOCATION",
-		tokenclaims.PermissionGetVINCredential:       "VEHICLE_VIN_CREDENTIAL",
-		tokenclaims.PermissionGetApproximateLocation: "VEHICLE_APPROXIMATE_LOCATION",
-		tokenclaims.PermissionGetRawData:             "VEHICLE_RAW_DATA",
+		tokenclaims.AbilityTelemetryRead:       "VEHICLE_NON_LOCATION_DATA",
+		tokenclaims.AbilityLocationPrecise:     "VEHICLE_ALL_TIME_LOCATION",
+		tokenclaims.AbilityLocationApproximate: "VEHICLE_APPROXIMATE_LOCATION",
+		tokenclaims.AbilityRawRead:             "VEHICLE_RAW_DATA",
 	}
 )
 

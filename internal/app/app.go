@@ -10,11 +10,11 @@ import (
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/handler/extension"
 	"github.com/99designs/gqlgen/graphql/handler/transport"
+	"github.com/DIMO-Network/dauth/pkg/dpop"
 	"github.com/DIMO-Network/dq/internal/auth"
 	"github.com/DIMO-Network/dq/internal/config"
 	"github.com/DIMO-Network/dq/internal/fetch/rpc"
 	"github.com/DIMO-Network/dq/internal/graph"
-	"github.com/DIMO-Network/dq/internal/identity"
 	"github.com/DIMO-Network/dq/internal/limits"
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
@@ -47,10 +47,6 @@ type App struct {
 	// it instead of opening a second duck.Service + S3 client in the same process
 	// (SR-9). Owned by this App — Cleanup closes it.
 	eventService eventrepo.EventService
-	// identityClient (may be nil) lets the gRPC fetch server scope reads to the
-	// token's own subject + verify cross-subject device links, the same way the
-	// GraphQL resolver does. Shared with the resolver.
-	identityClient identity.Client
 	// globalLimiter is the process-wide in-flight cap; the gRPC server shares
 	// it with the HTTP chain so both transports draw from ONE admission budget
 	// in front of the one DuckDB pool (H11).
@@ -102,31 +98,29 @@ func New(settings config.Settings) (*App, error) {
 		return nil, fmt.Errorf("couldn't create event service: %w", err)
 	}
 
-	var identityClient identity.Client
-	if settings.IdentityAPIURL != "" {
-		identityClient = identity.New(settings.IdentityAPIURL)
-	}
-
 	resolver := &graph.Resolver{
-		SignalRepo:     signalRepo,
-		EventService:   eventService,
-		IdentityClient: identityClient,
+		SignalRepo:   signalRepo,
+		EventService: eventService,
 	}
 
+	checker := &auth.Checker{}
 	cfg := graph.Config{Resolvers: resolver}
-	cfg.Directives.RequiresVehicleToken = auth.NewVehicleTokenCheck()
-	cfg.Directives.RequiresAllOfPrivileges = auth.AllOfPrivilegeCheck
-	cfg.Directives.RequiresOneOfPrivilege = auth.OneOfPrivilegeCheck
+	cfg.Directives.RequiresVehicleToken = checker.VehicleTokenCheck
+	cfg.Directives.RequiresAllOfPrivileges = checker.AllOfPrivilegeCheck
+	cfg.Directives.RequiresOneOfPrivilege = checker.OneOfPrivilegeCheck
 	cfg.Directives.IsSignal = noOp
 	cfg.Directives.HasAggregation = noOp
 
 	es := graph.NewExecutableSchema(cfg)
 	gqlSrv := newServer(es)
 
-	jwtMiddleware, err := auth.NewJWTMiddleware(settings.TokenExchangeIssuer, settings.TokenExchangeJWTKeySetURL)
+	jwtMiddleware, err := auth.NewJWTMiddleware(settings.TokenExchangeIssuer, settings.TokenExchangeJWTKeySetURL, settings.Audience())
 	if err != nil {
 		return nil, fmt.Errorf("couldn't create JWT middleware: %w", err)
 	}
+	// Every access token is bound to the caller's DPoP key; the proof is
+	// checked once the token has been validated and before anything reads it.
+	dpopMiddleware := auth.NewDPoPMiddleware(settings.PublicBaseURL, dpop.NewVerifier())
 
 	limiter, err := limits.New(settings.MaxRequestDuration)
 	if err != nil {
@@ -152,9 +146,11 @@ func New(settings config.Settings) (*App, error) {
 				globalLimiter.Middleware(
 					limiter.AddRequestTimeout(
 						jwtMiddleware.CheckJWT(
-							concLimiter.Middleware(subjectKey)(
-								authLoggerMiddleware(
-									auth.AddClaimHandler(inner),
+							dpopMiddleware(
+								concLimiter.Middleware(subjectKey)(
+									authLoggerMiddleware(
+										auth.AddClaimHandler(inner),
+									),
 								),
 							),
 						),
@@ -189,13 +185,12 @@ func New(settings config.Settings) (*App, error) {
 
 	ok = true // App now owns backendCleanup + stopMaterializer; disarm the deferred cleanup
 	return &App{
-		Handler:        authChain(gqlSrv),
-		MCPHandler:     authChain(mcpHandler),
-		readyCheck:     readyCheck,
-		eventService:   eventService,
-		identityClient: identityClient,
-		globalLimiter:  globalLimiter,
-		cleanup:        cleanup,
+		Handler:       authChain(gqlSrv),
+		MCPHandler:    authChain(mcpHandler),
+		readyCheck:    readyCheck,
+		eventService:  eventService,
+		globalLimiter: globalLimiter,
+		cleanup:       cleanup,
 	}, nil
 }
 
@@ -215,7 +210,7 @@ func noOp(ctx context.Context, obj interface{}, next graphql.Resolver) (res inte
 // in the same process (SR-9). The App owns that backend, so there is no separate
 // cleanup to return.
 func CreateGRPCServer(logger *zerolog.Logger, application *App, settings config.Settings) (*grpc.Server, error) {
-	rpcServer := rpc.NewServer(application.eventService, application.identityClient)
+	rpcServer := rpc.NewServer(application.eventService)
 
 	grpcPanic := metrics.GRPCPanicker{Logger: logger}
 	interceptors := []grpc.UnaryServerInterceptor{
@@ -237,7 +232,7 @@ func CreateGRPCServer(logger *zerolog.Logger, application *App, settings config.
 	// rejections are still logged and a panic in validation is contained.
 	if settings.TokenExchangeIssuer != "" {
 		authInterceptor, err := auth.NewGRPCFetchAuthInterceptor(
-			settings.TokenExchangeIssuer, settings.TokenExchangeJWTKeySetURL, settings.FetchGRPCRequireJWT, logger)
+			settings.TokenExchangeIssuer, settings.TokenExchangeJWTKeySetURL, settings.Audience(), settings.FetchGRPCRequireJWT, logger)
 		if err != nil {
 			return nil, fmt.Errorf("creating fetch gRPC auth interceptor: %w", err)
 		}

@@ -42,10 +42,10 @@ func (r *queryResolver) AvailableSignals(ctx context.Context, subject string, fi
 	// lacking the privilege — gate the name list the same way signalsSnapshot gates values
 	// (a VEHICLE_NON_LOCATION_DATA-only token would otherwise see currentLocationCoordinates
 	// in the list, leaking that the vehicle has location data).
-	perms := permissionsFromCtx(ctx)
+	holds := abilitiesFromCtx(ctx, subject)
 	out := names[:0]
 	for _, n := range names {
-		if hasPrivilegesForSignal(r.SignalRepo, n, perms) {
+		if hasPrivilegesForSignal(r.SignalRepo, n, holds) {
 			out = append(out, n)
 		}
 	}
@@ -62,10 +62,10 @@ func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter 
 	// seen of every signal, including location, without the privilege. Filter the name list
 	// + per-signal summaries and recompute the aggregate count so it doesn't reveal the
 	// location data-point count either.
-	perms := permissionsFromCtx(ctx)
+	holds := abilitiesFromCtx(ctx, subject)
 	names := summary.AvailableSignals[:0]
 	for _, n := range summary.AvailableSignals {
-		if hasPrivilegesForSignal(r.SignalRepo, n, perms) {
+		if hasPrivilegesForSignal(r.SignalRepo, n, holds) {
 			names = append(names, n)
 		}
 	}
@@ -73,7 +73,7 @@ func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter 
 	var total uint64
 	sds := summary.SignalDataSummary[:0]
 	for _, s := range summary.SignalDataSummary {
-		if hasPrivilegesForSignal(r.SignalRepo, s.Name, perms) {
+		if hasPrivilegesForSignal(r.SignalRepo, s.Name, holds) {
 			sds = append(sds, s)
 			total += s.NumberOfSignals
 		}
@@ -89,10 +89,10 @@ func (r *queryResolver) SignalsSnapshot(ctx context.Context, subject string, fil
 	if err != nil {
 		return nil, err
 	}
-	permissions := permissionsFromCtx(ctx)
+	holds := abilitiesFromCtx(ctx, subject)
 	filtered := make([]*model.LatestSignal, 0, len(resp.Signals))
 	for _, sig := range resp.Signals {
-		if hasPrivilegesForSignal(r.SignalRepo, sig.Name, permissions) {
+		if hasPrivilegesForSignal(r.SignalRepo, sig.Name, holds) {
 			filtered = append(filtered, sig)
 		}
 	}

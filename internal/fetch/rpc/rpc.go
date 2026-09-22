@@ -9,7 +9,6 @@ import (
 
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/fetch"
-	"github.com/DIMO-Network/dq/internal/identity"
 	"github.com/DIMO-Network/dq/internal/service/duck"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/DIMO-Network/dq/pkg/grpc"
@@ -25,18 +24,13 @@ const maxIndexKeysPerRequest = 1000
 
 // Server is used to implement grpc.FetchServiceServer.
 type Server struct {
-	eventService   eventrepo.EventService
-	identityClient identity.Client // may be nil; cross-subject reads then always deny
+	eventService eventrepo.EventService
 	grpc.UnimplementedFetchServiceServer
 }
 
-// NewServer creates a new Server instance. identityClient (may be nil) is used to
-// verify cross-subject device links when authorizing a fetch.
-func NewServer(eventService eventrepo.EventService, identityClient identity.Client) *Server {
-	return &Server{
-		eventService:   eventService,
-		identityClient: identityClient,
-	}
+// NewServer creates a new Server instance.
+func NewServer(eventService eventrepo.EventService) *Server {
+	return &Server{eventService: eventService}
 }
 
 // validObjectKey rejects index keys that could escape the expected object
