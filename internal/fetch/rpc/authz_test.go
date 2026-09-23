@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/DIMO-Network/dq/internal/auth"
+	"github.com/DIMO-Network/dq/pkg/eventrepo"
 	"github.com/DIMO-Network/dq/pkg/grpc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,4 +133,39 @@ func TestListCloudEventsFromIndex_CrossSubjectDenied(t *testing.T) {
 			},
 		})
 	assert.Equal(t, codes.PermissionDenied, status.Code(err), "a crafted index for subject B must be rejected")
+}
+
+// fixedEventService answers index reads with fixed events.
+type fixedEventService struct {
+	emptyEventService
+	events []cloudevent.RawEvent
+}
+
+func (f fixedEventService) ListCloudEventsFromIndexes(context.Context, []cloudevent.CloudEvent[eventrepo.ObjectInfo]) ([]cloudevent.RawEvent, error) {
+	return f.events, nil
+}
+
+// TestListCloudEventsFromIndex_WindowsBindTheFetchedEvents: the lake resolves an
+// index by (subject, id) and the header's time is the caller's to write, so an
+// id kept from an older token reads an event outside this token's windows
+// unless the fetched events themselves are checked.
+func TestListCloudEventsFromIndex_WindowsBindTheFetchedEvents(t *testing.T) {
+	ctx := ctxWithGrants(tokenclaims.Grant{Subject: authSubjA, Abilities: []string{tokenclaims.AbilityRawRead},
+		Windows: tokenclaims.Windows{{Start: ts("2026-01-01T00:00:00Z"), End: ts("2026-02-01T00:00:00Z")}}})
+	event := func(at string) cloudevent.RawEvent {
+		var e cloudevent.RawEvent
+		e.Subject, e.Time = authSubjA, *ts(at)
+		return e
+	}
+	req := &grpc.ListCloudEventsFromKeysRequest{Indexes: []*grpc.CloudEventIndex{{
+		Data:   &grpc.ObjectInfo{Key: "cloudevent/blobs/x"},
+		Header: &grpc.CloudEventHeader{Subject: authSubjA, Time: timestamppb.New(*ts("2026-01-15T00:00:00Z"))},
+	}}}
+
+	got, err := NewServer(fixedEventService{events: []cloudevent.RawEvent{event("2026-01-15T00:00:00Z")}}).ListCloudEventsFromIndex(ctx, req)
+	require.NoError(t, err)
+	assert.Len(t, got.GetCloudEvents(), 1)
+
+	_, err = NewServer(fixedEventService{events: []cloudevent.RawEvent{event("2025-06-01T00:00:00Z")}}).ListCloudEventsFromIndex(ctx, req)
+	assert.Equal(t, codes.PermissionDenied, status.Code(err), "the header claimed January; the event is from June")
 }

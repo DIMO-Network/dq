@@ -7,6 +7,7 @@ import (
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
+	"github.com/DIMO-Network/dq/internal/coverage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,13 +98,44 @@ func TestVehicleTokenCheck(t *testing.T) {
 		assert.ErrorContains(t, err, "straddles a gap")
 		assert.ErrorContains(t, err, "[2026-01-01T00:00:00Z, 2026-02-01T00:00:00Z) [2026-03-01T00:00:00Z, 2026-04-01T00:00:00Z)")
 	})
-	t.Run("only live abilities: no clamp", func(t *testing.T) {
+	t.Run("only live abilities: no data at all", func(t *testing.T) {
 		live := &tokenclaims.Token{Grants: []tokenclaims.Grant{{Subject: carA, Abilities: []string{tokenclaims.AbilityCommandUnlock}}}}
-		ctx, root := ctxFor(live, map[string]any{"subject": carA, "from": *ts("2025-01-01T00:00:00Z"), "to": *ts("2027-01-01T00:00:00Z")}, false)
-		_, err := c.VehicleTokenCheck(ctx, nil, pass)
-		require.NoError(t, err)
-		assert.Equal(t, *ts("2025-01-01T00:00:00Z"), root.Args["from"])
+		for _, args := range []map[string]any{
+			{"subject": carA, "from": *ts("2025-01-01T00:00:00Z"), "to": *ts("2027-01-01T00:00:00Z")},
+			{"subject": carA},
+		} {
+			ctx, _ := ctxFor(live, args, false)
+			_, err := c.VehicleTokenCheck(ctx, nil, pass)
+			assert.ErrorContains(t, err, "no data abilities")
+		}
 	})
+	t.Run("the windows travel in the context", func(t *testing.T) {
+		ctx, _ := ctxFor(token, map[string]any{"subject": carA}, false)
+		_, err := c.VehicleTokenCheck(ctx, nil, func(ctx context.Context) (any, error) {
+			ws, ok := coverage.Windows(ctx)
+			require.True(t, ok)
+			assert.True(t, coverage.Contains(ctx, *ts("2026-01-15T00:00:00Z")))
+			assert.False(t, coverage.Contains(ctx, *ts("2026-02-15T00:00:00Z")))
+			assert.Len(t, ws, 2)
+			return "ok", nil
+		})
+		require.NoError(t, err)
+	})
+}
+
+// gqlgen runs a field's directives outside in, in declaration order, so on a
+// field declared @requiresVehicleToken @requiresAllOfPrivileges(...) the
+// privilege check runs first. It clamps the field's own range itself, so the
+// order does not turn a clamp into a refusal.
+func TestPrivilegeCheckClampsItsOwnRange(t *testing.T) {
+	c := &Checker{}
+	ctx, root := ctxFor(token, map[string]any{"subject": carA, "from": *ts("2025-12-01T00:00:00Z"), "to": *ts("2026-01-25T00:00:00Z")}, false)
+	_, err := c.AllOfPrivilegeCheck(ctx, nil, func(ctx context.Context) (any, error) {
+		return c.VehicleTokenCheck(ctx, nil, pass)
+	}, []string{tokenclaims.AbilityTelemetryRead})
+	require.NoError(t, err)
+	assert.Equal(t, *ts("2026-01-01T00:00:00Z"), root.Args["from"])
+	assert.Equal(t, *ts("2026-01-25T00:00:00Z"), root.Args["to"])
 }
 
 func TestAbilityChecks(t *testing.T) {

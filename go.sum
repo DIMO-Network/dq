@@ -8,6 +8,8 @@ github.com/DIMO-Network/cloudevent v1.1.0 h1:pDJxwO3/Zom/U8BOZqKtMQ05Ye6Pgn6LAh/
 github.com/DIMO-Network/cloudevent v1.1.0/go.mod h1:I/9NcpMozV5Fw194WimhbkAsJtKVZf5UKYJ9hgc8Cdg=
 github.com/DIMO-Network/dauth v0.0.2-0.20260922180207-703cdfb21455 h1:wyuxFjODl6HLEPbUpFn4fWFa7OjQmD/dffnki7WNQ4E=
 github.com/DIMO-Network/dauth v0.0.2-0.20260922180207-703cdfb21455/go.mod h1:Q1xZDvdmU9pkp6+7JSjGWXPEVInE7URcyMFY8iduAa8=
+github.com/DIMO-Network/dauth v0.0.2-0.20260923165546-17aea928e5ad h1:boMz9aJJ+5khnwo31Zn4Ls/0a11KrXTDb0EeKeBI3is=
+github.com/DIMO-Network/dauth v0.0.2-0.20260923165546-17aea928e5ad/go.mod h1:Q1xZDvdmU9pkp6+7JSjGWXPEVInE7URcyMFY8iduAa8=
 github.com/DIMO-Network/model-garage v1.0.11 h1:aLvIyeo58p9pVgz+d3DnU5k5Fxvxh6mq/jE2s3LxXoc=
 github.com/DIMO-Network/model-garage v1.0.11/go.mod h1:oi7EGKQVxFVpXRsu2H+YbizbKcx06aQg2N1Yu4GqOp8=
 github.com/DIMO-Network/server-garage v0.4.0 h1:3ukXvtldIhLldn9AtbtQBooBjT2gicvB3WphrsjNQho=

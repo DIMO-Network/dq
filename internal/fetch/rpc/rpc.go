@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/DIMO-Network/cloudevent"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/DIMO-Network/dq/internal/fetch"
 	"github.com/DIMO-Network/dq/internal/service/duck"
 	"github.com/DIMO-Network/dq/pkg/eventrepo"
@@ -193,15 +194,19 @@ func (s *Server) ListCloudEventsFromIndex(ctx context.Context, req *grpc.ListClo
 		return nil, status.Errorf(codes.InvalidArgument, "too many indexes: %d (max %d)", len(protoIndexList), maxIndexKeysPerRequest)
 	}
 	events := make([]cloudevent.CloudEvent[eventrepo.ObjectInfo], len(protoIndexList))
+	windows := map[string]tokenclaims.Windows{}
 	for i, index := range protoIndexList {
 		if !validObjectKey(index.GetData().GetKey()) {
 			return nil, status.Error(codes.InvalidArgument, "invalid index key")
 		}
 		// The lake resolves each index by (subject, id); authorize the caller-supplied
 		// subject so a crafted index can't read another vehicle's payload.
-		if _, err := s.authorizeSubject(ctx, index.GetHeader().GetSubject()); err != nil {
+		subject := index.GetHeader().GetSubject()
+		ws, err := s.authorizeSubject(ctx, subject)
+		if err != nil {
 			return nil, err
 		}
+		windows[subject] = ws
 		events[i] = cloudevent.CloudEvent[eventrepo.ObjectInfo]{
 			CloudEventHeader: index.GetHeader().AsCloudEventHeader(),
 			Data: eventrepo.ObjectInfo{
@@ -216,6 +221,16 @@ func (s *Server) ListCloudEventsFromIndex(ctx context.Context, req *grpc.ListClo
 			return nil, status.Errorf(codes.NotFound, "no objects found: %v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "failed to get objects: %v", err)
+	}
+	// The index's header, time included, is the caller's to write, and the lake
+	// resolves by (subject, id) alone; so the windows are checked against the
+	// events as fetched. An event outside them is refused, not dropped, so a
+	// caller holding an id from an older token learns nothing by its absence.
+	for _, d := range data {
+		ws, ok := windows[d.Subject]
+		if !ok || (ws != nil && !ws.Contains(d.Time)) {
+			return nil, status.Error(codes.PermissionDenied, "an indexed event is outside the token's windows")
+		}
 	}
 	dataObjects := make([]*grpc.CloudEvent, len(data))
 	for i, d := range data {

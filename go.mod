@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/99designs/gqlgen v0.17.89
 	github.com/DIMO-Network/cloudevent v1.1.0
-	github.com/DIMO-Network/dauth v0.0.2-0.20260922180207-703cdfb21455
+	github.com/DIMO-Network/dauth v0.0.2-0.20260923165546-17aea928e5ad
 	github.com/DIMO-Network/model-garage v1.0.11
 	github.com/DIMO-Network/server-garage v0.4.0
 	github.com/DIMO-Network/shared v1.1.9

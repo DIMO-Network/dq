@@ -9,6 +9,7 @@ import (
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
+	"github.com/DIMO-Network/dq/internal/coverage"
 )
 
 const (
@@ -58,11 +59,18 @@ func (c *Checker) now() time.Time {
 }
 
 // VehicleTokenCheck is @requiresVehicleToken: the token must hold a grant for
-// the query's subject, and on a field with a from/to range the range is
-// clamped to the union of the windows the token holds for that subject
-// (spec §11.4). A range with nothing covered is refused, and a range that
-// straddles a gap in coverage is refused naming the pieces, so the caller
-// splits the query rather than dq interpolating across the gap.
+// the query's subject with data windows, and on a field with a from/to range
+// the range is clamped to the union of the windows the token holds for that
+// subject (spec §11.4). A range with nothing covered is refused, and a range
+// that straddles a gap in coverage is refused naming the pieces, so the caller
+// splits the query rather than dq interpolating across the gap. The windows go
+// into the context for the reads that have no range to clamp (latest values,
+// snapshots, summaries) and the ones that look past theirs (trip detection,
+// location gap-fill), so every layer can hold to them.
+//
+// Every field carrying the directive reads data. A token whose grants for the
+// subject are all live abilities (commands) holds no data window, and reads
+// nothing.
 func (c *Checker) VehicleTokenCheck(ctx context.Context, _ any, next graphql.Resolver) (any, error) {
 	subject, err := getArg[string](ctx, subjectArg)
 	if err != nil {
@@ -75,25 +83,41 @@ func (c *Checker) VehicleTokenCheck(ctx context.Context, _ any, next graphql.Res
 	if !claim.Covers(subject) {
 		return nil, newError("token does not cover subject %s", subject)
 	}
+	ws := windowedCoverage(&claim.Token, subject)
+	if ws == nil {
+		return nil, newError("token holds no data abilities for %s", subject)
+	}
+	if err := clampField(graphql.GetFieldContext(ctx), ws, subject); err != nil {
+		return nil, err
+	}
+	return next(coverage.With(ctx, ws))
+}
 
-	fc := graphql.GetFieldContext(ctx)
+// clampField clamps a field's from/to to ws, if it has both. Clamping is
+// idempotent, so the privilege directives run it too: gqlgen applies a
+// field's directives in declaration order from the outside in, and a schema
+// that lists @requiresAllOfPrivileges after @requiresVehicleToken would
+// otherwise check the unclamped range and refuse what it should clamp.
+func clampField(fc *graphql.FieldContext, ws tokenclaims.Windows, subject string) error {
+	if fc == nil {
+		return nil
+	}
 	from, fromOK := fc.Args[fromArg].(time.Time)
 	to, toOK := fc.Args[toArg].(time.Time)
-	if fromOK && toOK {
-		if ws := windowedCoverage(&claim.Token, subject); ws != nil {
-			pieces := ws.Clamp(from, to)
-			switch len(pieces) {
-			case 0:
-				return nil, newError("token covers nothing for %s between %s and %s", subject, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
-			case 1:
-				fc.Args[fromArg] = *pieces[0].Start
-				fc.Args[toArg] = *pieces[0].End
-			default:
-				return nil, newError("requested range straddles a gap in coverage; query these ranges separately: %s", describe(pieces))
-			}
-		}
+	if !fromOK || !toOK {
+		return nil
 	}
-	return next(ctx)
+	pieces := ws.Clamp(from, to)
+	switch len(pieces) {
+	case 0:
+		return newError("token covers nothing for %s between %s and %s", subject, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+	case 1:
+		fc.Args[fromArg] = *pieces[0].Start
+		fc.Args[toArg] = *pieces[0].End
+		return nil
+	default:
+		return newError("requested range straddles a gap in coverage; query these ranges separately: %s", describe(pieces))
+	}
 }
 
 // AllOfPrivilegeCheck is @requiresAllOfPrivileges: the token must hold every
@@ -101,6 +125,9 @@ func (c *Checker) VehicleTokenCheck(ctx context.Context, _ any, next graphql.Res
 func (c *Checker) AllOfPrivilegeCheck(ctx context.Context, _ any, next graphql.Resolver, abilities []string) (any, error) {
 	claim, subject, err := claimAndSubject(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := clampOwnRange(ctx, claim, subject); err != nil {
 		return nil, err
 	}
 	for _, ability := range abilities {
@@ -118,6 +145,9 @@ func (c *Checker) OneOfPrivilegeCheck(ctx context.Context, _ any, next graphql.R
 	if err != nil {
 		return nil, err
 	}
+	if err := clampOwnRange(ctx, claim, subject); err != nil {
+		return nil, err
+	}
 	var errs []string
 	for _, ability := range abilities {
 		err := c.check(ctx, &claim.Token, subject, ability)
@@ -127,6 +157,23 @@ func (c *Checker) OneOfPrivilegeCheck(ctx context.Context, _ any, next graphql.R
 		errs = append(errs, err.Error())
 	}
 	return nil, newError("requires one of %v: %s", abilities, strings.Join(errs, "; "))
+}
+
+// clampOwnRange clamps the field's own from/to, when it has them, before its
+// abilities are checked against that range.
+func clampOwnRange(ctx context.Context, claim *DQClaim, subject string) error {
+	fc := graphql.GetFieldContext(ctx)
+	if fc == nil {
+		return nil
+	}
+	if _, ok := fc.Args[fromArg].(time.Time); !ok {
+		return nil
+	}
+	ws := windowedCoverage(&claim.Token, subject)
+	if ws == nil {
+		return newError("token holds no data abilities for %s", subject)
+	}
+	return clampField(fc, ws, subject)
 }
 
 func claimAndSubject(ctx context.Context) (*DQClaim, string, error) {

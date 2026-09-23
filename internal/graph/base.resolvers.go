@@ -7,11 +7,14 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
+	"github.com/DIMO-Network/dq/internal/coverage"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
+	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
 )
 
 // Signals is the resolver for the signals field.
@@ -54,6 +57,14 @@ func (r *queryResolver) AvailableSignals(ctx context.Context, subject string, fi
 
 // DataSummary is the resolver for the dataSummary field.
 func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter *model.SignalFilter) (*model.DataSummary, error) {
+	// The summary's counts and first/last-seen times are over all of the
+	// subject's data, and are read from rollups that cannot be bounded by a
+	// window. A token whose windows do not cover all time would learn from it
+	// how much data exists outside them and when, so it is refused; such a
+	// caller asks signals over a range instead.
+	if !coverage.Unbounded(ctx) {
+		return nil, errorhandler.NewUnauthorizedError(ctx, errors.New("dataSummary covers all of a vehicle's data; this token's windows do not, so query signals over a range instead"))
+	}
 	summary, err := r.SignalRepo.GetDataSummary(ctx, subject, filter)
 	if err != nil {
 		return nil, err
