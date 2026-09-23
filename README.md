@@ -66,6 +66,15 @@ The service reads from a DuckLake catalog: decoded signals/events in `lake.signa
 
 Configure the catalog with `DUCKLAKE_CATALOG_DSN` (a Postgres DSN in prod for concurrent writers, or a local catalog-file path for single-node/tests) and `DUCKLAKE_DATA_PATH` (where parquet data files live — an `s3://` prefix in prod, a local directory in tests). `BLOB_BUCKET` is the bucket the fetch path presigns/downloads externalized cloudevent payloads from.
 
+### Seeding a local catalog
+
+`cmd/dq-seed` plays din for a local run: it writes `dimo.status` events carrying a speed signal into `lake.raw_events` in din's shape and decodes them once, so dq boots over a catalog that already has signals. The catalog file has one writer, so run it before starting dq. did-directory's `scripts/demo.sh` uses it.
+
+```bash
+go run ./cmd/dq-seed -catalog /data/catalog.ducklake -data-path /data/lake \
+  -subject did:dimo:… -from 2026-09-22T17:00:00Z -every 2s
+```
+
 ### Single-node quickstart
 
 Run against a local DuckLake catalog file; the materializer decodes din's raw_events into it:
