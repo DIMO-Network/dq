@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
+	"github.com/DIMO-Network/dq/internal/coverage"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/DIMO-Network/model-garage/pkg/schema"
@@ -148,6 +149,13 @@ func (r *Repository) GetSignalLatest(ctx context.Context, latestArgs *model.Late
 	}
 	coll := &model.SignalCollection{}
 	for _, signal := range signals {
+		// A latest value is data like any other: one timestamped outside the
+		// token's windows is not the caller's to see, however recent. A car
+		// parked since its sale shows its buyer nothing, not its last position
+		// under the seller.
+		if !coverage.Contains(ctx, signal.Data.Timestamp) {
+			continue
+		}
 		if signal.Data.Name == model.LastSeenField && !signal.Data.Timestamp.Equal(unixEpoch) {
 			coll.LastSeen = &signal.Data.Timestamp
 			continue
@@ -258,6 +266,9 @@ func (r *Repository) GetSignalSnapshot(ctx context.Context, subject string, filt
 	resp := &model.SignalsSnapshotResponse{Signals: []*model.LatestSignal{}}
 	var rawLocationSignal *vss.Signal
 	for _, signal := range signals {
+		if !coverage.Contains(ctx, signal.Data.Timestamp) {
+			continue // outside the token's windows, as in GetSignalLatest
+		}
 		if signal.Data.Name == model.LastSeenField && !signal.Data.Timestamp.Equal(unixEpoch) {
 			resp.LastSeen = &signal.Data.Timestamp
 			continue

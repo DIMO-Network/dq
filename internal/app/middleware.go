@@ -29,8 +29,8 @@ func LoggerMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// authLoggerMiddleware adds the authenticated user and the vehicle subject to
-// the request logger. Logging the asset DID (the vehicle being queried) keys
+// authLoggerMiddleware adds the authenticated user and the vehicle subjects to
+// the request logger. Logging the subject DIDs (the vehicles the token names) keys
 // every query-path log line by subject — the dimension a "vehicle X is wrong"
 // report needs to be root-caused, which the query path never logged (CHD-14).
 func authLoggerMiddleware(next http.Handler) http.Handler {
@@ -41,8 +41,10 @@ func authLoggerMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		lc := zerolog.Ctx(r.Context()).With().Str("jwtSubject", validateClaims.RegisteredClaims.Subject)
-		if dq, ok := validateClaims.CustomClaims.(*auth.DQClaim); ok && dq.Asset != "" {
-			lc = lc.Str("subject", dq.Asset)
+		if dq, ok := validateClaims.CustomClaims.(*auth.DQClaim); ok {
+			if subjects := dq.Subjects(); len(subjects) > 0 {
+				lc = lc.Strs("subject", subjects)
+			}
 		}
 		r = r.WithContext(lc.Logger().WithContext(r.Context()))
 		next.ServeHTTP(w, r)

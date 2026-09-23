@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DIMO-Network/dq/internal/coverage"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
@@ -297,6 +298,23 @@ func (q *Queries) getSignalSummariesLake(ctx context.Context, subject string, fi
 // exactly equivalent to the per-point path.
 const locationGapFillLookback = 10 * 365 * 24 * time.Hour
 
+// gapFillFloor is the earliest data timestamp a gap-fill for a boundary at ts
+// may read, in microseconds: ts less the lookback, or the start of the
+// token's window containing ts when that is later. A gap-fill that reached
+// past the window would hand a caller a position from before their access
+// began. ok is false when ts is outside the windows altogether.
+func gapFillFloor(ctx context.Context, ts time.Time) (int64, bool) {
+	floor := ts.UTC().Add(-locationGapFillLookback)
+	start, _, ok := coverage.Bounds(ctx, ts)
+	if !ok {
+		return 0, false
+	}
+	if start != nil && start.After(floor) {
+		floor = *start
+	}
+	return floor.UTC().UnixMicro(), true
+}
+
 // LocationAt returns the nearest non-origin currentLocationCoordinates fix at or
 // before ts — a point lookup that reaches back up to locationGapFillLookback before
 // ts, deterministic on ties (lowest cloud_event_id, matching the read-path dedup).
@@ -305,7 +323,10 @@ const locationGapFillLookback = 10 * 365 * 24 * time.Hour
 // (often short) trip window — a correctness win a window-bounded argMin/argMax
 // structurally cannot do. LocationsAt is the batched, index-aligned equivalent.
 func (q *Queries) LocationAt(ctx context.Context, subject string, ts time.Time) (*model.Location, error) {
-	floorMicro := ts.UTC().Add(-locationGapFillLookback).UnixMicro()
+	floorMicro, ok := gapFillFloor(ctx, ts)
+	if !ok {
+		return nil, nil
+	}
 	query := fmt.Sprintf(`
 SELECT loc_lat, loc_lon, loc_hdop FROM lake.signals
 WHERE subject = ? AND %[2]s AND name = ? AND %[1]s
@@ -350,17 +371,21 @@ func (q *Queries) LocationsAt(ctx context.Context, subject string, tss []time.Ti
 	if len(tss) == 0 {
 		return out, nil
 	}
-	minTS := tss[0].UTC()
-	probes := make([]string, len(tss))
+	probes := make([]string, 0, len(tss))
+	var floorMicro int64
 	for i, t := range tss {
-		tu := t.UTC()
-		if tu.Before(minTS) {
-			minTS = tu
+		floor, ok := gapFillFloor(ctx, t)
+		if !ok {
+			continue // outside the token's windows: no fix, and no query
 		}
-		probes[i] = fmt.Sprintf("(%d, %d)", i, tu.UnixMicro())
+		if len(probes) == 0 || floor < floorMicro {
+			floorMicro = floor
+		}
+		probes = append(probes, fmt.Sprintf("(%d, %d, %d)", i, t.UTC().UnixMicro(), floor))
 	}
-	lookbackMicro := locationGapFillLookback.Microseconds()
-	floorMicro := minTS.Add(-locationGapFillLookback).UnixMicro()
+	if len(probes) == 0 {
+		return out, nil
+	}
 
 	// The right subquery mirrors LocationAt's WHERE (non-origin fixes for the location
 	// name in the subject's bucket, globally floored so the shared scan prunes old
@@ -369,10 +394,11 @@ func (q *Queries) LocationsAt(ctx context.Context, subject string, tss []time.Ti
 	// PER-PROBE floor (probe - lookback): a probe later than minTS could otherwise ASOF
 	// onto a fix older than its own lookback that survived the looser global floor, so
 	// this keeps LocationsAt exactly equal to LocationAt. Unmatched probes (NULL right)
-	// survive the WHERE and stay nil in the output.
+	// survive the WHERE and stay nil in the output. Each probe's floor is
+	// gapFillFloor's: the lookback, raised to the start of the token's window.
 	query := fmt.Sprintf(`
 SELECT q.idx, s.loc_lat, s.loc_lon, s.loc_hdop
-FROM (VALUES %[1]s) AS q(idx, ts_us)
+FROM (VALUES %[1]s) AS q(idx, ts_us, floor_us)
 ASOF LEFT JOIN (
 	SELECT timestamp, loc_lat, loc_lon, loc_hdop FROM lake.signals
 	WHERE %[2]s AND subject = ? AND name = ? AND %[3]s
@@ -380,14 +406,13 @@ ASOF LEFT JOIN (
 	%[5]s
 ) AS s
 ON make_timestamp(q.ts_us) >= s.timestamp
-WHERE s.timestamp IS NULL OR s.timestamp >= make_timestamp(q.ts_us - %[6]d)
+WHERE s.timestamp IS NULL OR s.timestamp >= make_timestamp(q.floor_us)
 ORDER BY q.idx`,
 		strings.Join(probes, ", "),
 		subjectBucketPredicate("", subject),
 		lakeNonZeroLoc,
 		floorMicro,
-		signalDedupQualify,
-		lookbackMicro)
+		signalDedupQualify)
 
 	rows, err := q.svc.db.QueryContext(ctx, query, subject, vss.FieldCurrentLocationCoordinates)
 	if err != nil {

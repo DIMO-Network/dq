@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/DIMO-Network/dq/internal/coverage"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/service/qtypes"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
@@ -231,6 +232,12 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	if err != nil {
 		return nil, handleDBError(ctx, err)
 	}
+	// Detection looks before from to find a trip already under way; the token's
+	// window does not reach there. A segment that began before the window is
+	// reported from the window's start, and everything summarised about it is
+	// read from there on (spec §11.4).
+	floor, ceiling, _ := coverage.Bounds(ctx, from)
+	clipSegments(segments, floor, to)
 	// Cursor pagination: keep only segments starting strictly after the cursor. We must
 	// NOT advance `from` to do this. A segment whose true start is at or before `from`
 	// (an ongoing trip, or one already in progress at `from` — the common first segment of
@@ -263,7 +270,7 @@ func (r *Repository) GetSegments(ctx context.Context, did string, from, to time.
 	var eventCountsBySeg map[int]map[string]int
 	var aggsBySeg map[int][]*qtypes.AggSignal
 	if wantSummary && len(segments) > 0 {
-		ranges, aggRanges, globalFrom, globalTo := buildSegmentRanges(segments, to, extendSummaryEnd)
+		ranges, aggRanges, globalFrom, globalTo := buildSegmentRanges(segments, to, extendSummaryEnd, ceiling)
 		floatArgs, locationArgs := buildAggArgs(signalReqs)
 		var batchCounts []*qtypes.EventCountForRange
 		var batchAggs []*qtypes.AggSignalForRange
@@ -372,7 +379,32 @@ func capIdlingCandidates(segments []*model.Segment) []*model.Segment {
 // count range and agg range plus the global [from, to] envelope. aggRanges extend
 // the end by summaryEndBuffer for refuel/recharge, whose level signal can land just
 // after the trip ends.
-func buildSegmentRanges(segments []*model.Segment, to time.Time, extendSummaryEnd bool) (ranges, aggRanges []qtypes.TimeRange, globalFrom, globalTo time.Time) {
+// clipSegments moves the start of every segment that began before floor up to
+// floor, with its duration recounted, so a segment's reported start and the
+// summaries read from it stay inside the token's window.
+func clipSegments(segments []*model.Segment, floor *time.Time, to time.Time) {
+	if floor == nil {
+		return
+	}
+	for _, seg := range segments {
+		if seg.Start == nil || !seg.Start.Timestamp.Before(*floor) {
+			continue
+		}
+		seg.Start.Timestamp = *floor
+		seg.Start.Value = nil
+		seg.StartedBeforeRange = true
+		end := to
+		if seg.End != nil {
+			end = seg.End.Timestamp
+		}
+		seg.Duration = int(end.Sub(*floor).Seconds())
+	}
+}
+
+// buildSegmentRanges returns each segment's event range and summary range and
+// their overall span. ceiling, when set, is the end of the token's window: a
+// summary extended past a segment's end stops there.
+func buildSegmentRanges(segments []*model.Segment, to time.Time, extendSummaryEnd bool, ceiling *time.Time) (ranges, aggRanges []qtypes.TimeRange, globalFrom, globalTo time.Time) {
 	const summaryEndBuffer = 2 * time.Minute
 	ranges = make([]qtypes.TimeRange, len(segments))
 	aggRanges = make([]qtypes.TimeRange, len(segments))
@@ -391,6 +423,9 @@ func buildSegmentRanges(segments []*model.Segment, to time.Time, extendSummaryEn
 			// and start location. Segments are sorted ascending by start (mergeTimeRanges).
 			if i+1 < len(segments) && segments[i+1].Start != nil && summaryTo.After(segments[i+1].Start.Timestamp) {
 				summaryTo = segments[i+1].Start.Timestamp
+			}
+			if ceiling != nil && summaryTo.After(*ceiling) {
+				summaryTo = *ceiling
 			}
 		}
 		aggRanges[i] = qtypes.TimeRange{From: seg.Start.Timestamp, To: summaryTo}
@@ -613,6 +648,10 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 	// AddDate(0,0,1) advances one CALENDAR day in loc — a DST day is 23h/25h, so a flat
 	// Add(24h) would drift off local midnight and clip/overrun the trailing day.
 	rangeEnd := toDate.AddDate(0, 0, 1)
+	// Calendar days run past from and to, which the token's window bounds; what is
+	// read for them stops at the window (spec §11.4).
+	floor, ceiling, _ := coverage.Bounds(ctx, from)
+	rangeStart, rangeEnd = clipRange(rangeStart, rangeEnd, floor, ceiling)
 
 	defaultReqs := defaultSegmentSignalSet(mechanism)
 	signalReqs := mergeSegmentSignalRequests(defaultReqs, signalRequests)
@@ -634,7 +673,8 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 	// transition, makes the DST day's window overlap the next day, and terminates a day
 	// early — dropping the last calendar day and mis-bucketing post-transition segments.
 	for d := fromDate; !d.After(toDate); d = d.AddDate(0, 0, 1) {
-		days = append(days, dayWindow{start: d.UTC(), end: d.AddDate(0, 0, 1).UTC()})
+		start, end := clipRange(d.UTC(), d.AddDate(0, 0, 1).UTC(), floor, ceiling)
+		days = append(days, dayWindow{start: start, end: end})
 	}
 	aggsByDay, eventCountsByDay, err := r.batchDaySummaries(ctx, did, days, floatArgs, locationArgs, eventNames)
 	if err != nil {
@@ -677,6 +717,21 @@ func (r *Repository) GetDailyActivity(ctx context.Context, did string, from, to 
 		out = []*model.DailyActivity{}
 	}
 	return out, nil
+}
+
+// clipRange narrows [start, end) to [floor, ceiling), either of which may be
+// open. A range entirely outside comes back empty, start == end.
+func clipRange(start, end time.Time, floor, ceiling *time.Time) (time.Time, time.Time) {
+	if floor != nil && start.Before(*floor) {
+		start = *floor
+	}
+	if ceiling != nil && end.After(*ceiling) {
+		end = *ceiling
+	}
+	if end.Before(start) {
+		end = start
+	}
+	return start, end
 }
 
 // gapFillDailyLocations resolves every day-activity boundary the aggregate and its

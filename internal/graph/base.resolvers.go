@@ -7,11 +7,14 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
+	"github.com/DIMO-Network/dq/internal/coverage"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
+	"github.com/DIMO-Network/server-garage/pkg/gql/errorhandler"
 )
 
 // Signals is the resolver for the signals field.
@@ -42,10 +45,10 @@ func (r *queryResolver) AvailableSignals(ctx context.Context, subject string, fi
 	// lacking the privilege — gate the name list the same way signalsSnapshot gates values
 	// (a VEHICLE_NON_LOCATION_DATA-only token would otherwise see currentLocationCoordinates
 	// in the list, leaking that the vehicle has location data).
-	perms := permissionsFromCtx(ctx)
+	holds := abilitiesFromCtx(ctx, subject)
 	out := names[:0]
 	for _, n := range names {
-		if hasPrivilegesForSignal(r.SignalRepo, n, perms) {
+		if hasPrivilegesForSignal(r.SignalRepo, n, holds) {
 			out = append(out, n)
 		}
 	}
@@ -54,6 +57,14 @@ func (r *queryResolver) AvailableSignals(ctx context.Context, subject string, fi
 
 // DataSummary is the resolver for the dataSummary field.
 func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter *model.SignalFilter) (*model.DataSummary, error) {
+	// The summary's counts and first/last-seen times are over all of the
+	// subject's data, and are read from rollups that cannot be bounded by a
+	// window. A token whose windows do not cover all time would learn from it
+	// how much data exists outside them and when, so it is refused; such a
+	// caller asks signals over a range instead.
+	if !coverage.Unbounded(ctx) {
+		return nil, errorhandler.NewUnauthorizedError(ctx, errors.New("dataSummary covers all of a vehicle's data; this token's windows do not, so query signals over a range instead"))
+	}
 	summary, err := r.SignalRepo.GetDataSummary(ctx, subject, filter)
 	if err != nil {
 		return nil, err
@@ -62,10 +73,10 @@ func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter 
 	// seen of every signal, including location, without the privilege. Filter the name list
 	// + per-signal summaries and recompute the aggregate count so it doesn't reveal the
 	// location data-point count either.
-	perms := permissionsFromCtx(ctx)
+	holds := abilitiesFromCtx(ctx, subject)
 	names := summary.AvailableSignals[:0]
 	for _, n := range summary.AvailableSignals {
-		if hasPrivilegesForSignal(r.SignalRepo, n, perms) {
+		if hasPrivilegesForSignal(r.SignalRepo, n, holds) {
 			names = append(names, n)
 		}
 	}
@@ -73,7 +84,7 @@ func (r *queryResolver) DataSummary(ctx context.Context, subject string, filter 
 	var total uint64
 	sds := summary.SignalDataSummary[:0]
 	for _, s := range summary.SignalDataSummary {
-		if hasPrivilegesForSignal(r.SignalRepo, s.Name, perms) {
+		if hasPrivilegesForSignal(r.SignalRepo, s.Name, holds) {
 			sds = append(sds, s)
 			total += s.NumberOfSignals
 		}
@@ -89,10 +100,10 @@ func (r *queryResolver) SignalsSnapshot(ctx context.Context, subject string, fil
 	if err != nil {
 		return nil, err
 	}
-	permissions := permissionsFromCtx(ctx)
+	holds := abilitiesFromCtx(ctx, subject)
 	filtered := make([]*model.LatestSignal, 0, len(resp.Signals))
 	for _, sig := range resp.Signals {
-		if hasPrivilegesForSignal(r.SignalRepo, sig.Name, permissions) {
+		if hasPrivilegesForSignal(r.SignalRepo, sig.Name, holds) {
 			filtered = append(filtered, sig)
 		}
 	}

@@ -21,9 +21,9 @@ import (
 	"github.com/99designs/gqlgen/client"
 	gqlhandler "github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/handler/transport"
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/DIMO-Network/dq/internal/graph"
 	"github.com/DIMO-Network/dq/internal/service/duck"
-	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/stretchr/testify/require"
 )
 
@@ -86,10 +86,10 @@ func TestLocalE2E_186612_Fetch(t *testing.T) {
 	// The cloudEvent resolvers re-check claims in-resolver (requireSubjectOptsByDID),
 	// independent of the bypassed directive — inject a raw-data token whose Asset is
 	// the requested subject so the DID-link check short-circuits without identity.
-	tok := &tokenclaims.Token{CustomClaims: tokenclaims.CustomClaims{
-		Asset:       subject,
-		Permissions: []string{tokenclaims.PermissionGetRawData},
-	}}
+	tok := &tokenclaims.Token{Grants: []tokenclaims.Grant{{
+		Subject:   subject,
+		Abilities: []string{tokenclaims.AbilityRawRead},
+	}}}
 	withClaims := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		srv.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), graph.ClaimsContextKey{}, tok)))
 	})

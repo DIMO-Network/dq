@@ -1,11 +1,12 @@
 package graph
 
 import (
+	"slices"
 	"testing"
 
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
-	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
 )
 
 func TestHasPrivilegesForSignal(t *testing.T) {
@@ -14,9 +15,9 @@ func TestHasPrivilegesForSignal(t *testing.T) {
 		t.Fatalf("failed to build repository: %v", err)
 	}
 
-	nonLoc := tokenclaims.PermissionGetNonLocationHistory
-	allTimeLoc := tokenclaims.PermissionGetLocationHistory
-	approxLoc := tokenclaims.PermissionGetApproximateLocation
+	nonLoc := tokenclaims.AbilityTelemetryRead
+	allTimeLoc := tokenclaims.AbilityLocationPrecise
+	approxLoc := tokenclaims.AbilityLocationApproximate
 
 	tests := []struct {
 		name        string
@@ -100,7 +101,8 @@ func TestHasPrivilegesForSignal(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := hasPrivilegesForSignal(repo, tt.signal, tt.permissions)
+			holds := func(a string) bool { return slices.Contains(tt.permissions, a) }
+			got := hasPrivilegesForSignal(repo, tt.signal, holds)
 			if got != tt.want {
 				t.Errorf("hasPrivilegesForSignal(%q, %v) = %v, want %v",
 					tt.signal, tt.permissions, got, tt.want)
