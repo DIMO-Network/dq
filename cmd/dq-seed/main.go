@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -34,8 +35,30 @@ func main() {
 	toFlag := flag.String("to", "", "last event time, RFC 3339 (default now)")
 	every := flag.Duration("every", 5*time.Second, "spacing between events")
 	source := flag.String("source", "0xDemoConnection", "cloud event source")
+	scenarioFile := flag.String("scenario", "", "JSON file of vehicles, trips and events to seed in place of -subject's speed swing (see Scenario)")
 	flag.Parse()
 
+	if *scenarioFile != "" {
+		if *catalog == "" || *dataPath == "" {
+			fmt.Fprintln(os.Stderr, "Error: -catalog and -data-path are required")
+			os.Exit(1)
+		}
+		sc, err := readScenario(*scenarioFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: -scenario: %v\n", err)
+			os.Exit(1)
+		}
+		n, decoded, err := seedWith(context.Background(), *catalog, *dataPath, func(ctx context.Context, tx *sql.Tx) (int, error) {
+			return insertScenario(ctx, tx, sc, *source)
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("seeded %d events for %d vehicles from %s to %s; decoded %d into lake.signals and lake.events\n",
+			n, len(sc.Vehicles), sc.From.UTC().Format(time.RFC3339), sc.To.UTC().Format(time.RFC3339), decoded)
+		return
+	}
 	if *catalog == "" || *dataPath == "" || *subject == "" || *fromFlag == "" {
 		fmt.Fprintln(os.Stderr, "Error: -catalog, -data-path, -subject and -from are required")
 		os.Exit(1)
@@ -66,12 +89,39 @@ func main() {
 		n, *subject, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), *every, decoded)
 }
 
-// seed opens the catalog, creates lake.raw_events in din's shape if it is not
-// there, inserts one status event per tick carrying a speed signal that
-// swings between 0 and 100 km/h, so a time-series query has something to
-// show, and then decodes everything the materializer has not seen yet.
-// Returns the number of events written and the number of raw rows decoded.
+// seed inserts one status event per tick carrying a speed signal that swings
+// between 0 and 100 km/h, so a time-series query has something to show.
 func seed(ctx context.Context, catalog, dataPath, subject, source string, from, to time.Time, every time.Duration) (int, int, error) {
+	return seedWith(ctx, catalog, dataPath, func(ctx context.Context, tx *sql.Tx) (int, error) {
+		n := 0
+		for ts := from.UTC(); !ts.After(to); ts = ts.Add(every) {
+			// One swing from 0 to 100 km/h and back over about an hour.
+			speed := 50 + 50*math.Sin(float64(ts.Unix())/600)
+			payload, err := json.Marshal(map[string]any{"signals": []map[string]any{{
+				"name": "speed", "timestamp": ts.Format(time.RFC3339Nano), "value": math.Round(speed*10) / 10,
+			}}})
+			if err != nil {
+				return n, err
+			}
+			id := fmt.Sprintf("seed-%s-%d", ts.Format("20060102T150405"), n)
+			// din's appender writes empty strings, not NULLs, for the header columns.
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO lake.raw_events (subject, "time", type, id, source, producer, data_content_type, data_version, extras, data)
+				 VALUES (?, ?, ?, ?, ?, ?, '', ?, '{}', ?)`,
+				subject, ts, cloudevent.TypeStatus, id, source, subject, "default/v1.0", string(payload)); err != nil {
+				return n, fmt.Errorf("insert event %s: %w", id, err)
+			}
+			n++
+		}
+		return n, nil
+	})
+}
+
+// seedWith opens the catalog, creates lake.raw_events in din's shape if it is
+// not there, runs insert in one transaction, and then decodes everything the
+// materializer has not seen yet. Returns the number of events written and the
+// number of raw rows decoded.
+func seedWith(ctx context.Context, catalog, dataPath string, insert func(context.Context, *sql.Tx) (int, error)) (int, int, error) {
 	svc, err := duck.NewService(duck.Config{DuckLakeEnabled: true, CatalogDSN: catalog, DataPath: dataPath})
 	if err != nil {
 		return 0, 0, fmt.Errorf("open catalog: %w", err)
@@ -93,25 +143,9 @@ func seed(ctx context.Context, catalog, dataPath, subject, source string, from, 
 		return 0, 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	n := 0
-	for ts := from.UTC(); !ts.After(to); ts = ts.Add(every) {
-		// One swing from 0 to 100 km/h and back over about an hour.
-		speed := 50 + 50*math.Sin(float64(ts.Unix())/600)
-		payload, err := json.Marshal(map[string]any{"signals": []map[string]any{{
-			"name": "speed", "timestamp": ts.Format(time.RFC3339Nano), "value": math.Round(speed*10) / 10,
-		}}})
-		if err != nil {
-			return 0, 0, err
-		}
-		id := fmt.Sprintf("seed-%s-%d", ts.Format("20060102T150405"), n)
-		// din's appender writes empty strings, not NULLs, for the header columns.
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO lake.raw_events (subject, "time", type, id, source, producer, data_content_type, data_version, extras, data)
-			 VALUES (?, ?, ?, ?, ?, ?, '', ?, '{}', ?)`,
-			subject, ts, cloudevent.TypeStatus, id, source, subject, "default/v1.0", string(payload)); err != nil {
-			return 0, 0, fmt.Errorf("insert event %s: %w", id, err)
-		}
-		n++
+	n, err := insert(ctx, tx)
+	if err != nil {
+		return 0, 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err
