@@ -199,6 +199,14 @@ func bootstrapQueries(cfg Config) []string {
 	// into the image by installext; INSTALL is a no-op when present, LOAD per-connection.
 	if cfg.LoadSpatial {
 		queries = append(queries, "INSTALL spatial", "LOAD spatial")
+		// geometry_always_xy=true makes ST_Distance_Sphere read ST_Point(x, y) as
+		// (longitude, latitude) — the order haversineWithinSQL builds. Before DuckDB
+		// 2.0, spatial silently assumed [latitude, longitude] for that function, so
+		// inCircle measured with the axes swapped (a point 1 km north of a Detroit
+		// center came out 121 m, 1 km east came out 1,353 m). DuckDB 2.0 refuses to
+		// run ST_Distance_Sphere until the setting is explicit, and 2.1 makes true
+		// the default. Lives in the spatial extension, so it must follow LOAD.
+		queries = append(queries, "SET geometry_always_xy = true")
 	}
 
 	if cfg.S3Enabled {
