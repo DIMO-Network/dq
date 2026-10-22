@@ -75,6 +75,7 @@ func duckConfigFromSettings(settings *config.Settings) duck.Config {
 		CatalogDSN:      settings.DuckLakeCatalogDSN,
 		CatalogReadDSN:  settings.DuckLakeCatalogReadDSN,
 		DataPath:        settings.DuckLakeDataPath,
+		DuckLakeVersion: settings.DuckLakeVersion,
 		// Only the single-writer materializer writes the lake. The read/query
 		// fleet attaches read-only when asked, which also lets it read from a
 		// Postgres read replica. Force read-only off for the materializer so the

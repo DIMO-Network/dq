@@ -16,7 +16,7 @@ func TestAttachDuckLakeSQL_Writer(t *testing.T) {
 		DataPath:   "s3://dimo-storage-prod/lake/",
 	}
 	got := attachDuckLakeSQL(cfg)
-	want := "ATTACH IF NOT EXISTS 'ducklake:postgres:postgresql://host=primary dbname=dq?connect_timeout=10' AS lake (DATA_PATH 's3://dimo-storage-prod/lake/')"
+	want := "ATTACH IF NOT EXISTS 'ducklake:postgres:postgresql://host=primary dbname=dq?connect_timeout=10' AS lake (DATA_PATH 's3://dimo-storage-prod/lake/', DUCKLAKE_VERSION '1.0')"
 	if got != want {
 		t.Fatalf("writer attach:\n got: %s\nwant: %s", got, want)
 	}
@@ -32,9 +32,22 @@ func TestAttachDuckLakeSQL_ReaderReadOnly(t *testing.T) {
 		ReadOnly:   true,
 	}
 	got := attachDuckLakeSQL(cfg)
-	want := "ATTACH IF NOT EXISTS 'ducklake:postgres:postgresql://host=primary dbname=dq?connect_timeout=10' AS lake (DATA_PATH 's3://dimo-storage-prod/lake/', READ_ONLY)"
+	want := "ATTACH IF NOT EXISTS 'ducklake:postgres:postgresql://host=primary dbname=dq?connect_timeout=10' AS lake (DATA_PATH 's3://dimo-storage-prod/lake/', DUCKLAKE_VERSION '1.0', READ_ONLY)"
 	if got != want {
 		t.Fatalf("reader attach:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// The catalog format version is pinned on every attach (see
+// DefaultDuckLakeVersion) and is overridable for the post-migration flip.
+func TestAttachDuckLakeSQL_DuckLakeVersion(t *testing.T) {
+	def := attachDuckLakeSQL(Config{DataPath: "s3://b/lake/"})
+	if !strings.Contains(def, "DUCKLAKE_VERSION '1.0'") {
+		t.Fatalf("default attach must pin DUCKLAKE_VERSION '1.0': %s", def)
+	}
+	migrated := attachDuckLakeSQL(Config{DataPath: "s3://b/lake/", DuckLakeVersion: "1.1"})
+	if !strings.Contains(migrated, "DUCKLAKE_VERSION '1.1'") || strings.Contains(migrated, "'1.0'") {
+		t.Fatalf("DuckLakeVersion override not applied: %s", migrated)
 	}
 }
 

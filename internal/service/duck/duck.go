@@ -235,6 +235,20 @@ func bootstrapQueries(cfg Config) []string {
 	return queries
 }
 
+// DefaultDuckLakeVersion is the DuckLake catalog format version dq attaches
+// with when DUCKLAKE_VERSION is unset.
+//
+// DuckDB 2.0's ducklake extension reads and writes 1.0 catalogs unchanged and
+// never migrates one unless asked (AUTOMATIC_MIGRATION), but it CREATES new
+// catalogs at 1.1, which DuckDB 1.5 clients refuse to attach ("catalog version
+// is 1.1, but the extension requires version 1.0"). Pinning 1.0 keeps a fresh
+// catalog (dev wipe, e2e harness, a new node) attachable by any din/dq still on
+// 1.5 during a rollout. The pin is also a guard after migration: attaching a 1.1
+// catalog while requesting 1.0 fails at boot ("Cannot downgrade"), so moving to
+// 1.1 means migrating the catalog and setting DUCKLAKE_VERSION=1.1 on din and
+// dq in the same change.
+const DefaultDuckLakeVersion = "1.0"
+
 // attachDuckLakeSQL attaches the DuckLake catalog as schema "lake".
 // IF NOT EXISTS makes it idempotent across pooled connections. A reader role
 // (cfg.ReadOnly) attaches READ_ONLY so it can never write the shared catalog
@@ -244,6 +258,11 @@ func attachDuckLakeSQL(cfg Config) string {
 	if cfg.DataPath != "" {
 		opts = append(opts, "DATA_PATH "+sqlString(cfg.DataPath))
 	}
+	version := cfg.DuckLakeVersion
+	if version == "" {
+		version = DefaultDuckLakeVersion
+	}
+	opts = append(opts, "DUCKLAKE_VERSION "+sqlString(version))
 	if cfg.Encrypted && !cfg.ReadOnly {
 		// Only the writable (materializer) attach needs ENCRYPTED: it can't then
 		// create a plaintext catalog din rejects. Read-only query pods read an
@@ -253,9 +272,6 @@ func attachDuckLakeSQL(cfg Config) string {
 	}
 	if cfg.ReadOnly {
 		opts = append(opts, "READ_ONLY")
-	}
-	if len(opts) == 0 {
-		return fmt.Sprintf("ATTACH IF NOT EXISTS %s AS lake", sqlString(cfg.catalogURI()))
 	}
 	return fmt.Sprintf("ATTACH IF NOT EXISTS %s AS lake (%s)",
 		sqlString(cfg.catalogURI()), strings.Join(opts, ", "))
