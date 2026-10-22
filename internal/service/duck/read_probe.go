@@ -211,10 +211,14 @@ func (r *lakeRows) observeProfile() {
 // metric. A miss simply suppresses dq_lake_files_read for that read.
 var filesReadRE = regexp.MustCompile(`Total Files Read.{0,4}?\s*([0-9]+)`)
 
-// profileNode is the subset of DuckDB's profiling JSON the probe reads.
+// profileNode is the subset of DuckDB's profiling JSON the probe reads. Before
+// DuckDB 2.0 the operator tree hung off the root's children; 2.0 groups metrics at
+// the top level and puts the tree under an "operator" array instead, so the walk
+// follows both.
 type profileNode struct {
 	ExtraInfo json.RawMessage `json:"extra_info"`
 	Children  []profileNode   `json:"children"`
+	Operator  []profileNode   `json:"operator"`
 }
 
 // parseProfileFilesRead walks the profiling tree and returns the LARGEST file
@@ -232,6 +236,9 @@ func parseProfileFilesRead(raw []byte) (files int64, ok bool) {
 			if v, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil && v > files {
 				files, ok = v, true
 			}
+		}
+		for _, c := range n.Operator {
+			walk(c)
 		}
 		for _, c := range n.Children {
 			walk(c)
@@ -304,11 +311,13 @@ func (s *Service) queryUnprofiled(ctx context.Context, op, stmt string, start ti
 	return &lakeRows{Rows: rows, op: op, stmt: stmt, start: start, svc: s}, nil
 }
 
-// customProfilingSettings names the profiling fields the probe reports. Explicit
-// because DuckDB's defaults omit EXTRA_INFO, which is the one parseProfileFilesRead
-// reads the file count out of.
-const customProfilingSettings = `PRAGMA custom_profiling_settings = ` +
-	`'{"EXTRA_INFO":"true","OPERATOR_NAME":"true","OPERATOR_TIMING":"true"}'`
+// trackedMetrics names the profiling metrics the probe reports. DuckDB 2.0
+// collects every metric by default (planner and optimizer timings included);
+// restricting it to the operator fields keeps a profiled read close to the cost of
+// an unprofiled one. operator.extra_info is the one parseProfileFilesRead reads the
+// file count out of. (Replaces the pre-2.0 PRAGMA custom_profiling_settings, which
+// DuckDB 2.0 removed.)
+const trackedMetrics = `SET tracked_metrics = ['operator.extra_info', 'operator.type', 'operator.timing']`
 
 // armedConn checks out a connection with profiling armed and its output pinned to
 // a fresh scratch path, and returns that path. On any error it leaves nothing
@@ -336,7 +345,9 @@ func (s *Service) armedConn(ctx context.Context) (*sql.Conn, string, error) {
 	// 'json' (not 'no_output'): the probe reads the tree back as a FILE over SQL,
 	// deliberately avoiding duckdb-go's GetProfilingInfo, whose unchecked type
 	// assertion panics on dq's wrapped connections.
-	if _, err := conn.ExecContext(ctx, "PRAGMA enable_profiling = 'json'"); err != nil {
+	// SET, not `PRAGMA enable_profiling = …`: DuckDB 2.0 deprecates the PRAGMA
+	// assignment form and logs a warning for every use.
+	if _, err := conn.ExecContext(ctx, "SET enable_profiling = 'json'"); err != nil {
 		_ = conn.Close()
 		return nil, "", fmt.Errorf("arming profiling: %w", err)
 	}
@@ -348,11 +359,11 @@ func (s *Service) armedConn(ctx context.Context) (*sql.Conn, string, error) {
 		s.releaseArmed(conn)
 		return nil, "", fmt.Errorf("pinning profiling_output: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx, customProfilingSettings); err != nil {
-		// No EXTRA_INFO means no file count to parse. The connection is armed AND
-		// pinned, so the read is still safe to serve — just possibly without
-		// dq_lake_files_read.
-		zlog.Warn().Err(err).Msg("could not set custom_profiling_settings; dq_lake_files_read may be absent for this read")
+	if _, err := conn.ExecContext(ctx, trackedMetrics); err != nil {
+		// DuckDB then collects every metric, extra_info included, so the file
+		// count still parses; the read just profiles more than it needs to. The
+		// connection is armed AND pinned, so it is safe to serve either way.
+		zlog.Warn().Err(err).Msg("could not set tracked_metrics; this read profiles every metric")
 	}
 	return conn, path, nil
 }
