@@ -200,6 +200,16 @@ func TestParseProfileFilesRead(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(90), files, "the widest scan characterises the read, so max not sum")
 
+	// DuckDB 2.0 shape: metric groups at the top level, the operator tree under
+	// "operator" (no root "children").
+	v2Plan := []byte(`{"io":{"total_bytes_read":1263},"query":{"total_time":0.01},"operator":[
+		{"type":"RESULT_COLLECTOR","extra_info":{},"children":[
+			{"type":"UNGROUPED_AGGREGATE","extra_info":{"Aggregates":"count_star()"},"children":[
+				{"type":"TABLE_SCAN","extra_info":{"Table":"lake.main.raw_events","Total Files Read":"3","Inlined Tables Read":"1"},"children":[]}]}]}]}`)
+	files, ok = parseProfileFilesRead(v2Plan)
+	require.True(t, ok, "the DuckDB 2.0 profiling layout must still yield the file count")
+	require.Equal(t, int64(3), files)
+
 	// A plan with no file count (a range scan, an in-memory table) suppresses the
 	// metric rather than reporting zero files read.
 	_, ok = parseProfileFilesRead([]byte(`{"extra_info":{"Function":"RANGE"},"children":[]}`))
@@ -208,6 +218,40 @@ func TestParseProfileFilesRead(t *testing.T) {
 	// Malformed JSON must not panic the read that already returned rows.
 	_, ok = parseProfileFilesRead([]byte("{not json"))
 	require.False(t, ok)
+}
+
+// TestQueryLake_ProfilingRecordsFilesRead runs a profiled read against a real
+// DuckLake table and requires dq_lake_files_read to be observed. The parser test
+// alone can't catch a DuckDB upgrade that moves or renames what it parses: that is
+// how the 2.0 profiling rework would have dropped the metric with only a warn log.
+func TestQueryLake_ProfilingRecordsFilesRead(t *testing.T) {
+	dir := t.TempDir()
+	svc := newLocalService(t, Config{
+		DuckLakeEnabled: true,
+		CatalogDSN:      dir + "/catalog.ducklake",
+		DataPath:        dir + "/lakedata",
+		ProfileReads:    true,
+		TempDirectory:   dir,
+	})
+	ctx := context.Background()
+	_, err := svc.db.ExecContext(ctx, "CREATE TABLE lake.probe_files (i BIGINT)")
+	require.NoError(t, err)
+	for range 2 { // above the inlining limit, so each insert writes a Parquet file
+		_, err = svc.db.ExecContext(ctx, "INSERT INTO lake.probe_files SELECT i FROM range(100) t(i)")
+		require.NoError(t, err)
+	}
+
+	before := histCount(t, lakeFilesRead, "probeFiles")
+	rows, err := svc.queryLake(ctx, "probeFiles", "SELECT count(*) FROM lake.probe_files WHERE i % 7 = 0")
+	require.NoError(t, err)
+	for rows.Next() {
+		var n int64
+		require.NoError(t, rows.Scan(&n))
+		require.Equal(t, int64(30), n)
+	}
+	require.NoError(t, rows.Close())
+	require.Equal(t, before+1, histCount(t, lakeFilesRead, "probeFiles"),
+		"a profiled DuckLake read must observe dq_lake_files_read")
 }
 
 func TestQueryLake_ProfilingOffDoesNotPinConnection(t *testing.T) {

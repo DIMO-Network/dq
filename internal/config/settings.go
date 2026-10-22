@@ -62,6 +62,10 @@ type Settings struct {
 	// DuckLakeDataPath is where DuckLake parquet data files live (s3:// or
 	// a local dir). Must match din's LAKE_DATA_PATH.
 	DuckLakeDataPath string `yaml:"DUCKLAKE_DATA_PATH"`
+	// DuckLakeVersion is the DuckLake catalog format version requested on ATTACH.
+	// Empty means duck.DefaultDuckLakeVersion ("1.0"). Must match din's
+	// DUCKLAKE_VERSION; change it only together with a catalog migration.
+	DuckLakeVersion string `yaml:"DUCKLAKE_VERSION"`
 	// LakeEncryptionEnabled makes the materializer attach the DuckLake catalog
 	// ENCRYPTED so the decoded tables it writes are encrypted at rest, matching
 	// din. Read-only query pods don't pass it (an existing encrypted catalog reads

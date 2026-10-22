@@ -83,6 +83,10 @@ type Config struct {
 	// DataPath is where DuckLake writes parquet data files: an s3:// prefix
 	// in prod, a local directory in tests.
 	DataPath string `yaml:"DUCKLAKE_DATA_PATH"`
+	// DuckLakeVersion is the DuckLake catalog format version requested on every
+	// ATTACH; empty means DefaultDuckLakeVersion. See DefaultDuckLakeVersion for
+	// why it is pinned and when to change it. Must match din's DUCKLAKE_VERSION.
+	DuckLakeVersion string `yaml:"DUCKLAKE_VERSION"`
 	// Encrypted attaches the catalog ENCRYPTED. Only a writable (non-read-only)
 	// attach carries it — the materializer — so it can't create a plaintext
 	// catalog din would reject, while read-only query pods read the existing

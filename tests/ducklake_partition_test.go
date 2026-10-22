@@ -102,6 +102,24 @@ func explainPlan(t *testing.T, ctx context.Context, db *sql.DB, stmt string, arg
 	return plan.String()
 }
 
+// scanOperatorNames are the scan operator titles EXPLAIN renders: upper snake
+// case before DuckDB 2.0 (DUCKLAKE_SCAN), title case from 2.0 (Ducklake Scan).
+var scanOperatorNames = []string{
+	"DUCKLAKE_SCAN", "SEQ_SCAN", "TABLE_SCAN",
+	"Ducklake Scan", "Seq Scan", "Table Scan",
+}
+
+// lastScanIndex returns the offset of the deepest scan operator in plan, or -1.
+func lastScanIndex(plan string) int {
+	idx := -1
+	for _, name := range scanOperatorNames {
+		if i := strings.LastIndex(plan, name); i > idx {
+			idx = i
+		}
+	}
+	return idx
+}
+
 // aboveScan returns the plan text ABOVE the deepest scan operator. A predicate
 // that reaches the scan is either consumed by DuckLake partition pruning
 // (vanishing from the plan entirely) or listed in the scan's Filters — either
@@ -109,12 +127,7 @@ func explainPlan(t *testing.T, ctx context.Context, db *sql.DB, stmt string, arg
 // the dedup window (the B1 regression) does.
 func aboveScan(t *testing.T, plan string) string {
 	t.Helper()
-	idx := strings.LastIndex(plan, "DUCKLAKE_SCAN")
-	for _, alt := range []string{"SEQ_SCAN", "TABLE_SCAN"} {
-		if i := strings.LastIndex(plan, alt); i > idx {
-			idx = i
-		}
-	}
+	idx := lastScanIndex(plan)
 	require.GreaterOrEqual(t, idx, 0, "no scan operator in plan:\n%s", plan)
 	return plan[:idx]
 }
@@ -125,12 +138,7 @@ func aboveScan(t *testing.T, plan string) string {
 // which only happens for partition columns).
 func atScanAndBelow(t *testing.T, plan string) string {
 	t.Helper()
-	idx := strings.LastIndex(plan, "DUCKLAKE_SCAN")
-	for _, alt := range []string{"SEQ_SCAN", "TABLE_SCAN"} {
-		if i := strings.LastIndex(plan, alt); i > idx {
-			idx = i
-		}
-	}
+	idx := lastScanIndex(plan)
 	require.GreaterOrEqual(t, idx, 0, "no scan operator in plan:\n%s", plan)
 	return plan[idx:]
 }
