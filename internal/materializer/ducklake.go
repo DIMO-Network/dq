@@ -398,21 +398,32 @@ func (m *DuckLakeMaterializer) columnExists(ctx context.Context, table, column s
 	return n > 0, nil
 }
 
+// decodedPartitionSpec and decodedSortSpec are the layout of the decoded base
+// tables (lake.signals, lake.events); see setupStatements.
+const (
+	decodedPartitionSpec = `(subject_bucket, year("timestamp"), month("timestamp"), day("timestamp"))`
+	decodedSortSpec      = `(subject, "timestamp")`
+)
+
 // setupStatements builds the ordered ensureSchema DDL given which of the three
 // decoded tables already exist (keyed "signals"/"events"/"signals_latest").
 //
-// The SET PARTITIONED BY / SET SORTED BY ALTERs are emitted ONLY for a table that
-// does not yet exist. They are NOT idempotent: DuckLake bumps the catalog
-// schema_version on every ALTER even when the spec is unchanged, and it names the
-// inline-data tables ducklake_inlined_data_<table_id>_<schema_version> — so each
-// re-ALTER renames them out from under din's maintenance, whose inline_flush then
-// drops the superseded ones; an in-flight inline read hits the missing table and
-// the ducklake extension throws a FATAL that invalidates the session and crash-
-// loops the materializer. Gating the ALTERs on first creation is what makes a
-// reboot mint zero new snapshots. Partitioning is catalog metadata that only
-// affects data written after it is set, so a genuinely fresh catalog must still
-// configure it on creation — which this does. "timestamp" is quoted because it is
-// a DuckDB keyword.
+// The partition/sort layout is declared IN the CREATE (DuckLake 1.1 DDL), so a
+// table and its layout commit as one statement. With the old CREATE-then-ALTER
+// pair, each statement auto-committed on its own: an ALTER that failed after the
+// CREATE landed (catalog blip, pod killed) left a table the existence gate below
+// would never lay out — every later file unpartitioned and unsorted, silently.
+//
+// Layout is emitted ONLY for a table that does not yet exist, and no SET
+// PARTITIONED BY / SET SORTED BY ALTER is ever re-issued. Those ALTERs are NOT
+// idempotent: DuckLake bumps the catalog schema_version on every ALTER even when
+// the spec is unchanged (still true on DuckDB 2.0), and it names the inline-data
+// tables ducklake_inlined_data_<table_id>_<schema_version> — so each re-ALTER
+// renames them out from under din's maintenance, whose inline_flush then drops the
+// superseded ones; an in-flight inline read hits the missing table and the
+// ducklake extension throws a FATAL that invalidates the session and crash-loops
+// the materializer. Gating layout on first creation is what makes a reboot mint
+// zero new snapshots. "timestamp" is quoted because it is a DuckDB keyword.
 //
 // The time partition is the year/month/day TRIPLE: DuckLake's year()/month()/
 // day() are component extractions (day(x) alone is day-of-month 1-31, NOT a
@@ -430,18 +441,14 @@ func (m *DuckLakeMaterializer) columnExists(ctx context.Context, table, column s
 func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 	var stmts []string
 	if !exists["signals"] {
-		stmts = append(stmts,
-			fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.signals AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(sigTmp)),
-			`ALTER TABLE lake.signals SET PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp"))`,
-			`ALTER TABLE lake.signals SET SORTED BY (subject, "timestamp")`,
-		)
+		stmts = append(stmts, fmt.Sprintf(
+			"CREATE TABLE IF NOT EXISTS lake.signals PARTITIONED BY %s SORTED BY %s AS SELECT * FROM read_parquet(%s) LIMIT 0",
+			decodedPartitionSpec, decodedSortSpec, sqlLit(sigTmp)))
 	}
 	if !exists["events"] {
-		stmts = append(stmts,
-			fmt.Sprintf("CREATE TABLE IF NOT EXISTS lake.events AS SELECT * FROM read_parquet(%s) LIMIT 0", sqlLit(evTmp)),
-			`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp"))`,
-			`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
-		)
+		stmts = append(stmts, fmt.Sprintf(
+			"CREATE TABLE IF NOT EXISTS lake.events PARTITIONED BY %s SORTED BY %s AS SELECT * FROM read_parquet(%s) LIMIT 0",
+			decodedPartitionSpec, decodedSortSpec, sqlLit(evTmp)))
 	}
 	if !exists["signals_latest"] {
 		// signals_latest is the per-(subject,name) latest+summary rollup (CHD-3):
@@ -462,8 +469,8 @@ func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 				value_number DOUBLE, value_string VARCHAR,
 				loc_lat DOUBLE, loc_lon DOUBLE, loc_hdop DOUBLE, loc_heading DOUBLE,
 				loc_ts TIMESTAMP WITH TIME ZONE,
-				count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
-			`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
+				count BIGINT, first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)
+			PARTITIONED BY (subject_bucket)`,
 		)
 	} else if !exists["signals_latest.loc_ts"] {
 		// Migrate catalogs whose rollup predates loc_ts (H9). Emitted only
@@ -482,15 +489,15 @@ func setupStatements(exists map[string]bool, sigTmp, evTmp string) []string {
 		// recomputes touched subjects from the (subject,timestamp,name,source)-deduped
 		// base (LakeEventsDeduped's key), so it is a materialized view of
 		// GetEventSummaries — parity by construction. Partitioned by subject_bucket
-		// like the base. Same first-creation ALTER gating as the other decoded tables
-		// (see the doc above): the ALTER is emitted only on create, so a reboot mints
-		// zero schema changes.
+		// like the base. Same first-creation layout gating as the other decoded tables
+		// (see the doc above): the layout is declared only on create, so a reboot
+		// mints zero schema changes.
 		stmts = append(stmts,
 			`CREATE TABLE IF NOT EXISTS lake.events_latest (
 				subject VARCHAR, subject_bucket INTEGER, name VARCHAR,
 				count BIGINT,
-				first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)`,
-			`ALTER TABLE lake.events_latest SET PARTITIONED BY (subject_bucket)`,
+				first_seen TIMESTAMP WITH TIME ZONE, last_seen TIMESTAMP WITH TIME ZONE)
+			PARTITIONED BY (subject_bucket)`,
 		)
 	}
 	// The remaining statements are genuinely idempotent (CREATE IF NOT EXISTS /

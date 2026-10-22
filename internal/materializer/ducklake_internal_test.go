@@ -21,22 +21,29 @@ import (
 func TestSetupStatements_LayoutOnlyOnFirstCreation(t *testing.T) {
 	const sigTmp, evTmp = "/tmp/sig.parquet", "/tmp/ev.parquet"
 
-	// Fresh catalog: every decoded table is created AND laid out.
-	fresh := strings.Join(setupStatements(map[string]bool{}, sigTmp, evTmp), "\n")
+	// Fresh catalog: every decoded table is created AND laid out, in ONE statement
+	// per table, so a table can never commit without its layout.
+	freshStmts := setupStatements(map[string]bool{}, sigTmp, evTmp)
+	fresh := strings.Join(freshStmts, "\n")
 	for _, want := range []string{
-		`ALTER TABLE lake.signals SET PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp"))`,
-		`ALTER TABLE lake.signals SET SORTED BY (subject, "timestamp")`,
-		`ALTER TABLE lake.events SET PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp"))`,
-		`ALTER TABLE lake.events SET SORTED BY (subject, "timestamp")`,
-		`ALTER TABLE lake.signals_latest SET PARTITIONED BY (subject_bucket)`,
-		`ALTER TABLE lake.events_latest SET PARTITIONED BY (subject_bucket)`,
-		"CREATE TABLE IF NOT EXISTS lake.signals ",
-		"CREATE TABLE IF NOT EXISTS lake.events ",
+		`CREATE TABLE IF NOT EXISTS lake.signals PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp")) SORTED BY (subject, "timestamp") AS SELECT`,
+		`CREATE TABLE IF NOT EXISTS lake.events PARTITIONED BY (subject_bucket, year("timestamp"), month("timestamp"), day("timestamp")) SORTED BY (subject, "timestamp") AS SELECT`,
 		"CREATE TABLE IF NOT EXISTS lake.signals_latest ",
 		"CREATE TABLE IF NOT EXISTS lake.events_latest ",
 	} {
 		if !strings.Contains(fresh, want) {
 			t.Fatalf("fresh catalog setup missing %q\ngot:\n%s", want, fresh)
+		}
+	}
+	for _, s := range freshStmts {
+		if strings.Contains(s, "SET PARTITIONED BY") || strings.Contains(s, "SET SORTED BY") {
+			t.Fatalf("layout must be declared in the CREATE, not a separate ALTER; got: %s", s)
+		}
+		if strings.Contains(s, "CREATE TABLE IF NOT EXISTS lake.signals_latest") ||
+			strings.Contains(s, "CREATE TABLE IF NOT EXISTS lake.events_latest") {
+			if !strings.Contains(s, "PARTITIONED BY (subject_bucket)") {
+				t.Fatalf("rollup CREATE must declare its partitioning; got: %s", s)
+			}
 		}
 	}
 
@@ -73,12 +80,12 @@ func TestSetupStatements_LayoutOnlyOnFirstCreation(t *testing.T) {
 
 	// A partial catalog (only signals created) lays out exactly the missing tables.
 	partial := strings.Join(setupStatements(map[string]bool{"signals": true}, sigTmp, evTmp), "\n")
-	if strings.Contains(partial, "ALTER TABLE lake.signals ") {
-		t.Fatalf("existing signals must not be re-ALTERed\ngot:\n%s", partial)
+	if strings.Contains(partial, "lake.signals ") {
+		t.Fatalf("existing signals must not be re-created or re-ALTERed\ngot:\n%s", partial)
 	}
 	for _, want := range []string{
-		"ALTER TABLE lake.events SET PARTITIONED BY",
-		"ALTER TABLE lake.signals_latest SET PARTITIONED BY",
+		"CREATE TABLE IF NOT EXISTS lake.events PARTITIONED BY",
+		"PARTITIONED BY (subject_bucket)",
 	} {
 		if !strings.Contains(partial, want) {
 			t.Fatalf("partial catalog must lay out missing table: %q\ngot:\n%s", want, partial)
