@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/DIMO-Network/cloudevent"
@@ -445,10 +446,14 @@ type decodedBatch struct {
 }
 
 // isVehicleSignalMessage mirrors dis signalconvert: only ERC-721 vehicle
-// subjects on the configured chain decode to signals. Disabled when no
-// vehicle contract is configured.
+// subjects on the configured chain decode to signals, along with did:dimo
+// vehicles, which din admits only from a source holding a write grant for
+// them. Disabled when no vehicle contract is configured.
 func (r *Runner) isVehicleSignalMessage(rawEvent *cloudevent.RawEvent) bool {
 	if r.cfg.VehicleNFTAddress == (common.Address{}) {
+		return true
+	}
+	if strings.HasPrefix(rawEvent.Subject, "did:dimo:") {
 		return true
 	}
 	did, err := cloudevent.DecodeERC721DID(rawEvent.Subject)
