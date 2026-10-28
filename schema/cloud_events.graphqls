@@ -48,6 +48,20 @@ type CloudEventHeader {
   signature: String
   raweventid: String
   tags: [String!]!
+  """
+  The source's detached JWS over the header and data, for events a source
+  writes under a grant. Verifying it takes the event exactly as stored.
+  """
+  sourcesignature: String
+  """The producer's detached JWS, when the producer has a DID and signed."""
+  producersignature: String
+  """When din received a source's event; the grant was checked then."""
+  arrivedat: Time
+  """
+  The grant that let the source write the event. Empty when the source is
+  the vehicle's controller.
+  """
+  grant: String
 }
 
 """

@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/fetch"
@@ -39,6 +40,34 @@ func (r *cloudEventResolver) DataBase64(ctx context.Context, obj *CloudEventWrap
 		return nil, nil
 	}
 	return &obj.Raw.DataBase64, nil
+}
+
+// Sourcesignature is the resolver for the sourcesignature field.
+func (r *cloudEventHeaderResolver) Sourcesignature(ctx context.Context, obj *cloudevent.CloudEventHeader) (*string, error) {
+	return extraString(obj, sourceSignatureAttr), nil
+}
+
+// Producersignature is the resolver for the producersignature field.
+func (r *cloudEventHeaderResolver) Producersignature(ctx context.Context, obj *cloudevent.CloudEventHeader) (*string, error) {
+	return extraString(obj, producerSignatureAttr), nil
+}
+
+// Arrivedat is the resolver for the arrivedat field.
+func (r *cloudEventHeaderResolver) Arrivedat(ctx context.Context, obj *cloudevent.CloudEventHeader) (*time.Time, error) {
+	s := extraString(obj, arrivedAtAttr)
+	if s == nil {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, *s)
+	if err != nil {
+		return nil, nil
+	}
+	return &t, nil
+}
+
+// Grant is the resolver for the grant field.
+func (r *cloudEventHeaderResolver) Grant(ctx context.Context, obj *cloudevent.CloudEventHeader) (*string, error) {
+	return extraString(obj, grantAttr), nil
 }
 
 // LatestCloudEvent is the resolver for the latestCloudEvent field.
@@ -151,4 +180,8 @@ func (r *queryResolver) AvailableCloudEventTypes(ctx context.Context, subject st
 // CloudEvent returns CloudEventResolver implementation.
 func (r *Resolver) CloudEvent() CloudEventResolver { return &cloudEventResolver{r} }
 
+// CloudEventHeader returns CloudEventHeaderResolver implementation.
+func (r *Resolver) CloudEventHeader() CloudEventHeaderResolver { return &cloudEventHeaderResolver{r} }
+
 type cloudEventResolver struct{ *Resolver }
+type cloudEventHeaderResolver struct{ *Resolver }

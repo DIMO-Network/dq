@@ -636,8 +636,9 @@ type SignalDataSummary struct {
 
 // SignalFilter holds the filter parameters for the signal querys.
 type SignalFilter struct {
-	// Filter signals by source using an ethr DID.
-	// Example: "did:ethr:137:0xcd445F4c6bDAD32b68a2939b912150Fe3C88803E"
+	// Filter signals by source DID: a connection's ethr DID, such as
+	// "did:ethr:137:0xcd445F4c6bDAD32b68a2939b912150Fe3C88803E", or the DID of a
+	// source that writes under a grant, such as "did:web:relay.example".
 	Source *string `json:"source,omitempty"`
 }
 
