@@ -9,6 +9,29 @@ import (
 	"github.com/DIMO-Network/cloudevent"
 )
 
+// Extensions on events a source writes under a grant (did-directory's
+// docs/2026-10-24-sources.md). The source signs, and so may the producer;
+// din adds when the event arrived and which grant let it in.
+const (
+	sourceSignatureAttr   = "sourcesignature"
+	producerSignatureAttr = "producersignature"
+	arrivedAtAttr         = "arrivedat"
+	grantAttr             = "grant"
+)
+
+// extraString returns the string extension name, or nil when the event has
+// none. An empty string is kept: an empty grant means the controller wrote.
+func extraString(hdr *cloudevent.CloudEventHeader, name string) *string {
+	if hdr == nil {
+		return nil
+	}
+	s, ok := hdr.Extras[name].(string)
+	if !ok {
+		return nil
+	}
+	return &s
+}
+
 // CloudEventWrapper holds a pointer to a RawEvent so resolvers can expose
 // header, data, dataBase64, and dataUrl without copying the underlying event.
 type CloudEventWrapper struct {

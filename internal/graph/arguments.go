@@ -179,3 +179,12 @@ func isSignal(field graphql.CollectedField) bool {
 func hasAggregations(field graphql.CollectedField) bool {
 	return field.Definition.Directives.ForName("hasAggregation") != nil
 }
+
+// storedLocationName maps a name given to the location field to the name its rows
+// are stored under. Only the derived approximate location differs.
+func storedLocationName(name string) string {
+	if name == model.ApproximateCoordinatesField {
+		return vss.FieldCurrentLocationCoordinates
+	}
+	return name
+}

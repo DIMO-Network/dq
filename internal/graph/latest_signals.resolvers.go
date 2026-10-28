@@ -10,7 +10,6 @@ import (
 
 	"github.com/DIMO-Network/dq/internal/graph/model"
 	"github.com/DIMO-Network/dq/internal/repositories"
-	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
 // Number is the resolver for the number field.
@@ -74,12 +73,3 @@ func (r *queryResolver) LatestSignals(ctx context.Context, subject string, filte
 func (r *Resolver) LatestSignals() LatestSignalsResolver { return &latestSignalsResolver{r} }
 
 type latestSignalsResolver struct{ *Resolver }
-
-// storedLocationName maps a name given to the location field to the name its rows
-// are stored under. Only the derived approximate location differs.
-func storedLocationName(name string) string {
-	if name == model.ApproximateCoordinatesField {
-		return vss.FieldCurrentLocationCoordinates
-	}
-	return name
-}
