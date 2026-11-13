@@ -158,6 +158,64 @@ func (r *Repository) GetSignalLatest(ctx context.Context, latestArgs *model.Late
 	return coll, nil
 }
 
+// GetLatestSignalsByName returns the latest rows for the names in latestArgs, keyed
+// by name. Unlike GetSignalLatest it does not need the names to be defined signals.
+func (r *Repository) GetLatestSignalsByName(ctx context.Context, latestArgs *model.LatestSignalsArgs) (*model.LatestSignals, error) {
+	if err := validateLatestSigArgs(latestArgs); err != nil {
+		return nil, errorhandler.NewBadRequestError(ctx, err)
+	}
+	out := &model.LatestSignals{
+		Subject:   latestArgs.Subject,
+		Scalars:   make(map[string]*vss.Signal, len(latestArgs.SignalNames)),
+		Locations: make(map[string]*vss.Signal, len(latestArgs.LocationSignalNames)),
+	}
+	// The backend returns one row per requested name with nothing saying which of
+	// the two name sets asked for it, so a name in both sets is ambiguous. That
+	// only happens when one signal is selected as both a scalar and a location;
+	// fetch the sets separately then.
+	fetches := []*model.LatestSignalsArgs{latestArgs}
+	if namesOverlap(latestArgs.SignalNames, latestArgs.LocationSignalNames) {
+		scalars, locations := *latestArgs, *latestArgs
+		scalars.LocationSignalNames = nil
+		locations.SignalNames = nil
+		locations.IncludeLastSeen = false
+		fetches = []*model.LatestSignalsArgs{&scalars, &locations}
+	}
+	for _, args := range fetches {
+		signals, err := r.query.GetLatestSignals(ctx, args.Subject, args)
+		if err != nil {
+			return nil, handleDBError(ctx, err)
+		}
+		for _, signal := range signals {
+			name := signal.Data.Name
+			if name == model.LastSeenField {
+				if !signal.Data.Timestamp.Equal(unixEpoch) {
+					out.LastSeen = &signal.Data.Timestamp
+				}
+				continue
+			}
+			if _, ok := args.LocationSignalNames[name]; !ok {
+				out.Scalars[name] = signal
+				continue
+			}
+			// A name with no nonzero fix still comes back, as a (0, 0) row.
+			if loc := signal.Data.ValueLocation; loc.Latitude != 0 || loc.Longitude != 0 {
+				out.Locations[name] = signal
+			}
+		}
+	}
+	return out, nil
+}
+
+func namesOverlap(a, b map[string]struct{}) bool {
+	for name := range a {
+		if _, ok := b[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // GetAvailableSignals returns the available signals for the given DID and filter.
 func (r *Repository) GetAvailableSignals(ctx context.Context, subject string, filter *model.SignalFilter) ([]string, error) {
 	allSignals, err := r.query.GetAvailableSignals(ctx, subject, filter)

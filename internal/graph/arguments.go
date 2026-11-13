@@ -7,6 +7,7 @@ import (
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/DIMO-Network/dq/internal/graph/model"
+	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/model-garage/pkg/vss"
 )
 
@@ -108,6 +109,50 @@ func latestArgsFromContext(ctx context.Context, did string, filter *model.Signal
 			latestArgs.LocationSignalNames[field.Name] = struct{}{}
 		} else {
 			latestArgs.SignalNames[field.Name] = struct{}{}
+		}
+	}
+	return &latestArgs, nil
+}
+
+// Field names of the LatestSignals type that select a signal by name.
+const (
+	latestNumberField   = "number"
+	latestStringField   = "string"
+	latestLocationField = "location"
+)
+
+// latestByNameArgsFromContext creates latest signals arguments from the number,
+// string and location selections of a latestSignals query, so that every selected
+// name is fetched at once. Names the caller may not read are left out; their field
+// resolvers report the error.
+func latestByNameArgsFromContext(ctx context.Context, repo *repositories.Repository, did string, filter *model.SignalFilter) (*model.LatestSignalsArgs, error) {
+	latestArgs := model.LatestSignalsArgs{
+		SignalArgs: model.SignalArgs{
+			Subject: did,
+			Filter:  filter,
+		},
+		SignalNames:         make(map[string]struct{}),
+		LocationSignalNames: make(map[string]struct{}),
+	}
+	parentCtx := graphql.GetFieldContext(ctx)
+	for _, field := range graphql.CollectFieldsCtx(ctx, nil) {
+		switch field.Name {
+		case model.LastSeenField:
+			latestArgs.IncludeLastSeen = true
+		case latestNumberField, latestStringField, latestLocationField:
+			child, err := parentCtx.Child(ctx, field)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get child field: %w", err)
+			}
+			name, _ := child.Args["name"].(string)
+			if !canReadSignal(ctx, repo, did, name) {
+				continue
+			}
+			if field.Name == latestLocationField {
+				latestArgs.LocationSignalNames[storedLocationName(name)] = struct{}{}
+			} else {
+				latestArgs.SignalNames[name] = struct{}{}
+			}
 		}
 	}
 	return &latestArgs, nil
