@@ -1,0 +1,55 @@
+extend type Query {
+  """
+  latestSignals returns the latest value of the signals selected by name.
+
+  Signals are selected with the number, string and location fields, each taking the
+  signal name as an argument, so every selection needs its own alias:
+
+      latestSignals(subject: "did:...") {
+        lastSeen
+        speed: number(name: "speed") { timestamp value }
+        gear: string(name: "powertrainTransmissionCurrentGear") { timestamp value }
+      }
+
+  Names are not validated against a signal catalog, and the accessor decides which
+  stored value is returned, not the signal's declared type.
+  """
+  latestSignals(subject: String!, filter: SignalFilter): LatestSignals
+    @requiresVehicleToken
+}
+
+"""
+The latest values of a vehicle's signals, selected by name.
+"""
+type LatestSignals {
+  """
+  The last time any signal was seen matching the filter.
+  """
+  lastSeen: Time
+
+  """
+  The latest numeric value stored for the named signal, or null if the signal has no data.
+  Signals that are not numeric report 0.
+  Required Privileges: those of the named signal. Names with no definition require
+  both VEHICLE_NON_LOCATION_DATA and VEHICLE_ALL_TIME_LOCATION.
+  """
+  number(name: String!): SignalFloat @goField(forceResolver: true)
+
+  """
+  The latest string value stored for the named signal, or null if the signal has no data.
+  Signals that are not strings report "".
+  Required Privileges: those of the named signal. Names with no definition require
+  both VEHICLE_NON_LOCATION_DATA and VEHICLE_ALL_TIME_LOCATION.
+  """
+  string(name: String!): SignalString @goField(forceResolver: true)
+
+  """
+  The latest location fix stored for the named signal, or null if the signal has no
+  fix. (0, 0) fixes are ignored. currentLocationApproximateCoordinates is accepted
+  and returns the center of the H3 resolution 6 cell containing the latest
+  currentLocationCoordinates fix.
+  Required Privileges: those of the named signal. Names with no definition require
+  both VEHICLE_NON_LOCATION_DATA and VEHICLE_ALL_TIME_LOCATION.
+  """
+  location(name: String!): SignalLocation @goField(forceResolver: true)
+}
