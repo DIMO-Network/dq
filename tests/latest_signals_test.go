@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/99designs/gqlgen/client"
 	"github.com/99designs/gqlgen/graphql"
 	gqlhandler "github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/handler/transport"
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
+	"github.com/DIMO-Network/dq/internal/coverage"
 	"github.com/DIMO-Network/dq/internal/graph"
 	"github.com/DIMO-Network/dq/internal/repositories"
 	"github.com/DIMO-Network/dq/internal/service/duck"
@@ -18,10 +20,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newLatestSignalsClient is newGraphQLClient with token claims carrying perms in
-// the request context: latestSignals authorizes each name in its resolvers, not
-// through schema directives, so the pass-through directives do not cover it.
-func newLatestSignalsClient(t *testing.T, svc *duck.Service, perms ...string) *client.Client {
+// newLatestSignalsClient is newGraphQLClient with a token in the request context
+// that holds abilities for ruptelaVehicle with no windows: latestSignals
+// authorizes each name in its resolvers, not through schema directives, so the
+// pass-through directives do not cover it.
+func newLatestSignalsClient(t *testing.T, svc *duck.Service, abilities ...string) *client.Client {
+	t.Helper()
+	return newWindowedLatestSignalsClient(t, svc, nil, abilities...)
+}
+
+// newWindowedLatestSignalsClient is newLatestSignalsClient with the abilities
+// held only for windows. The directives are pass-through here, so it also puts
+// the windows in the context the way @requiresVehicleToken does.
+func newWindowedLatestSignalsClient(t *testing.T, svc *duck.Service, windows tokenclaims.Windows, abilities ...string) *client.Client {
 	t.Helper()
 	repo, err := repositories.NewRepository(repositories.ComposeBackend(duck.NewLakeQueries(svc), nil))
 	require.NoError(t, err)
@@ -37,9 +48,14 @@ func newLatestSignalsClient(t *testing.T, svc *duck.Service, perms ...string) *c
 	srv := gqlhandler.New(graph.NewExecutableSchema(cfg))
 	srv.AddTransport(transport.POST{})
 	srv.AroundOperations(func(ctx context.Context, next graphql.OperationHandler) graphql.ResponseHandler {
-		tok := &tokenclaims.Token{}
-		tok.Permissions = perms
-		return next(context.WithValue(ctx, graph.ClaimsContextKey{}, tok))
+		tok := &tokenclaims.Token{Grants: []tokenclaims.Grant{
+			{Subject: ruptelaVehicle, Abilities: abilities, Windows: windows},
+		}}
+		ctx = context.WithValue(ctx, graph.ClaimsContextKey{}, tok)
+		if windows != nil {
+			ctx = coverage.With(ctx, windows)
+		}
+		return next(ctx)
 	})
 	return client.New(srv)
 }
@@ -90,7 +106,7 @@ func postLatest(t *testing.T, gql *client.Client, query, root string) (map[strin
 func TestLatestSignals_MatchesSignalsLatest(t *testing.T) {
 	svc := materializeRuptela(t)
 	gql := newLatestSignalsClient(t, svc,
-		tokenclaims.PermissionGetNonLocationHistory, tokenclaims.PermissionGetLocationHistory)
+		tokenclaims.AbilityTelemetryRead, tokenclaims.AbilityLocationPrecise)
 
 	want, errs := postLatest(t, gql, fmt.Sprintf(`{
 		signalsLatest(subject: %q) {
@@ -127,7 +143,7 @@ func TestLatestSignals_MatchesSignalsLatest(t *testing.T) {
 func TestLatestSignals_ProjectionAndMissingNames(t *testing.T) {
 	svc := materializeRuptela(t)
 	gql := newLatestSignalsClient(t, svc,
-		tokenclaims.PermissionGetNonLocationHistory, tokenclaims.PermissionGetLocationHistory)
+		tokenclaims.AbilityTelemetryRead, tokenclaims.AbilityLocationPrecise)
 
 	got, errs := postLatest(t, gql, fmt.Sprintf(`{
 		latestSignals(subject: %q) {
@@ -177,33 +193,33 @@ func TestLatestSignals_Privileges(t *testing.T) {
 	}`, ruptelaVehicle)
 
 	for _, tc := range []struct {
-		name    string
-		perms   []string
-		denied  []string
-		present []string
+		name      string
+		abilities []string
+		denied    []string
+		present   []string
 	}{
 		{
-			name:    "non-location only",
-			perms:   []string{tokenclaims.PermissionGetNonLocationHistory},
-			denied:  []string{"altitude", "coords", "approx", "unknown"},
-			present: []string{"lastSeen", "speed"},
+			name:      "non-location only",
+			abilities: []string{tokenclaims.AbilityTelemetryRead},
+			denied:    []string{"altitude", "coords", "approx", "unknown"},
+			present:   []string{"lastSeen", "speed"},
 		},
 		{
-			name:    "location only",
-			perms:   []string{tokenclaims.PermissionGetLocationHistory},
-			denied:  []string{"speed", "unknown"},
-			present: []string{"lastSeen", "altitude", "coords", "approx"},
+			name:      "location only",
+			abilities: []string{tokenclaims.AbilityLocationPrecise},
+			denied:    []string{"speed", "unknown"},
+			present:   []string{"lastSeen", "altitude", "coords", "approx"},
 		},
 		{
-			name:    "approximate location only",
-			perms:   []string{tokenclaims.PermissionGetApproximateLocation},
-			denied:  []string{"speed", "altitude", "coords", "unknown"},
-			present: []string{"lastSeen", "approx"},
+			name:      "approximate location only",
+			abilities: []string{tokenclaims.AbilityLocationApproximate},
+			denied:    []string{"speed", "altitude", "coords", "unknown"},
+			present:   []string{"lastSeen", "approx"},
 		},
 		{
-			name:    "both history permissions",
-			perms:   []string{tokenclaims.PermissionGetNonLocationHistory, tokenclaims.PermissionGetLocationHistory},
-			present: []string{"lastSeen", "speed", "altitude", "coords", "approx"},
+			name:      "both history permissions",
+			abilities: []string{tokenclaims.AbilityTelemetryRead, tokenclaims.AbilityLocationPrecise},
+			present:   []string{"lastSeen", "speed", "altitude", "coords", "approx"},
 		},
 		{
 			name:    "no permissions",
@@ -212,7 +228,7 @@ func TestLatestSignals_Privileges(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, errs := postLatest(t, newLatestSignalsClient(t, svc, tc.perms...), query, "latestSignals")
+			got, errs := postLatest(t, newLatestSignalsClient(t, svc, tc.abilities...), query, "latestSignals")
 			assert.ElementsMatch(t, tc.denied, errs)
 			for _, alias := range tc.denied {
 				assert.Nil(t, got[alias], alias)
@@ -222,4 +238,53 @@ func TestLatestSignals_Privileges(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The token's windows hold latestSignals like every other read: abilities held
+// only for a window that has closed read nothing, and a window that is open now
+// still hides values timestamped before it.
+func TestLatestSignals_Windows(t *testing.T) {
+	svc := materializeRuptela(t)
+	query := fmt.Sprintf(`{
+		latestSignals(subject: %q) {
+			lastSeen
+			speed: number(name: "speed") { timestamp value }
+			coords: location(name: "currentLocationCoordinates") { timestamp }
+		}
+	}`, ruptelaVehicle)
+	abilities := []string{tokenclaims.AbilityTelemetryRead, tokenclaims.AbilityLocationPrecise}
+	now := time.Now()
+
+	t.Run("window containing the data and now", func(t *testing.T) {
+		ws := window(time.Unix(0, 0), now.Add(time.Hour))
+		got, errs := postLatest(t, newWindowedLatestSignalsClient(t, svc, ws, abilities...), query, "latestSignals")
+		assert.Empty(t, errs)
+		require.NotNil(t, got["lastSeen"])
+		assert.NotEmpty(t, got["lastSeen"].Timestamp)
+		assert.NotNil(t, got["speed"])
+		assert.NotNil(t, got["coords"])
+	})
+
+	t.Run("closed window", func(t *testing.T) {
+		ws := window(time.Unix(0, 0), now.Add(-time.Minute))
+		got, errs := postLatest(t, newWindowedLatestSignalsClient(t, svc, ws, abilities...), query, "latestSignals")
+		assert.ElementsMatch(t, []string{"speed", "coords"}, errs)
+		assert.Nil(t, got["speed"])
+		assert.Nil(t, got["coords"])
+	})
+
+	t.Run("open window that starts after the data", func(t *testing.T) {
+		ws := window(now.Add(-time.Minute), now.Add(time.Hour))
+		got, errs := postLatest(t, newWindowedLatestSignalsClient(t, svc, ws, abilities...), query, "latestSignals")
+		assert.Empty(t, errs)
+		// postLatest decodes a null lastSeen as an empty timestamp.
+		require.NotNil(t, got["lastSeen"])
+		assert.Empty(t, got["lastSeen"].Timestamp)
+		assert.Nil(t, got["speed"])
+		assert.Nil(t, got["coords"])
+	})
+}
+
+func window(start, end time.Time) tokenclaims.Windows {
+	return tokenclaims.Windows{{Start: &start, End: &end}}
 }

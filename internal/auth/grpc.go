@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"slices"
 	"strings"
 
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
@@ -15,22 +14,20 @@ import (
 )
 
 // NewGRPCFetchAuthInterceptor builds a unary interceptor that authenticates the
-// fetch gRPC service with a DIMO-issued JWT (the same issuer / JWKS / dimo.zone
-// audience as the HTTP surface) and requires raw-data permission. The fetch RPCs
-// return any subject's cloud events and blob payloads with no other check, so
-// without this the port is readable by any in-cluster caller.
+// fetch gRPC service with a dauth access token (the same issuer, JWKS and
+// audience as the HTTP surface) holding raw:read for at least one subject; the
+// RPCs then scope each read to the token's subjects. The fetch RPCs return any
+// subject's cloud events and blob payloads with no other check, so without
+// this the port is readable by any in-cluster caller.
 //
 // require governs rollout: an *invalid* token is always rejected; a *missing*
-// token is rejected only when require is true (so existing callers keep working
-// while they are migrated to send a token). When require is false a startup
-// warning is logged so the still-open state is visible.
+// token is rejected only when require is true.
 //
-// NOTE: this authenticates the caller and checks raw-data permission, but does
-// not yet scope the read to the token's own subject — the per-subject identity
-// linking the HTTP resolver performs needs the IdentityClient threaded into the
-// fetch server. Until that lands, keep the NetworkPolicy allowlist in place too.
-func NewGRPCFetchAuthInterceptor(issuer, jwksURI string, require bool, log *zerolog.Logger) (grpc.UnaryServerInterceptor, error) {
-	jwtValidator, err := newValidator(issuer, jwksURI)
+// The proof-of-possession check the HTTP surface makes (DPoP) is not made
+// here: the port is in-cluster behind the NetworkPolicy, which stays the
+// compensating control.
+func NewGRPCFetchAuthInterceptor(issuer, jwksURI, audience string, require bool, log *zerolog.Logger) (grpc.UnaryServerInterceptor, error) {
+	jwtValidator, err := newValidator(issuer, jwksURI, audience)
 	if err != nil {
 		return nil, err
 	}
@@ -58,15 +55,15 @@ func NewGRPCFetchAuthInterceptor(issuer, jwksURI string, require bool, log *zero
 		if !ok {
 			return nil, status.Error(codes.Unauthenticated, "invalid token claims")
 		}
-		if !grpcHasRawDataAccess(dq.Permissions) {
-			return nil, status.Error(codes.PermissionDenied, "token lacks raw-data permission")
+		if !grpcHasRawDataAccess(&dq.Token) {
+			return nil, status.Error(codes.PermissionDenied, "token lacks raw:read")
 		}
 		return handler(context.WithValue(ctx, DQClaimContextKey{}, dq), req)
 	}, nil
 }
 
-// bearerFromMetadata extracts the bearer token from the gRPC authorization
-// metadata header (case-insensitive scheme); empty when absent.
+// bearerFromMetadata extracts the token from the gRPC authorization metadata
+// header under the Bearer or DPoP scheme (case-insensitive); empty when absent.
 func bearerFromMetadata(ctx context.Context) string {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -77,20 +74,21 @@ func bearerFromMetadata(ctx context.Context) string {
 		return ""
 	}
 	tok := vals[0]
-	// The auth scheme is case-insensitive (RFC 7235); strip a "bearer " prefix in
-	// any casing, otherwise treat the value as a raw token.
-	if len(tok) >= 7 && strings.EqualFold(tok[:7], "bearer ") {
-		return strings.TrimSpace(tok[7:])
+	for _, scheme := range []string{"bearer ", "dpop "} {
+		if len(tok) >= len(scheme) && strings.EqualFold(tok[:len(scheme)], scheme) {
+			return strings.TrimSpace(tok[len(scheme):])
+		}
 	}
 	return tok
 }
 
-// grpcHasRawDataAccess mirrors graph.hasRawDataAccess: a token may read raw data
-// with the explicit get-raw-data permission, or with both history permissions.
-func grpcHasRawDataAccess(perms []string) bool {
-	if slices.Contains(perms, tokenclaims.PermissionGetRawData) {
-		return true
+// grpcHasRawDataAccess reports whether the token holds raw:read for any
+// subject; the per-subject check happens on each RPC.
+func grpcHasRawDataAccess(tok *tokenclaims.Token) bool {
+	for _, s := range tok.Subjects() {
+		if _, ok := tok.Holds(s, tokenclaims.AbilityRawRead); ok {
+			return true
+		}
 	}
-	return slices.Contains(perms, tokenclaims.PermissionGetLocationHistory) &&
-		slices.Contains(perms, tokenclaims.PermissionGetNonLocationHistory)
+	return false
 }

@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
+	"github.com/DIMO-Network/dq/internal/coverage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -505,4 +507,25 @@ func TestLakeQueries_LocationsAt_MatchesLocationAt(t *testing.T) {
 	empty, err := q.LocationsAt(ctx, subject, nil)
 	require.NoError(t, err)
 	assert.Empty(t, empty)
+
+	// Under a token whose window opens at at(12), a gap-fill never reaches back past
+	// it: at(15) and at(25) would find l2 (at(10)), which is before the window, so
+	// they find nothing; at(35) finds aaa inside it; at(5) is outside the window and
+	// is not looked up at. The per-point path agrees.
+	opens := at(12)
+	windowed := coverage.With(ctx, tokenclaims.Windows{{Start: &opens}})
+	floored := []time.Time{at(15), at(25), at(35), at(5)}
+	gotW, err := q.LocationsAt(windowed, subject, floored)
+	require.NoError(t, err)
+	require.Len(t, gotW, len(floored))
+	assert.Nil(t, gotW[0])
+	assert.Nil(t, gotW[1])
+	require.NotNil(t, gotW[2])
+	assert.Equal(t, 42.0, gotW[2].Latitude)
+	assert.Nil(t, gotW[3])
+	for i, p := range floored {
+		want, err := q.LocationAt(windowed, subject, p)
+		require.NoError(t, err)
+		assert.Equalf(t, want, gotW[i], "probe %d (%s)", i, p)
+	}
 }

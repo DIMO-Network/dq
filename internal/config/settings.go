@@ -27,6 +27,13 @@ type Settings struct {
 	MaxConcurrentRequests     int    `yaml:"MAX_CONCURRENT_REQUESTS"`
 	TokenExchangeJWTKeySetURL string `yaml:"TOKEN_EXCHANGE_JWK_KEY_SET_URL"`
 	TokenExchangeIssuer       string `yaml:"TOKEN_EXCHANGE_ISSUER_URL"`
+	// TokenAudience is the aud an access token must carry to be accepted here.
+	// Empty means "dq", which is what dauth's /exchange mints by default.
+	TokenAudience string `yaml:"TOKEN_AUDIENCE"`
+	// PublicBaseURL is the origin clients address dq at (e.g.
+	// https://dq.dimo.zone), used to check the DPoP proof's htu when dq sits
+	// behind a proxy. Empty uses the request's own scheme and host.
+	PublicBaseURL string `yaml:"PUBLIC_BASE_URL"`
 	// FetchGRPCRequireJWT makes a valid DIMO JWT mandatory on the fetch gRPC port.
 	// The interceptor always rejects an *invalid* token; this flag controls
 	// whether a *missing* one is rejected too. Default false eases rollout (admit
@@ -53,8 +60,6 @@ type Settings struct {
 	// paths against the same store — only set DUCKDB_S3_ENDPOINT when the lake store
 	// differs from the blob store.
 	S3Endpoint string `yaml:"S3_ENDPOINT"`
-	// Identity API for device→vehicle DID resolution
-	IdentityAPIURL string `yaml:"IDENTITY_API_URL"`
 	// DuckLakeCatalogDSN is the shared DuckLake catalog (Postgres DSN in
 	// prod, a catalog file path for single-node). Required for the query fleet
 	// and when the DuckLake materializer is enabled.
@@ -226,6 +231,14 @@ type Settings struct {
 	VehicleNFTAddress     string `yaml:"VEHICLE_NFT_ADDRESS"`
 	AftermarketNFTAddress string `yaml:"AFTERMARKET_NFT_ADDRESS"`
 	SyntheticNFTAddress   string `yaml:"SYNTHETIC_NFT_ADDRESS"`
+}
+
+// Audience is the access token audience dq checks: TOKEN_AUDIENCE, or "dq".
+func (s *Settings) Audience() string {
+	if s.TokenAudience != "" {
+		return s.TokenAudience
+	}
+	return "dq"
 }
 
 // LakeS3Endpoint is the S3 endpoint DuckDB's httpfs uses for the DuckLake data

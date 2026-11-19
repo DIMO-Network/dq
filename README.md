@@ -4,14 +4,25 @@ This is the result of a merger of two services: [Telemetry](https://github.com/D
 
 ## Authentication
 
-This service accepts subject and permission-scoped tokens. These are generally short-lived and must be signed by a trusted issuer. The important claims beyond the standard ones are
+This service accepts the access tokens dauth's `/exchange` mints (design spec §11.1): short-lived RS256 tokens, verified against `TOKEN_EXCHANGE_JWK_KEY_SET_URL` with issuer `TOKEN_EXCHANGE_ISSUER_URL` and audience `TOKEN_AUDIENCE` (default `dq`). Beyond the standard claims a token carries
 
 ```json
 {
-  "asset": "did:erc721:137:0xbA5738a18d83D41847dfFbDC6101d37C69c9B0cF:42",
-  "permissions": ["privilege:GetNonLocationHistory", "privilege:GetRawData"]
+  "cnf": { "jkt": "<thumbprint of the caller's DPoP key>" },
+  "grants": [
+    {
+      "subject": "did:dimo:veh…",
+      "abilities": ["telemetry:read", "location:precise"],
+      "windows": [["2026-09-01T00:00:00Z", "2026-09-08T00:00:00Z"]]
+    },
+    { "subject": "did:dimo:veh…", "abilities": ["raw:read"] }
+  ]
 }
 ```
+
+Every authenticated request must also carry a `DPoP` header: an RFC 9449 proof for the request's method and URL, with `ath` over the token, signed by the key `cnf.jkt` names (`PUBLIC_BASE_URL` is the origin the proof's `htu` is checked against when dq sits behind a proxy). The token may be presented as `Authorization: DPoP <token>` or `Bearer <token>`.
+
+A query's `subject` must be a grant subject, and each field's privileges (`@requiresAllOfPrivileges`, `@requiresOneOfPrivilege`) must be abilities the token holds for it. A grant's `windows` are the data timestamps its abilities may read: a query with `from`/`to` is clamped to the union of the subject's windows, a query with nothing covered is refused, and a query that straddles a gap in coverage is refused with the covered ranges named, so the caller splits it. A field's own abilities must then cover the whole clamped range; a read with no range (latest, snapshot, summary) needs the ability to cover the current time. Cloud-event reads take `raw:read` and have `after`/`before` clamped the same way. The fetch gRPC port takes the same token as a bearer without the DPoP check and scopes each read to the subjects it names.
 
 ## Migrating
 
@@ -54,6 +65,15 @@ The queries `indexes` and `latestIndex` have been removed. If a client does not 
 The service reads from a DuckLake catalog: decoded signals/events in `lake.signals`/`lake.events` and raw cloudevents in `lake.raw_events`, written by din and the materializer. DuckLake is the only backend — there is no query-backend switch.
 
 Configure the catalog with `DUCKLAKE_CATALOG_DSN` (a Postgres DSN in prod for concurrent writers, or a local catalog-file path for single-node/tests) and `DUCKLAKE_DATA_PATH` (where parquet data files live — an `s3://` prefix in prod, a local directory in tests). `BLOB_BUCKET` is the bucket the fetch path presigns/downloads externalized cloudevent payloads from.
+
+### Seeding a local catalog
+
+`cmd/dq-seed` plays din for a local run: it writes `dimo.status` events carrying a speed signal into `lake.raw_events` in din's shape and decodes them once, so dq boots over a catalog that already has signals. The catalog file has one writer, so run it before starting dq. did-directory's `scripts/demo.sh` uses it.
+
+```bash
+go run ./cmd/dq-seed -catalog /data/catalog.ducklake -data-path /data/lake \
+  -subject did:dimo:… -from 2026-09-22T17:00:00Z -every 2s
+```
 
 ### Single-node quickstart
 

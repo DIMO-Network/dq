@@ -19,6 +19,7 @@ func TestBearerFromMetadata(t *testing.T) {
 		{"Bearer scheme", metadata.Pairs("authorization", "Bearer tok123"), "tok123"},
 		{"lowercase bearer", metadata.Pairs("authorization", "bearer tok123"), "tok123"},
 		{"uppercase BEARER (case-insensitive)", metadata.Pairs("authorization", "BEARER tok123"), "tok123"},
+		{"DPoP scheme", metadata.Pairs("authorization", "DPoP tok123"), "tok123"},
 		{"raw token (no scheme)", metadata.Pairs("authorization", "tok123"), "tok123"},
 		{"unrelated header", metadata.Pairs("other", "x"), ""},
 	}
@@ -34,12 +35,11 @@ func TestBearerFromMetadata(t *testing.T) {
 }
 
 func TestGRPCHasRawDataAccess(t *testing.T) {
-	assert.True(t, grpcHasRawDataAccess([]string{tokenclaims.PermissionGetRawData}),
-		"explicit get-raw-data permission grants access")
-	assert.True(t, grpcHasRawDataAccess([]string{
-		tokenclaims.PermissionGetLocationHistory, tokenclaims.PermissionGetNonLocationHistory}),
-		"both history permissions together grant access")
-	assert.False(t, grpcHasRawDataAccess([]string{tokenclaims.PermissionGetLocationHistory}),
-		"a single history permission is insufficient")
-	assert.False(t, grpcHasRawDataAccess(nil), "no permissions → no access")
+	assert.True(t, grpcHasRawDataAccess(&tokenclaims.Token{Grants: []tokenclaims.Grant{
+		{Subject: "did:dimo:car", Abilities: []string{tokenclaims.AbilityRawRead}},
+	}}), "raw:read grants access")
+	assert.False(t, grpcHasRawDataAccess(&tokenclaims.Token{Grants: []tokenclaims.Grant{
+		{Subject: "did:dimo:car", Abilities: []string{tokenclaims.AbilityTelemetryRead, tokenclaims.AbilityLocationPrecise}},
+	}}), "history abilities alone do not")
+	assert.False(t, grpcHasRawDataAccess(&tokenclaims.Token{}), "no grants → no access")
 }
