@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strings"
 	"time"
 
-	"github.com/DIMO-Network/cloudevent"
 	"github.com/DIMO-Network/dq/internal/graph/model"
 )
 
@@ -118,10 +118,10 @@ func validateFilter(filter *model.SignalFilter) error {
 	if filter == nil {
 		return nil
 	}
-	if filter.Source != nil {
-		if _, err := cloudevent.DecodeEthrDID(*filter.Source); err != nil {
-			return ValidationError(fmt.Sprintf("source '%s' is not a valid ethr DID", *filter.Source))
-		}
+	// An ethr DID names a connection by its contract; any other DID is a
+	// source (a relay) and matches its events' source as written.
+	if filter.Source != nil && !strings.HasPrefix(*filter.Source, "did:") {
+		return ValidationError(fmt.Sprintf("source '%s' is not a DID", *filter.Source))
 	}
 	return nil
 }
