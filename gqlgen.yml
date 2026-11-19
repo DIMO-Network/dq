@@ -31,6 +31,9 @@ models:
   SignalAggregations:
     model:
       - github.com/DIMO-Network/dq/internal/graph/model.SignalAggregations
+  LatestSignals:
+    model:
+      - github.com/DIMO-Network/dq/internal/graph/model.LatestSignals
   Uint64:
     model:
       - github.com/99designs/gqlgen/graphql.Uint64

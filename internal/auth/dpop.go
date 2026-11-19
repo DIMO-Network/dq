@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/DIMO-Network/dauth/pkg/dpop"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/rs/zerolog"
 )
 

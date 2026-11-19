@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/DIMO-Network/dauth/pkg/tokenclaims"
@@ -59,4 +60,38 @@ func abilitiesFromCtx(ctx context.Context, subject string) abilityCheck {
 		ws, ok := tok.Holds(subject, ability)
 		return ok && (ws == nil || ws.Contains(now))
 	}
+}
+
+// unknownSignalAbilities is what reading a signal with no definition requires:
+// nothing says whether it carries location, so it needs both telemetry and
+// precise location.
+var unknownSignalAbilities = []string{
+	tokenclaims.AbilityTelemetryRead,
+	tokenclaims.AbilityLocationPrecise,
+}
+
+// canReadSignal reports whether the caller in ctx may read the named signal of
+// subject now. It is the one authorization decision behind latestSignals. Like
+// the other reads with no time range, an ability counts only if the token holds
+// it for the subject with no windows or with a window containing now; the
+// repository then drops any value timestamped outside the token's windows.
+func canReadSignal(ctx context.Context, repo *repositories.Repository, subject, name string) bool {
+	holds := abilitiesFromCtx(ctx, subject)
+	if _, defined := repo.RequiredPrivileges(name); defined || name == model.ApproximateCoordinatesField {
+		return hasPrivilegesForSignal(repo, name, holds)
+	}
+	for _, ability := range unknownSignalAbilities {
+		if !holds(ability) {
+			return false
+		}
+	}
+	return true
+}
+
+// requireSignalRead is canReadSignal as a field error.
+func requireSignalRead(ctx context.Context, repo *repositories.Repository, subject, name string) error {
+	if !canReadSignal(ctx, repo, subject, name) {
+		return fmt.Errorf("unauthorized: token does not hold the abilities required for signal %q", name)
+	}
+	return nil
 }

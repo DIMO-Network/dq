@@ -10,7 +10,7 @@ import (
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/handler/extension"
 	"github.com/99designs/gqlgen/graphql/handler/transport"
-	"github.com/DIMO-Network/dauth/pkg/dpop"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/DIMO-Network/dq/internal/auth"
 	"github.com/DIMO-Network/dq/internal/config"
 	"github.com/DIMO-Network/dq/internal/fetch/rpc"
