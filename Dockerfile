@@ -1,7 +1,7 @@
 # Build context is the dq repo itself (cloudevent is a published public module now —
 # no sibling checkout, no replace). Build with `make docker`, or:
 #   docker build -f Dockerfile .
-FROM golang:1.26-bookworm AS build
+FROM golang:1.27-bookworm AS build
 
 RUN useradd -u 10001 dimo
 
